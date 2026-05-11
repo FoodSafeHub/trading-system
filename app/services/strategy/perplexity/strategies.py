@@ -147,9 +147,9 @@ class EmaMeanReversionUptrend(PerplexityStrategy):
         _sym_filters = get_filters_for_symbol(self.name, symbol)
         # Per-symbol profile takes precedence; config values used as override
         # when explicitly set (non-zero in config means user manually tuned it)
-        _f_ema  = cfg["filter_ema_dist_min"] if cfg["filter_ema_dist_min"] > 0 else _sym_filters["ema_dist_min"]
-        _f_vol  = cfg["filter_vol_min"]      if cfg["filter_vol_min"]      > 0 else _sym_filters["vol_min"]
-        _f_bb   = cfg["filter_bb_pos_min"]   if cfg["filter_bb_pos_min"]   > 0 else _sym_filters["bb_pos_min"]
+        _f_ema  = cfg["filter_ema_dist_min"] if cfg["filter_ema_dist_min"] > 0 else _sym_filters.get("ema_dist_min", 0.0)
+        _f_vol  = cfg["filter_vol_min"]      if cfg["filter_vol_min"]      > 0 else _sym_filters.get("vol_min", 0.0)
+        _f_bb   = cfg["filter_bb_pos_min"]   if cfg["filter_bb_pos_min"]   > 0 else _sym_filters.get("bb_pos_min", 0.0)
 
         # EMA distance filter
         ema_dist_ok = ema_dist_pct >= _f_ema if _f_ema > 0 else True
@@ -251,6 +251,10 @@ class MaCrossoverRsi(PerplexityStrategy):
         "rsi_exit":      75,     # RSI level to trigger an exit
         "r_multiple":    2.5,
         "min_data_bars": 220,
+        # ── Data-driven filters ──
+        "filter_rsi_min":        0.0,   # require RSI >= this at crossover (0 = off)
+        "filter_vol_min":        0.0,   # require volume ratio >= this (0 = off)
+        "filter_ema_spread_min": 0.0,   # require fast/slow EMA spread >= this % (0 = off)
     }
 
     def run(self, symbol: str, df: pd.DataFrame) -> PerplexitySignal:
@@ -279,8 +283,28 @@ class MaCrossoverRsi(PerplexityStrategy):
         # Recent swing low as a stop anchor
         swing_low_10 = float(df["Low"].iloc[-11:-1].min())
 
+        # ── Data-driven filters (per-symbol profile) ──────────
+        from app.services.backtest.symbol_profiles import get_filters_for_symbol
+        _sym_filters = get_filters_for_symbol(self.name, symbol)
+        _f_rsi    = cfg["filter_rsi_min"]        if cfg["filter_rsi_min"]        > 0 else _sym_filters.get("rsi_min", 0.0)
+        _f_vol    = cfg["filter_vol_min"]         if cfg["filter_vol_min"]         > 0 else _sym_filters.get("vol_min", 0.0)
+        _f_spread = cfg["filter_ema_spread_min"]  if cfg["filter_ema_spread_min"]  > 0 else _sym_filters.get("ema_spread_min", 0.0)
+
+        rsi_filter_ok = rsi_now >= _f_rsi if _f_rsi > 0 else True
+
+        vol_ratio = 1.0
+        if "Volume" in df.columns:
+            avg_vol = float(df["Volume"].iloc[-21:-1].mean()) if len(df) > 21 else 1.0
+            cur_vol = float(df["Volume"].iloc[-1])
+            vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 1.0
+        vol_ok = vol_ratio >= _f_vol if _f_vol > 0 else True
+
+        ema_spread_pct = abs(ef_now - es_now) / es_now * 100 if es_now > 0 else 0.0
+        spread_ok = ema_spread_pct >= _f_spread if _f_spread > 0 else True
+
         # ── BUY ──────────────────────────────────────────────
-        if bullish_cross and cfg["rsi_low"] <= rsi_now <= cfg["rsi_high"]:
+        if bullish_cross and cfg["rsi_low"] <= rsi_now <= cfg["rsi_high"] \
+                and rsi_filter_ok and vol_ok and spread_ok:
             stop   = min(swing_low_10, es_now * 0.995)
             risk   = c_now - stop
             if risk < atr_v * 0.2:
@@ -348,6 +372,10 @@ class BreakoutConsolidation(PerplexityStrategy):
         "rsi_exit":            75,
         "stop_below_range":    True,  # True = stop below range_high; False = below range_low
         "min_data_bars":       220,
+        # ── Data-driven filters ──
+        "filter_vol_min":       0.0,   # require volume ratio >= this (0 = off)
+        "filter_rsi_min":       0.0,   # require RSI >= this at breakout (0 = off)
+        "filter_range_atr_max": 0.0,   # require range/ATR <= this (0 = off, tighter consolidation)
     }
 
     def run(self, symbol: str, df: pd.DataFrame) -> PerplexitySignal:
@@ -385,14 +413,29 @@ class BreakoutConsolidation(PerplexityStrategy):
         breakout = c_now > range_high + buffer
 
         # Volume confirmation
+        vol_ratio = 1.0
         vol_ok = True
         if "Volume" in df.columns:
             avg_vol = float(df["Volume"].iloc[-21:-1].mean())
             cur_vol = float(df["Volume"].iloc[-1])
+            vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 1.0
             vol_ok  = cur_vol > cfg["vol_multiple"] * avg_vol if avg_vol > 0 else True
 
+        # ── Data-driven filters (per-symbol profile) ──────────
+        from app.services.backtest.symbol_profiles import get_filters_for_symbol
+        _sym_filters = get_filters_for_symbol(self.name, symbol)
+        _f_vol       = cfg["filter_vol_min"]       if cfg["filter_vol_min"]       > 0 else _sym_filters.get("vol_min", 0.0)
+        _f_rsi       = cfg["filter_rsi_min"]       if cfg["filter_rsi_min"]       > 0 else _sym_filters.get("rsi_min", 0.0)
+        _f_range_atr = cfg["filter_range_atr_max"] if cfg["filter_range_atr_max"] > 0 else _sym_filters.get("range_atr_max", 0.0)
+
+        extra_vol_ok      = vol_ratio >= _f_vol if _f_vol > 0 else True
+        rsi_filter_ok     = rsi_now >= _f_rsi if _f_rsi > 0 else True
+        range_atr_ratio   = range_size / atr_v if atr_v > 0 else 0.0
+        range_atr_ok      = range_atr_ratio <= _f_range_atr if _f_range_atr > 0 else True
+
         # ── BUY ──────────────────────────────────────────────
-        if breakout and vol_ok and 40 < rsi_now < cfg["rsi_exit"]:
+        if breakout and vol_ok and 40 < rsi_now < cfg["rsi_exit"] \
+                and extra_vol_ok and rsi_filter_ok and range_atr_ok:
             stop   = range_high if cfg["stop_below_range"] else range_low
             stop   = stop * 0.998  # tiny buffer below level
             risk   = c_now - stop
@@ -455,6 +498,10 @@ class BollingerMeanReversionUptrend(PerplexityStrategy):
         "use_rsi_filter": False,  # require RSI crossover above rsi_re_entry
         "rsi_exit":       72,
         "min_data_bars":  220,
+        # ── Data-driven filters ──
+        "filter_rsi_max":  0.0,   # require RSI <= this at re-entry (0 = off, lower = more oversold)
+        "filter_vol_min":  0.0,   # require volume ratio >= this (0 = off)
+        "filter_atr_pct_max": 0.0,  # require ATR% <= this (0 = off, avoid high volatility)
     }
 
     def run(self, symbol: str, df: pd.DataFrame) -> PerplexitySignal:
@@ -469,9 +516,9 @@ class BollingerMeanReversionUptrend(PerplexityStrategy):
         rsi     = _rsi(close, 14)
         atr_v   = _current_atr(df, 14)
 
-        bb_lower  = bb.lower.values
-        bb_middle = bb.middle.values
-        bb_upper  = bb.upper.values
+        bb_lower  = bb.lower
+        bb_middle = bb.middle
+        bb_upper  = bb.upper
 
         c_now     = float(close.iloc[-1])
         rsi_now   = float(rsi.iloc[-1])
@@ -490,8 +537,27 @@ class BollingerMeanReversionUptrend(PerplexityStrategy):
         rsi_crossed_up = (rsi_prev < cfg["rsi_re_entry"]) and (rsi_now >= cfg["rsi_re_entry"])
         rsi_ok = (not cfg["use_rsi_filter"]) or rsi_crossed_up or rsi_now >= cfg["rsi_re_entry"]
 
+        # ── Data-driven filters (per-symbol profile) ──────────
+        from app.services.backtest.symbol_profiles import get_filters_for_symbol
+        _sym_filters = get_filters_for_symbol(self.name, symbol)
+        _f_rsi_max  = cfg["filter_rsi_max"]     if cfg["filter_rsi_max"]     > 0 else _sym_filters.get("rsi_max", 0.0)
+        _f_vol      = cfg["filter_vol_min"]      if cfg["filter_vol_min"]      > 0 else _sym_filters.get("vol_min", 0.0)
+        _f_atr_max  = cfg["filter_atr_pct_max"] if cfg["filter_atr_pct_max"] > 0 else _sym_filters.get("atr_pct_max", 0.0)
+
+        rsi_max_ok = rsi_now <= _f_rsi_max if _f_rsi_max > 0 else True
+
+        vol_ratio = 1.0
+        if "Volume" in df.columns:
+            avg_vol = float(df["Volume"].iloc[-21:-1].mean()) if len(df) > 21 else 1.0
+            cur_vol = float(df["Volume"].iloc[-1])
+            vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 1.0
+        vol_ok = vol_ratio >= _f_vol if _f_vol > 0 else True
+
+        atr_pct = atr_v / c_now * 100 if c_now > 0 else 0.0
+        atr_ok = atr_pct <= _f_atr_max if _f_atr_max > 0 else True
+
         # ── BUY ──────────────────────────────────────────────
-        if re_entered and rsi_ok and rsi_now < 55:
+        if re_entered and rsi_ok and rsi_now < 55 and rsi_max_ok and vol_ok and atr_ok:
             stop   = c_now - cfg["atr_multiple"] * atr_v
             risk   = c_now - stop
             if risk < atr_v * 0.2:
@@ -557,6 +623,10 @@ class FibPullbackSupport(PerplexityStrategy):
         "atr_stop_mult":    1.5,  # stop = entry - atr_stop_mult * ATR
         "r_multiple":       2.5,
         "min_data_bars":    220,
+        # ── Data-driven filters ──
+        "filter_rsi_min":       0.0,   # require RSI >= this (0 = off, avoid falling-knife entries)
+        "filter_lower_wick_min": 0.0,  # require lower wick % of range >= this (0 = off)
+        "filter_vol_min":       0.0,   # require volume ratio >= this (0 = off)
     }
 
     def run(self, symbol: str, df: pd.DataFrame) -> PerplexitySignal:
@@ -612,7 +682,9 @@ class FibPullbackSupport(PerplexityStrategy):
         h_now  = float(df["High"].iloc[-1])
         l_now  = float(df["Low"].iloc[-1])
         body   = abs(c_now - o_now)
+        bar_range = h_now - l_now
         lower_wick = o_now - l_now if c_now >= o_now else c_now - l_now
+        lower_wick_pct = lower_wick / bar_range * 100 if bar_range > 0 else 0.0
         rejection_candle = lower_wick >= 1.5 * body if body > 0 else False
 
         # RSI turning up from oversold zone
@@ -621,8 +693,26 @@ class FibPullbackSupport(PerplexityStrategy):
 
         entry_ok = rejection_candle or rsi_turning_up
 
+        # ── Data-driven filters (per-symbol profile) ──────────
+        from app.services.backtest.symbol_profiles import get_filters_for_symbol
+        _sym_filters = get_filters_for_symbol(self.name, symbol)
+        _f_rsi       = cfg["filter_rsi_min"]        if cfg["filter_rsi_min"]        > 0 else _sym_filters.get("rsi_min", 0.0)
+        _f_wick      = cfg["filter_lower_wick_min"]  if cfg["filter_lower_wick_min"]  > 0 else _sym_filters.get("lower_wick_min", 0.0)
+        _f_vol       = cfg["filter_vol_min"]         if cfg["filter_vol_min"]         > 0 else _sym_filters.get("vol_min", 0.0)
+
+        rsi_filter_ok = rsi_now >= _f_rsi if _f_rsi > 0 else True
+        wick_ok = lower_wick_pct >= _f_wick if _f_wick > 0 else True
+
+        vol_ratio = 1.0
+        if "Volume" in df.columns:
+            avg_vol = float(df["Volume"].iloc[-21:-1].mean()) if len(df) > 21 else 1.0
+            cur_vol = float(df["Volume"].iloc[-1])
+            vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 1.0
+        vol_ok = vol_ratio >= _f_vol if _f_vol > 0 else True
+
         # ── BUY ──────────────────────────────────────────────
-        if entry_ok and cfg["rsi_oversold_low"] < rsi_now < 65:
+        if entry_ok and cfg["rsi_oversold_low"] < rsi_now < 65 \
+                and rsi_filter_ok and wick_ok and vol_ok:
             stop   = min(l_now, hit_price * (1 - cfg["atr_stop_mult"] * atr_v / c_now))
             stop   = max(stop, c_now - cfg["atr_stop_mult"] * atr_v)  # fallback
             risk   = c_now - stop

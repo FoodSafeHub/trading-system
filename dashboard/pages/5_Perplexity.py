@@ -1418,7 +1418,10 @@ with tab_profiles:
 
     pr_col1, pr_col2 = st.columns([2, 1])
     with pr_col1:
-        prof_strat = st.selectbox("Strategy", ["EMA_Mean_Reversion"], key="prof_strat")
+        prof_strat = st.selectbox("Strategy", [
+            "EMA_Mean_Reversion", "MA_Crossover_RSI", "Breakout_Consolidation",
+            "BB_Mean_Reversion", "Fib_Pullback_Support"
+        ], key="prof_strat")
     with pr_col2:
         if st.button("🔄 Refresh profiles", key="prof_refresh"):
             st.rerun()
@@ -1468,20 +1471,58 @@ with tab_profiles:
         ev  = cal.get("evidence", {})
         ver = cal.get("verification", {})
 
-        # Thresholds
-        t1, t2, t3 = st.columns(3)
-        t1.metric("EMA dist filter",
-                  f"≥ {thr['ema_dist_min']:.2f}%" if thr['ema_dist_min'] > 0 else "OFF",
-                  delta=f"wins {ev['win_ema_dist_mean']:.2f}% vs losses {ev['loss_ema_dist_mean']:.2f}%",
-                  delta_color="off")
-        t2.metric("Volume filter",
-                  f"≥ {thr['vol_min']:.2f}×" if thr['vol_min'] > 0 else "OFF",
-                  delta=f"wins {ev['win_vol_mean']:.2f}× vs losses {ev['loss_vol_mean']:.2f}×",
-                  delta_color="off")
-        t3.metric("BB position filter",
-                  f"≥ {thr['bb_pos_min']:.2f}" if thr['bb_pos_min'] > 0 else "OFF",
-                  delta=f"wins {ev['win_bb_pos_mean']:.2f} vs losses {ev['loss_bb_pos_mean']:.2f}",
-                  delta_color="off")
+        # Thresholds — shown dynamically per strategy
+        _strat = cal.get("strategy", prof_strat)
+        t_cols = st.columns(3)
+
+        def _thresh_metric(col, label, val, fmt, win_v, loss_v, win_fmt="", loss_fmt=""):
+            col.metric(label,
+                       f"{fmt.format(val)}" if val > 0 else "OFF",
+                       delta=f"wins {win_fmt.format(win_v) if win_v else '—'} vs losses {loss_fmt.format(loss_v) if loss_v else '—'}",
+                       delta_color="off")
+
+        if _strat == "EMA_Mean_Reversion":
+            t_cols[0].metric("EMA dist filter",
+                f"≥ {thr.get('ema_dist_min', 0):.2f}%" if thr.get('ema_dist_min', 0) > 0 else "OFF",
+                delta=f"wins {ev.get('win_ema_dist_mean', 0):.2f}% vs losses {ev.get('loss_ema_dist_mean', 0):.2f}%", delta_color="off")
+            t_cols[1].metric("Volume filter",
+                f"≥ {thr.get('vol_min', 0):.2f}×" if thr.get('vol_min', 0) > 0 else "OFF",
+                delta=f"wins {ev.get('win_vol_mean', 0):.2f}× vs losses {ev.get('loss_vol_mean', 0):.2f}×", delta_color="off")
+            t_cols[2].metric("BB position filter",
+                f"≥ {thr.get('bb_pos_min', 0):.2f}" if thr.get('bb_pos_min', 0) > 0 else "OFF",
+                delta=f"wins {ev.get('win_bb_pos_mean', 0):.2f} vs losses {ev.get('loss_bb_pos_mean', 0):.2f}", delta_color="off")
+        elif _strat == "MA_Crossover_RSI":
+            t_cols[0].metric("RSI min filter",
+                f"≥ {thr.get('rsi_min', 0):.0f}" if thr.get('rsi_min', 0) > 0 else "OFF", delta_color="off")
+            t_cols[1].metric("Volume filter",
+                f"≥ {thr.get('vol_min', 0):.2f}×" if thr.get('vol_min', 0) > 0 else "OFF",
+                delta=f"wins {ev.get('win_vol_mean', 0):.2f}× vs losses {ev.get('loss_vol_mean', 0):.2f}×", delta_color="off")
+            t_cols[2].metric("EMA spread min",
+                f"≥ {thr.get('ema_spread_min', 0):.2f}%" if thr.get('ema_spread_min', 0) > 0 else "OFF", delta_color="off")
+        elif _strat == "Breakout_Consolidation":
+            t_cols[0].metric("Volume filter",
+                f"≥ {thr.get('vol_min', 0):.2f}×" if thr.get('vol_min', 0) > 0 else "OFF",
+                delta=f"wins {ev.get('win_vol_mean', 0):.2f}× vs losses {ev.get('loss_vol_mean', 0):.2f}×", delta_color="off")
+            t_cols[1].metric("RSI min filter",
+                f"≥ {thr.get('rsi_min', 0):.0f}" if thr.get('rsi_min', 0) > 0 else "OFF", delta_color="off")
+            t_cols[2].metric("Max range/ATR",
+                f"≤ {thr.get('range_atr_max', 0):.1f}" if thr.get('range_atr_max', 0) > 0 else "OFF", delta_color="off")
+        elif _strat == "BB_Mean_Reversion":
+            t_cols[0].metric("RSI max filter",
+                f"≤ {thr.get('rsi_max', 0):.0f}" if thr.get('rsi_max', 0) > 0 else "OFF", delta_color="off")
+            t_cols[1].metric("Volume filter",
+                f"≥ {thr.get('vol_min', 0):.2f}×" if thr.get('vol_min', 0) > 0 else "OFF",
+                delta=f"wins {ev.get('win_vol_mean', 0):.2f}× vs losses {ev.get('loss_vol_mean', 0):.2f}×", delta_color="off")
+            t_cols[2].metric("Max ATR%",
+                f"≤ {thr.get('atr_pct_max', 0):.1f}%" if thr.get('atr_pct_max', 0) > 0 else "OFF", delta_color="off")
+        elif _strat == "Fib_Pullback_Support":
+            t_cols[0].metric("RSI min filter",
+                f"≥ {thr.get('rsi_min', 0):.0f}" if thr.get('rsi_min', 0) > 0 else "OFF", delta_color="off")
+            t_cols[1].metric("Min lower wick%",
+                f"≥ {thr.get('lower_wick_min', 0):.0f}%" if thr.get('lower_wick_min', 0) > 0 else "OFF", delta_color="off")
+            t_cols[2].metric("Volume filter",
+                f"≥ {thr.get('vol_min', 0):.2f}×" if thr.get('vol_min', 0) > 0 else "OFF",
+                delta=f"wins {ev.get('win_vol_mean', 0):.2f}× vs losses {ev.get('loss_vol_mean', 0):.2f}×", delta_color="off")
 
         # Walk-forward verification
         if ver.get("wfe_before") is not None or ver.get("wfe_after") is not None:
@@ -1520,11 +1561,39 @@ with tab_profiles:
     else:
         prof_rows = []
         for p in all_profiles:
-            filters_active = [
-                f"EMA≥{p['ema_dist_min']:.1f}%" if p['ema_dist_min'] > 0 else None,
-                f"Vol≥{p['vol_min']:.1f}×"      if p['vol_min']      > 0 else None,
-                f"BB≥{p['bb_pos_min']:.2f}"      if p['bb_pos_min']   > 0 else None,
-            ]
+            strat = p.get("strategy", "")
+            if strat == "EMA_Mean_Reversion":
+                filters_active = [
+                    f"EMA≥{p['ema_dist_min']:.1f}%" if p.get('ema_dist_min', 0) > 0 else None,
+                    f"Vol≥{p['vol_min']:.1f}×"      if p.get('vol_min', 0)      > 0 else None,
+                    f"BB≥{p['bb_pos_min']:.2f}"      if p.get('bb_pos_min', 0)   > 0 else None,
+                ]
+            elif strat == "MA_Crossover_RSI":
+                filters_active = [
+                    f"RSI≥{p['rsi_min']:.0f}"          if p.get('rsi_min', 0)        > 0 else None,
+                    f"Vol≥{p['vol_min']:.1f}×"          if p.get('vol_min', 0)         > 0 else None,
+                    f"Spread≥{p['ema_spread_min']:.1f}%" if p.get('ema_spread_min', 0) > 0 else None,
+                ]
+            elif strat == "Breakout_Consolidation":
+                filters_active = [
+                    f"Vol≥{p['vol_min']:.1f}×"          if p.get('vol_min', 0)       > 0 else None,
+                    f"RSI≥{p['rsi_min']:.0f}"            if p.get('rsi_min', 0)       > 0 else None,
+                    f"Range/ATR≤{p['range_atr_max']:.1f}" if p.get('range_atr_max', 0) > 0 else None,
+                ]
+            elif strat == "BB_Mean_Reversion":
+                filters_active = [
+                    f"RSI≤{p['rsi_max']:.0f}"          if p.get('rsi_max', 0)      > 0 else None,
+                    f"Vol≥{p['vol_min']:.1f}×"          if p.get('vol_min', 0)       > 0 else None,
+                    f"ATR%≤{p['atr_pct_max']:.1f}%"    if p.get('atr_pct_max', 0)  > 0 else None,
+                ]
+            elif strat == "Fib_Pullback_Support":
+                filters_active = [
+                    f"RSI≥{p['rsi_min']:.0f}"            if p.get('rsi_min', 0)         > 0 else None,
+                    f"Wick≥{p['lower_wick_min']:.0f}%"   if p.get('lower_wick_min', 0)  > 0 else None,
+                    f"Vol≥{p['vol_min']:.1f}×"            if p.get('vol_min', 0)          > 0 else None,
+                ]
+            else:
+                filters_active = []
             filters_str = " | ".join(f for f in filters_active if f) or "None (all disabled)"
             wfe_change = ""
             if p.get("wfe_before") is not None and p.get("wfe_after") is not None:
@@ -1722,6 +1791,21 @@ with tab_config:
                     cfg["use_sma200"] = st.toggle(
                         "Require SMA(200) uptrend", value=cfg["use_sma200"], key=f"{s_name}_sma200")
 
+                st.markdown("**🔬 Data-Driven Entry Filters** *(set via Symbol Profiles tab)*")
+                fc1, fc2, fc3 = st.columns(3)
+                with fc1:
+                    cfg["filter_rsi_min"] = st.number_input(
+                        "Min RSI at crossover (0=off)", 0.0, 80.0,
+                        float(cfg.get("filter_rsi_min", 0.0)), 1.0, key=f"{s_name}_f_rsi")
+                with fc2:
+                    cfg["filter_vol_min"] = st.number_input(
+                        "Min volume ratio (0=off)", 0.0, 2.0,
+                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol")
+                with fc3:
+                    cfg["filter_ema_spread_min"] = st.number_input(
+                        "Min EMA spread % (0=off)", 0.0, 5.0,
+                        float(cfg.get("filter_ema_spread_min", 0.0)), 0.1, key=f"{s_name}_f_spread")
+
             elif s_name == "Breakout_Consolidation":
                 with c1:
                     cfg["consolidation_bars"] = st.number_input(
@@ -1744,6 +1828,21 @@ with tab_config:
                         "Stop below range high (vs range low)", value=cfg["stop_below_range"],
                         key=f"{s_name}_sbr")
 
+                st.markdown("**🔬 Data-Driven Entry Filters** *(set via Symbol Profiles tab)*")
+                fc1, fc2, fc3 = st.columns(3)
+                with fc1:
+                    cfg["filter_vol_min"] = st.number_input(
+                        "Min volume ratio (0=off)", 0.0, 2.0,
+                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol")
+                with fc2:
+                    cfg["filter_rsi_min"] = st.number_input(
+                        "Min RSI at breakout (0=off)", 0.0, 80.0,
+                        float(cfg.get("filter_rsi_min", 0.0)), 1.0, key=f"{s_name}_f_rsi")
+                with fc3:
+                    cfg["filter_range_atr_max"] = st.number_input(
+                        "Max range/ATR ratio (0=off)", 0.0, 10.0,
+                        float(cfg.get("filter_range_atr_max", 0.0)), 0.5, key=f"{s_name}_f_range")
+
             elif s_name == "BB_Mean_Reversion":
                 with c1:
                     cfg["bb_period"] = st.number_input(
@@ -1764,6 +1863,21 @@ with tab_config:
                     cfg["use_rsi_filter"] = st.toggle(
                         "Require RSI crossover", value=cfg["use_rsi_filter"],
                         key=f"{s_name}_rsi_f")
+
+                st.markdown("**🔬 Data-Driven Entry Filters** *(set via Symbol Profiles tab)*")
+                fc1, fc2, fc3 = st.columns(3)
+                with fc1:
+                    cfg["filter_rsi_max"] = st.number_input(
+                        "Max RSI at re-entry (0=off)", 0.0, 70.0,
+                        float(cfg.get("filter_rsi_max", 0.0)), 1.0, key=f"{s_name}_f_rsi")
+                with fc2:
+                    cfg["filter_vol_min"] = st.number_input(
+                        "Min volume ratio (0=off)", 0.0, 2.0,
+                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol")
+                with fc3:
+                    cfg["filter_atr_pct_max"] = st.number_input(
+                        "Max ATR% (0=off)", 0.0, 10.0,
+                        float(cfg.get("filter_atr_pct_max", 0.0)), 0.25, key=f"{s_name}_f_atr")
 
             elif s_name == "Fib_Pullback_Support":
                 with c1:
@@ -1787,6 +1901,21 @@ with tab_config:
                     cfg["r_multiple"] = st.number_input(
                         "Target R multiple", 1.0, 5.0, cfg["r_multiple"], 0.5,
                         key=f"{s_name}_r")
+
+                st.markdown("**🔬 Data-Driven Entry Filters** *(set via Symbol Profiles tab)*")
+                fc1, fc2, fc3 = st.columns(3)
+                with fc1:
+                    cfg["filter_rsi_min"] = st.number_input(
+                        "Min RSI at entry (0=off)", 0.0, 50.0,
+                        float(cfg.get("filter_rsi_min", 0.0)), 1.0, key=f"{s_name}_f_rsi")
+                with fc2:
+                    cfg["filter_lower_wick_min"] = st.number_input(
+                        "Min lower wick % (0=off)", 0.0, 80.0,
+                        float(cfg.get("filter_lower_wick_min", 0.0)), 5.0, key=f"{s_name}_f_wick")
+                with fc3:
+                    cfg["filter_vol_min"] = st.number_input(
+                        "Min volume ratio (0=off)", 0.0, 2.0,
+                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol")
 
             st.caption(
                 f"Current config: `{cfg}`"

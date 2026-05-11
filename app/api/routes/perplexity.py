@@ -321,28 +321,39 @@ def filter_comparison(
     Returns both results for side-by-side comparison.
     """
     import copy
+    from app.services.backtest.symbol_profiles import load_profile as _load_profile
     s = _STRATEGY_MAP.get(strategy_name)
     if not s:
         raise HTTPException(404, f"Strategy '{strategy_name}' not found")
-    if "filter_ema_dist_min" not in s.config:
+    if not any(k.startswith("filter_") for k in s.config):
         raise HTTPException(400, f"Strategy '{strategy_name}' does not support data-driven filters")
+
+    # Load saved profile for this symbol to use its calibrated thresholds
+    profile = _load_profile(strategy_name, symbol.upper())
+
+    filter_keys = [k for k in s.config if k.startswith("filter_")]
 
     try:
         # ── Run WITHOUT filters ──────────────────────────────
         orig_config = copy.deepcopy(s.config)
-        s.config["filter_ema_dist_min"] = 0.0
-        s.config["filter_vol_min"]      = 0.0
-        s.config["filter_bb_pos_min"]   = 0.0
+        for k in filter_keys:
+            s.config[k] = 0.0
         r_before = run_rolling_walk_forward(
             s, symbol.upper(), period=period,
             train_years=train_years, test_years=test_years, step_years=step_years,
             initial_capital=initial_capital, position_pct=position_pct,
         )
 
-        # ── Run WITH filters ─────────────────────────────────
-        s.config["filter_ema_dist_min"] = ema_dist_min
-        s.config["filter_vol_min"]      = vol_min
-        s.config["filter_bb_pos_min"]   = bb_pos_min
+        # ── Run WITH filters (from saved profile if available, else params) ──
+        for k in filter_keys:
+            s.config[k] = 0.0
+        if profile:
+            _apply_profile_to_config(strategy_name, s.config, profile)
+        else:
+            # Fallback to query params for EMA_Mean_Reversion compatibility
+            s.config["filter_ema_dist_min"] = ema_dist_min
+            s.config["filter_vol_min"]      = vol_min
+            s.config["filter_bb_pos_min"]   = bb_pos_min
         r_after = run_rolling_walk_forward(
             s, symbol.upper(), period=period,
             train_years=train_years, test_years=test_years, step_years=step_years,
@@ -364,18 +375,57 @@ def filter_comparison(
             "segments": r.segments,
         }
 
+    filters_applied = _profile_thresholds_dict(strategy_name, profile) if profile else {
+        "ema_dist_min": ema_dist_min, "vol_min": vol_min, "bb_pos_min": bb_pos_min
+    }
+
     return {
         "strategy_name": strategy_name,
         "symbol": symbol.upper(),
         "period": period,
-        "filters": {
-            "ema_dist_min": ema_dist_min,
-            "vol_min": vol_min,
-            "bb_pos_min": bb_pos_min,
-        },
+        "filters": filters_applied,
         "before": _wf_summary(r_before),
         "after":  _wf_summary(r_after),
     }
+
+
+def _apply_profile_to_config(strategy_name: str, config: dict, profile) -> None:
+    """Apply calibrated filter thresholds to a strategy config dict."""
+    if strategy_name == "EMA_Mean_Reversion":
+        config["filter_ema_dist_min"] = profile.ema_dist_min
+        config["filter_vol_min"]      = profile.vol_min
+        config["filter_bb_pos_min"]   = profile.bb_pos_min
+    elif strategy_name == "MA_Crossover_RSI":
+        config["filter_rsi_min"]        = profile.rsi_min
+        config["filter_vol_min"]        = profile.vol_min
+        config["filter_ema_spread_min"] = profile.ema_spread_min
+    elif strategy_name == "Breakout_Consolidation":
+        config["filter_vol_min"]       = profile.vol_min
+        config["filter_rsi_min"]       = profile.rsi_min
+        config["filter_range_atr_max"] = profile.range_atr_max
+    elif strategy_name == "BB_Mean_Reversion":
+        config["filter_rsi_max"]     = profile.rsi_max
+        config["filter_vol_min"]     = profile.vol_min
+        config["filter_atr_pct_max"] = profile.atr_pct_max
+    elif strategy_name == "Fib_Pullback_Support":
+        config["filter_rsi_min"]        = profile.rsi_min
+        config["filter_lower_wick_min"] = profile.lower_wick_min
+        config["filter_vol_min"]        = profile.vol_min
+
+
+def _profile_thresholds_dict(strategy_name: str, profile) -> dict:
+    """Return strategy-specific threshold keys for the API response."""
+    if strategy_name == "EMA_Mean_Reversion":
+        return {"ema_dist_min": profile.ema_dist_min, "vol_min": profile.vol_min, "bb_pos_min": profile.bb_pos_min}
+    if strategy_name == "MA_Crossover_RSI":
+        return {"rsi_min": profile.rsi_min, "vol_min": profile.vol_min, "ema_spread_min": profile.ema_spread_min}
+    if strategy_name == "Breakout_Consolidation":
+        return {"vol_min": profile.vol_min, "rsi_min": profile.rsi_min, "range_atr_max": profile.range_atr_max}
+    if strategy_name == "BB_Mean_Reversion":
+        return {"rsi_max": profile.rsi_max, "vol_min": profile.vol_min, "atr_pct_max": profile.atr_pct_max}
+    if strategy_name == "Fib_Pullback_Support":
+        return {"rsi_min": profile.rsi_min, "lower_wick_min": profile.lower_wick_min, "vol_min": profile.vol_min}
+    return {}
 
 
 @router.get("/calibrate/{strategy_name}/{symbol}")
@@ -401,19 +451,22 @@ def auto_calibrate(
     strategy = _STRATEGY_MAP.get(strategy_name)
     if not strategy:
         raise HTTPException(404, f"Strategy '{strategy_name}' not found")
-    if "filter_ema_dist_min" not in strategy.config:
+    # Check strategy supports calibration (has at least one filter_ key)
+    if not any(k.startswith("filter_") for k in strategy.config):
         raise HTTPException(400, f"Strategy '{strategy_name}' does not support per-symbol calibration")
+
+    # Collect all filter keys for this strategy so we can zero them before backtesting
+    filter_keys = [k for k in strategy.config if k.startswith("filter_")]
 
     try:
         df = get_ohlcv(symbol.upper(), period=period)
         if df.empty or len(df) < 120:
             raise HTTPException(400, f"Not enough data for {symbol}")
 
-        # Run backtest with filters OFF to get raw trade population
+        # Run backtest with all filters OFF to get raw unfiltered trade population
         orig = copy.deepcopy(strategy.config)
-        strategy.config["filter_ema_dist_min"] = 0.0
-        strategy.config["filter_vol_min"]      = 0.0
-        strategy.config["filter_bb_pos_min"]   = 0.0
+        for k in filter_keys:
+            strategy.config[k] = 0.0
         try:
             result = run_perplexity_backtest(strategy, symbol.upper(), period,
                                              initial_capital, position_pct=position_pct)
@@ -424,31 +477,31 @@ def auto_calibrate(
         if len(snapshots) < 6:
             raise HTTPException(400, f"Not enough trades to calibrate ({len(snapshots)} trades, need ≥ 6)")
 
-        # Derive thresholds
+        # Derive thresholds using all available indicators from snapshots
         profile = calibrate_from_snapshots(strategy_name, symbol.upper(),
                                            [{"outcome": s.outcome,
+                                             "rsi": s.rsi,
                                              "ema_dist_pct": s.ema_dist_pct,
                                              "volume_ratio": s.volume_ratio,
-                                             "bb_pct": s.bb_pct}
+                                             "bb_pct": s.bb_pct,
+                                             "atr_pct": s.atr_pct,
+                                             "lower_wick_pct": s.lower_wick_pct}
                                             for s in snapshots])
 
         # Optional walk-forward verification
         if verify_wf and len(df) >= 500:
             try:
                 wf_period = "5y" if len(df) < 1500 else "10y"
-                # Before
-                strategy.config["filter_ema_dist_min"] = 0.0
-                strategy.config["filter_vol_min"]      = 0.0
-                strategy.config["filter_bb_pos_min"]   = 0.0
+                # Before — all filters OFF
+                for k in filter_keys:
+                    strategy.config[k] = 0.0
                 r_before = run_rolling_walk_forward(
                     strategy, symbol.upper(), period=wf_period,
                     train_years=2.0, test_years=1.0, step_years=1.0,
                     initial_capital=initial_capital, position_pct=position_pct,
                 )
-                # After
-                strategy.config["filter_ema_dist_min"] = profile.ema_dist_min
-                strategy.config["filter_vol_min"]      = profile.vol_min
-                strategy.config["filter_bb_pos_min"]   = profile.bb_pos_min
+                # After — apply calibrated filters
+                _apply_profile_to_config(strategy_name, strategy.config, profile)
                 r_after = run_rolling_walk_forward(
                     strategy, symbol.upper(), period=wf_period,
                     train_years=2.0, test_years=1.0, step_years=1.0,
@@ -469,6 +522,9 @@ def auto_calibrate(
 
         save_profile(profile)
 
+        # Build strategy-specific thresholds response
+        thresholds = _profile_thresholds_dict(strategy_name, profile)
+
         return {
             "symbol": profile.symbol,
             "strategy": profile.strategy,
@@ -476,11 +532,7 @@ def auto_calibrate(
             "n_trades": profile.n_trades,
             "n_wins": profile.n_wins,
             "win_rate_pct": profile.win_rate_pct,
-            "thresholds": {
-                "ema_dist_min": profile.ema_dist_min,
-                "vol_min":      profile.vol_min,
-                "bb_pos_min":   profile.bb_pos_min,
-            },
+            "thresholds": thresholds,
             "evidence": {
                 "win_ema_dist_mean":  profile.win_ema_dist_mean,
                 "loss_ema_dist_mean": profile.loss_ema_dist_mean,
@@ -509,24 +561,8 @@ def list_profiles(strategy_name: str):
     """List all saved per-symbol filter profiles for a strategy."""
     from app.services.backtest.symbol_profiles import list_profiles as _list
     profiles = _list(strategy_name)
-    return [
-        {
-            "symbol": p.symbol,
-            "strategy": p.strategy,
-            "calibrated_at": p.calibrated_at,
-            "n_trades": p.n_trades,
-            "win_rate_pct": p.win_rate_pct,
-            "ema_dist_min": p.ema_dist_min,
-            "vol_min": p.vol_min,
-            "bb_pos_min": p.bb_pos_min,
-            "wfe_before": p.wfe_before,
-            "wfe_after": p.wfe_after,
-            "oos_cagr_before": p.oos_cagr_before,
-            "oos_cagr_after": p.oos_cagr_after,
-            "verified": p.verified,
-        }
-        for p in profiles
-    ]
+    from dataclasses import asdict
+    return [asdict(p) for p in profiles]
 
 
 @router.delete("/profiles/{strategy_name}/{symbol}")
