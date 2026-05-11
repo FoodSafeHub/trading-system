@@ -1,0 +1,212 @@
+[
+  {
+    "name": "SPY_BB_20_2",
+    "symbol": "SPY",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 2.0 }
+  },
+  {
+    "name": "SPY_BB_20_18",
+    "symbol": "SPY",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 1.8 }
+  },
+  {
+    "name": "SPY_BB_15_2",
+    "symbol": "SPY",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 15, "bb_std": 2.0 }
+  },
+  {
+    "name": "QQQ_BB_20_2",
+    "symbol": "QQQ",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 2.0 }
+  },
+  {
+    "name": "QQQ_BB_20_18",
+    "symbol": "QQQ",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 1.8 }
+  },
+  {
+    "name": "QQQ_BB_15_2",
+    "symbol": "QQQ",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 15, "bb_std": 2.0 }
+  },
+  {
+    "name": "AAPL_BB_20_2",
+    "symbol": "AAPL",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 2.0 }
+  },
+  {
+    "name": "AAPL_BB_20_18",
+    "symbol": "AAPL",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 1.8 }
+  },
+  {
+    "name": "AAPL_BB_15_2",
+    "symbol": "AAPL",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 15, "bb_std": 2.0 }
+  },
+  {
+    "name": "TSLA_BB_20_2",
+    "symbol": "TSLA",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 2.0 }
+  },
+  {
+    "name": "TSLA_BB_20_18",
+    "symbol": "TSLA",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 1.8 }
+  },
+  {
+    "name": "TSLA_BB_15_2",
+    "symbol": "TSLA",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 15, "bb_std": 2.0 }
+  },
+  {
+    "name": "NVDA_BB_20_2",
+    "symbol": "NVDA",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 2.0 }
+  },
+  {
+    "name": "NVDA_BB_20_18",
+    "symbol": "NVDA",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 1.8 }
+  },
+  {
+    "name": "NVDA_BB_15_2",
+    "symbol": "NVDA",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 15, "bb_std": 2.0 }
+  },
+  {
+    "name": "MSFT_BB_20_2",
+    "symbol": "MSFT",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 2.0 }
+  },
+  {
+    "name": "MSFT_BB_20_18",
+    "symbol": "MSFT",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 1.8 }
+  },
+  {
+    "name": "MSFT_BB_15_2",
+    "symbol": "MSFT",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 15, "bb_std": 2.0 }
+  },
+  {
+    "name": "AMZN_BB_20_2",
+    "symbol": "AMZN",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 2.0 }
+  },
+  {
+    "name": "AMZN_BB_20_18",
+    "symbol": "AMZN",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 1.8 }
+  },
+  {
+    "name": "AMZN_BB_15_2",
+    "symbol": "AMZN",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 15, "bb_std": 2.0 }
+  },
+  {
+    "name": "META_BB_20_2",
+    "symbol": "META",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 2.0 }
+  },
+  {
+    "name": "META_BB_20_18",
+    "symbol": "META",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 1.8 }
+  },
+  {
+    "name": "META_BB_15_2",
+    "symbol": "META",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 15, "bb_std": 2.0 }
+  },
+  {
+    "name": "GOOGL_BB_20_2",
+    "symbol": "GOOGL",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 2.0 }
+  },
+  {
+    "name": "GOOGL_BB_20_18",
+    "symbol": "GOOGL",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 1.8 }
+  },
+  {
+    "name": "GOOGL_BB_15_2",
+    "symbol": "GOOGL",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 15, "bb_std": 2.0 }
+  },
+  {
+    "name": "JPM_BB_20_2",
+    "symbol": "JPM",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 2.0 }
+  },
+  {
+    "name": "JPM_BB_20_18",
+    "symbol": "JPM",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 20, "bb_std": 1.8 }
+  },
+  {
+    "name": "JPM_BB_15_2",
+    "symbol": "JPM",
+    "type": "bollinger",
+    "enabled": true,
+    "params": { "bb_period": 15, "bb_std": 2.0 }
+  }
+]

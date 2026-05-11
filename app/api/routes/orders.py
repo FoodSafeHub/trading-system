@@ -1,0 +1,90 @@
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.db import get_db
+from app.models.orders import Order
+from app.schemas.orders import OrderOut, OrderRequest
+from app.services.brokers.factory import get_broker
+from app.services.execution.service import ExecutionService
+
+router = APIRouter(prefix="/orders", tags=["orders"])
+
+
+@router.get("", response_model=List[OrderOut])
+def list_orders(status: Optional[str] = None, limit: int = 50, db: Session = Depends(get_db)):
+    q = db.query(Order).order_by(Order.created_at.desc())
+    if status:
+        q = q.filter(Order.status == status)
+    return q.limit(limit).all()
+
+
+@router.post("/manual", response_model=Optional[OrderOut])
+async def manual_order(order_req: OrderRequest, account_id: str = ""):
+    """Manually submit an order through the full execution pipeline (risk checks included)."""
+    broker = get_broker()
+    await broker.authenticate()
+
+    if not account_id:
+        accounts = await broker.get_accounts()
+        if not accounts:
+            raise HTTPException(status_code=400, detail="No accounts found")
+        account_id = accounts[0].account_id
+
+    svc = ExecutionService(broker)
+    result = await svc.execute(order_req, account_id=account_id)
+    if result is None:
+        raise HTTPException(status_code=403, detail="Order blocked by risk engine. Check audit logs.")
+    return result
+
+
+@router.get("/broker")
+async def list_broker_orders(account_id: str = ""):
+    """Fetch orders directly from the broker (Schwab / paper) — not the local DB."""
+    broker = get_broker()
+    await broker.authenticate()
+
+    if not account_id:
+        accounts = await broker.get_accounts()
+        if not accounts:
+            raise HTTPException(status_code=400, detail="No accounts found")
+        account_id = accounts[0].account_id
+
+    orders = await broker.list_orders(account_id)
+    return [
+        {
+            "broker_order_id": o.broker_order_id,
+            "symbol":          o.symbol,
+            "side":            o.side,
+            "order_type":      o.order_type,
+            "quantity":        o.quantity,
+            "filled_quantity": o.filled_quantity,
+            "fill_price":      o.fill_price,
+            "status":          o.status,
+        }
+        for o in orders
+    ]
+
+
+@router.get("/{order_id}", response_model=OrderOut)
+def get_order(order_id: int, db: Session = Depends(get_db)):
+    order = db.query(Order).filter_by(id=order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return order
+
+
+@router.post("/{broker_order_id}/cancel")
+async def cancel_order(broker_order_id: str, account_id: str = ""):
+    broker = get_broker()
+    await broker.authenticate()
+
+    if not account_id:
+        accounts = await broker.get_accounts()
+        if not accounts:
+            raise HTTPException(status_code=400, detail="No accounts found")
+        account_id = accounts[0].account_id
+
+    success = await broker.cancel_order(broker_order_id, account_id)
+    return {"cancelled": success}

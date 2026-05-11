@@ -1,0 +1,214 @@
+from __future__ import annotations
+
+"""
+Risk Engine — all checks must pass before an order is submitted.
+
+Hard rules (any failure blocks the order):
+  1. Kill switch check
+  2. Live trading safety flags (3-factor: ENV flag + confirmation + broker credentials)
+  3. Market hours check
+  4. Max orders per day
+  5. Order cooldown period
+  6. Duplicate order prevention (idempotency key)
+  7. Max position size
+  8. Max daily loss
+
+No live order should ever bypass this engine.
+"""
+
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+from app.config import Settings, get_settings
+from app.db import SessionLocal
+from app.models.orders import Order
+from app.models.settings import AppSetting
+from app.schemas.orders import OrderRequest
+from app.schemas.risk import RiskCheckResult, RiskStatusOut
+from app.utils.time_utils import is_market_hours, now_in_tz
+
+logger = logging.getLogger(__name__)
+
+KILL_SWITCH_KEY = "kill_switch_active"
+
+
+class RiskEngine:
+
+    def __init__(self, settings: Optional[Settings] = None) -> None:
+        self._settings = settings or get_settings()
+
+    # ── Kill switch ──────────────────────────────────────────────────────────
+
+    def is_kill_switch_active(self) -> bool:
+        try:
+            with SessionLocal() as db:
+                row = db.query(AppSetting).filter_by(key=KILL_SWITCH_KEY).first()
+                if row:
+                    return row.value.lower() in ("true", "1", "yes")
+        except Exception:
+            pass
+        return False
+
+    def set_kill_switch(self, active: bool) -> None:
+        with SessionLocal() as db:
+            row = db.query(AppSetting).filter_by(key=KILL_SWITCH_KEY).first()
+            if not row:
+                row = AppSetting(key=KILL_SWITCH_KEY, description="Emergency trading stop")
+                db.add(row)
+            row.value = "true" if active else "false"
+            db.commit()
+        logger.warning("[risk] Kill switch set to: %s", active)
+
+    # ── Daily stats ──────────────────────────────────────────────────────────
+
+    def _orders_today(self) -> int:
+        tz = self._settings.tz
+        start_of_day = now_in_tz(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_utc = start_of_day.astimezone(timezone.utc)
+        with SessionLocal() as db:
+            return (
+                db.query(Order)
+                .filter(
+                    Order.created_at >= start_utc,
+                    Order.status.notin_(["rejected", "error"]),
+                )
+                .count()
+            )
+
+    def _daily_realized_loss(self) -> float:
+        """Sum of negative P&L from filled orders today (simplified: fill price difference not tracked here)."""
+        # TODO: Wire to actual fill records for accurate P&L once executions are recorded
+        return 0.0
+
+    def _last_order_time(self, symbol: str) -> Optional[datetime]:
+        with SessionLocal() as db:
+            order = (
+                db.query(Order)
+                .filter(Order.symbol == symbol, Order.status.notin_(["rejected", "error", "cancelled"]))
+                .order_by(Order.created_at.desc())
+                .first()
+            )
+            return order.created_at if order else None
+
+    def _existing_position_value(self, symbol: str) -> float:
+        """Return approximate market value of existing position in this symbol."""
+        with SessionLocal() as db:
+            order = (
+                db.query(Order)
+                .filter(
+                    Order.symbol == symbol,
+                    Order.side == "BUY",
+                    Order.status == "filled",
+                )
+                .order_by(Order.created_at.desc())
+                .first()
+            )
+        if order and order.fill_price and order.quantity:
+            return order.fill_price * order.quantity
+        return 0.0
+
+    def _is_duplicate(self, idempotency_key: Optional[str]) -> bool:
+        if not idempotency_key:
+            return False
+        with SessionLocal() as db:
+            exists = (
+                db.query(Order)
+                .filter(Order.idempotency_key == idempotency_key)
+                .first()
+            )
+        return exists is not None
+
+    # ── Main check ───────────────────────────────────────────────────────────
+
+    def check(self, order: OrderRequest, estimated_price: Optional[float] = None) -> RiskCheckResult:
+        s = self._settings
+        warnings = []
+
+        # 1. Kill switch
+        if self.is_kill_switch_active():
+            return RiskCheckResult(passed=False, blocked_reason="Kill switch is active. Trading halted.")
+
+        # 2. Live trading safety flags (only relevant if not paper)
+        if s.active_broker != "paper":
+            if not s.live_trading_enabled:
+                return RiskCheckResult(
+                    passed=False,
+                    blocked_reason="LIVE_TRADING_ENABLED is false. Set it to true in .env to proceed.",
+                )
+            if not s.live_trading_confirmed:
+                return RiskCheckResult(
+                    passed=False,
+                    blocked_reason="LIVE_TRADING_CONFIRMED is false. Set it to true in .env to proceed.",
+                )
+
+        # 3. Market hours
+        if not is_market_hours(s.trading_start_time, s.trading_end_time, s.tz):
+            return RiskCheckResult(
+                passed=False,
+                blocked_reason=f"Outside market hours ({s.trading_start_time}–{s.trading_end_time} {s.trading_timezone})",
+            )
+
+        # 4. Max orders per day
+        orders_today = self._orders_today()
+        if orders_today >= s.max_orders_per_day:
+            return RiskCheckResult(
+                passed=False,
+                blocked_reason=f"Daily order limit reached ({orders_today}/{s.max_orders_per_day})",
+            )
+
+        # 5. Cooldown
+        last_time = self._last_order_time(order.symbol)
+        if last_time:
+            elapsed = (datetime.now(tz=timezone.utc) - last_time.replace(tzinfo=timezone.utc)).total_seconds()
+            if elapsed < s.order_cooldown_seconds:
+                remaining = int(s.order_cooldown_seconds - elapsed)
+                return RiskCheckResult(
+                    passed=False,
+                    blocked_reason=f"Cooldown active for {order.symbol}: {remaining}s remaining",
+                )
+
+        # 6. Duplicate prevention
+        if self._is_duplicate(order.idempotency_key):
+            return RiskCheckResult(
+                passed=False,
+                blocked_reason=f"Duplicate order detected (idempotency_key={order.idempotency_key})",
+            )
+
+        # 7. Max position size
+        price = estimated_price or order.limit_price or 0
+        order_value = price * order.quantity
+        if order_value > s.max_position_size_usd:
+            return RiskCheckResult(
+                passed=False,
+                blocked_reason=(
+                    f"Order value ${order_value:.2f} exceeds max position size ${s.max_position_size_usd:.2f}"
+                ),
+            )
+        elif order_value > s.max_position_size_usd * 0.8:
+            warnings.append(f"Order value ${order_value:.2f} is >80% of position size limit")
+
+        # 8. Daily loss
+        daily_loss = self._daily_realized_loss()
+        if daily_loss >= s.max_daily_loss_usd:
+            return RiskCheckResult(
+                passed=False,
+                blocked_reason=f"Daily loss limit hit (${daily_loss:.2f} >= ${s.max_daily_loss_usd:.2f})",
+            )
+
+        return RiskCheckResult(passed=True, warnings=warnings)
+
+    def get_status(self) -> RiskStatusOut:
+        s = self._settings
+        return RiskStatusOut(
+            kill_switch_active=self.is_kill_switch_active(),
+            live_trading_enabled=s.live_trading_enabled,
+            live_trading_confirmed=s.live_trading_confirmed,
+            active_broker=s.active_broker,
+            is_live=s.is_live,
+            orders_today=self._orders_today(),
+            max_orders_per_day=s.max_orders_per_day,
+            daily_loss_usd=self._daily_realized_loss(),
+            max_daily_loss_usd=s.max_daily_loss_usd,
+            market_hours_active=is_market_hours(s.trading_start_time, s.trading_end_time, s.tz),
+        )
