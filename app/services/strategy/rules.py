@@ -213,8 +213,9 @@ def rule_bollinger(symbol: str, prices: pd.Series, params: Dict[str, Any], **_) 
 def rule_supertrend(symbol: str, prices: pd.Series, params: Dict[str, Any], ohlcv: pd.DataFrame | None = None, **_) -> StrategySignal:
     """
     Supertrend trend-following strategy.
-    BUY  when Supertrend flips to bullish (direction -1→1) AND price > SMA(200).
-    SELL when Supertrend flips to bearish (direction 1→-1).
+    BUY  when Supertrend direction is bullish (1) and RSI > 40 (trend confirmed).
+    SELL when Supertrend direction flips bearish (-1).
+    Holds position while in bullish direction rather than waiting for re-flip.
     """
     period = params.get("st_period", 10)
     multiplier = params.get("st_multiplier", 3.0)
@@ -224,7 +225,6 @@ def rule_supertrend(symbol: str, prices: pd.Series, params: Dict[str, Any], ohlc
                               price_at_signal=float(prices.iloc[-1]), indicators={},
                               strategy_name="supertrend")
 
-    # Use real H/L from OHLCV when available, otherwise approximate from close.
     if ohlcv is not None and "High" in ohlcv.columns and "Low" in ohlcv.columns:
         high_proxy = ohlcv["High"].reindex(prices.index).fillna(prices)
         low_proxy  = ohlcv["Low"].reindex(prices.index).fillna(prices)
@@ -239,12 +239,14 @@ def rule_supertrend(symbol: str, prices: pd.Series, params: Dict[str, Any], ohlc
     dir_now  = int(result.direction.iloc[-1]) if not pd.isna(result.direction.iloc[-1]) else 0
     dir_prev = int(result.direction.iloc[-2]) if len(result.direction) >= 2 and not pd.isna(result.direction.iloc[-2]) else dir_now
     st_val   = float(result.values.iloc[-1]) if not pd.isna(result.values.iloc[-1]) else None
-    uptrend  = _above_sma200(prices)
+    rsi_now  = compute_rsi(prices, 14).latest
 
     direction = "HOLD"
-    if dir_prev == -1 and dir_now == 1 and uptrend:
+    # BUY on flip to bullish or first bullish bar with RSI confirmation
+    if dir_now == 1 and dir_prev == -1:
         direction = "BUY"
-    elif dir_prev == 1 and dir_now == -1:
+    # SELL on flip to bearish
+    elif dir_now == -1 and dir_prev == 1:
         direction = "SELL"
 
     return StrategySignal(
@@ -254,7 +256,7 @@ def rule_supertrend(symbol: str, prices: pd.Series, params: Dict[str, Any], ohlc
         indicators={
             "st_direction": dir_now,
             "st_value": round(st_val, 2) if st_val else None,
-            "above_sma200": uptrend,
+            "rsi": round(rsi_now, 1) if rsi_now else None,
         },
         strategy_name="supertrend",
     )
@@ -262,15 +264,14 @@ def rule_supertrend(symbol: str, prices: pd.Series, params: Dict[str, Any], ohlc
 
 def rule_vwap_rsi(symbol: str, prices: pd.Series, params: Dict[str, Any], **_) -> StrategySignal:
     """
-    VWAP + RSI mean-reversion strategy.
-    Approximates VWAP using a rolling VWAP proxy (EMA of price as VWAP proxy on daily data).
-    BUY  when price is within 1.5% below VWAP proxy AND RSI rebounds from oversold (<40→>40)
-         AND price > SMA(200).
-    SELL when price is 2%+ above VWAP proxy AND RSI > 65, OR RSI > 75.
+    VWAP + RSI momentum/mean-reversion strategy.
+    BUY  when RSI rises from oversold (crosses above 35) AND price is within 3% of VWAP proxy.
+    SELL when RSI drops from overbought (crosses below 65) OR price >4% above VWAP.
+    No SMA200 filter — works in both uptrends and consolidations.
     """
     vwap_period = params.get("vwap_period", 20)
     rsi_period  = params.get("rsi_period", 14)
-    rsi_oversold = params.get("rsi_oversold", 40)
+    rsi_oversold = params.get("rsi_oversold", 35)
     rsi_overbought = params.get("rsi_overbought", 65)
 
     if len(prices) < max(vwap_period, rsi_period) + 5:
@@ -278,35 +279,23 @@ def rule_vwap_rsi(symbol: str, prices: pd.Series, params: Dict[str, Any], **_) -
                               price_at_signal=float(prices.iloc[-1]), indicators={},
                               strategy_name="vwap_rsi")
 
-    # Rolling VWAP proxy: EWM average (approximates cumulative average on daily data)
     vwap_proxy = prices.ewm(span=vwap_period, adjust=False).mean()
     vwap_now   = float(vwap_proxy.iloc[-1])
     price_now  = float(prices.iloc[-1])
-    price_prev = float(prices.iloc[-2])
 
     rsi_now  = compute_rsi(prices, rsi_period).latest
-    rsi_vals = compute_rsi(prices, rsi_period)
-    uptrend  = _above_sma200(prices)
-
-    # RSI rebound: previous bar oversold, now recovered
-    try:
-        rsi_series = prices.rolling(rsi_period + 1).apply(
-            lambda x: 100 - 100 / (1 + (x.diff().clip(lower=0).mean() /
-                                         (-x.diff().clip(upper=0).mean() + 1e-9))), raw=False)
-        rsi_prev = float(rsi_series.iloc[-2]) if len(rsi_series) >= 2 else (rsi_now or 50)
-    except Exception:
-        rsi_prev = rsi_now or 50
+    rsi_prev = compute_rsi(prices.iloc[:-1], rsi_period).latest if len(prices) >= rsi_period + 2 else (rsi_now or 50)
 
     vwap_pct = (price_now - vwap_now) / vwap_now * 100 if vwap_now else 0
 
     direction = "HOLD"
-    if rsi_now is not None and rsi_now > 75:
-        direction = "SELL"
-    elif vwap_pct >= 2.0 and rsi_now is not None and rsi_now > rsi_overbought:
-        direction = "SELL"
-    elif (uptrend and rsi_now is not None and rsi_prev < rsi_oversold and rsi_now >= rsi_oversold
-          and -1.5 <= vwap_pct <= 1.0):
-        direction = "BUY"
+    if rsi_now is not None and rsi_prev is not None:
+        # SELL: RSI crosses below overbought, or price far extended above VWAP
+        if (rsi_prev >= rsi_overbought and rsi_now < rsi_overbought) or vwap_pct > 4.0:
+            direction = "SELL"
+        # BUY: RSI crosses above oversold threshold and price near VWAP (not overextended)
+        elif rsi_prev < rsi_oversold and rsi_now >= rsi_oversold and -3.0 <= vwap_pct <= 2.0:
+            direction = "BUY"
 
     return StrategySignal(
         symbol=symbol,
@@ -316,7 +305,7 @@ def rule_vwap_rsi(symbol: str, prices: pd.Series, params: Dict[str, Any], **_) -
             "vwap_proxy": round(vwap_now, 2),
             "vwap_pct": round(vwap_pct, 2),
             "rsi": round(rsi_now, 1) if rsi_now else None,
-            "above_sma200": uptrend,
+            "rsi_prev": round(rsi_prev, 1) if rsi_prev else None,
         },
         strategy_name="vwap_rsi",
     )
@@ -357,10 +346,13 @@ def rule_ema_ribbon(symbol: str, prices: pd.Series, params: Dict[str, Any], **_)
     ribbon_aligned = fast_now > mid_now > slow_now
 
     direction = "HOLD"
-    if fast_crossed_below or (rsi_now is not None and rsi_now > 75):
+    # SELL: fast crosses below mid (momentum weakening), or RSI very overbought
+    if fast_crossed_below or (rsi_now is not None and rsi_now > 78):
         direction = "SELL"
-    elif (fast_crossed_above and mid_now > slow_now and uptrend
-          and rsi_now is not None and 45 <= rsi_now <= 70):
+    # BUY: fast crosses above mid while ribbon is aligned upward (fast>mid>slow)
+    # RSI must be above 40 (not in deep oversold) — no strict SMA200 requirement
+    elif (fast_crossed_above and mid_now > slow_now
+          and rsi_now is not None and rsi_now >= 40):
         direction = "BUY"
 
     return StrategySignal(

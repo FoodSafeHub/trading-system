@@ -11,19 +11,19 @@ import pandas as pd
 
 from app.services.strategy.perplexity.base import PerplexitySignal, PerplexityStrategy
 from app.services.strategy.perplexity.strategies import (
-    BollingerReversionUptrend,
-    BollingerSqueezeBreakout,
-    EmaPullbackSupport,
-    HighVolumeMomentumBreakout,
-    MacdRsiMomentum,
+    EmaMeanReversionUptrend,
+    MaCrossoverRsi,
+    BreakoutConsolidation,
+    BollingerMeanReversionUptrend,
+    FibPullbackSupport,
 )
 
 PERPLEXITY_STRATEGIES: List[PerplexityStrategy] = [
-    HighVolumeMomentumBreakout(),
-    BollingerSqueezeBreakout(),
-    MacdRsiMomentum(),
-    EmaPullbackSupport(),
-    BollingerReversionUptrend(),
+    EmaMeanReversionUptrend(),
+    MaCrossoverRsi(),
+    BreakoutConsolidation(),
+    BollingerMeanReversionUptrend(),
+    FibPullbackSupport(),
 ]
 
 

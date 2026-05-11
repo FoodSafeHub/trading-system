@@ -170,7 +170,7 @@ if mode == "Single Strategy":
     if run:
         with st.spinner(f"Running backtest for {chosen} over {period}..."):
             try:
-                result = api._get(f"/backtest/run/{chosen}?period={period}&initial_capital={capital}&quantity=1")
+                result = api._get(f"/backtest/run/{chosen}?period={period}&initial_capital={capital}&quantity=0", timeout=120)
                 st.session_state["bt_result"] = result
                 st.session_state.pop("bt_consensus", None)
             except Exception as e:
@@ -254,7 +254,8 @@ else:
             try:
                 result = api._get(
                     f"/backtest/consensus/{chosen_sym}"
-                    f"?min_agreement={min_agreement}&period={period}&initial_capital={capital}"
+                    f"?min_agreement={min_agreement}&period={period}&initial_capital={capital}",
+                    timeout=120,
                 )
                 st.session_state["bt_consensus"] = result
                 st.session_state.pop("bt_result", None)

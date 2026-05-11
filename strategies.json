@@ -4,7 +4,7 @@
     "symbol": "SPY",
     "type": "supertrend",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 3.0 }
+    "params": { "st_period": 10, "st_multiplier": 2.0 }
   },
   {
     "name": "SPY_VWAP_RSI",
@@ -25,7 +25,7 @@
     "symbol": "QQQ",
     "type": "supertrend",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 3.0 }
+    "params": { "st_period": 10, "st_multiplier": 2.0 }
   },
   {
     "name": "QQQ_VWAP_RSI",
@@ -46,7 +46,7 @@
     "symbol": "AAPL",
     "type": "supertrend",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 3.0 }
+    "params": { "st_period": 10, "st_multiplier": 2.0 }
   },
   {
     "name": "AAPL_VWAP_RSI",
@@ -88,7 +88,7 @@
     "symbol": "NVDA",
     "type": "supertrend",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 3.0 }
+    "params": { "st_period": 10, "st_multiplier": 2.0 }
   },
   {
     "name": "NVDA_VWAP_RSI",
@@ -109,7 +109,7 @@
     "symbol": "MSFT",
     "type": "supertrend",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 3.0 }
+    "params": { "st_period": 10, "st_multiplier": 2.0 }
   },
   {
     "name": "MSFT_VWAP_RSI",
@@ -130,7 +130,7 @@
     "symbol": "AMZN",
     "type": "supertrend",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 3.0 }
+    "params": { "st_period": 10, "st_multiplier": 2.0 }
   },
   {
     "name": "AMZN_VWAP_RSI",
@@ -151,7 +151,7 @@
     "symbol": "META",
     "type": "supertrend",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 3.0 }
+    "params": { "st_period": 10, "st_multiplier": 2.0 }
   },
   {
     "name": "META_VWAP_RSI",
@@ -172,7 +172,7 @@
     "symbol": "GOOGL",
     "type": "supertrend",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 3.0 }
+    "params": { "st_period": 10, "st_multiplier": 2.0 }
   },
   {
     "name": "GOOGL_VWAP_RSI",
@@ -193,7 +193,7 @@
     "symbol": "JPM",
     "type": "supertrend",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 3.0 }
+    "params": { "st_period": 10, "st_multiplier": 2.0 }
   },
   {
     "name": "JPM_VWAP_RSI",

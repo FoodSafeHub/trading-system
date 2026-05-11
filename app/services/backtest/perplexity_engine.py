@@ -18,6 +18,31 @@ from app.services.risk.position_sizer import calculate_position_size
 from app.services.strategy.perplexity.base import PerplexityStrategy
 
 
+def calc_total_return(equity_curve: list) -> float:
+    """(E_final / E_initial) - 1, as a percentage."""
+    if not equity_curve or len(equity_curve) < 2:
+        return 0.0
+    e_initial = equity_curve[0]["equity"]
+    e_final   = equity_curve[-1]["equity"]
+    if e_initial == 0:
+        return 0.0
+    return round((e_final / e_initial - 1) * 100, 2)
+
+
+def calc_cagr(equity_curve: list) -> float:
+    """Compound annual growth rate assuming 252 trading days/year, as a percentage."""
+    if not equity_curve or len(equity_curve) < 2:
+        return 0.0
+    e_initial = equity_curve[0]["equity"]
+    e_final   = equity_curve[-1]["equity"]
+    if e_initial <= 0 or e_final <= 0:
+        return 0.0
+    years = len(equity_curve) / 252
+    if years <= 0:
+        return 0.0
+    return round(((e_final / e_initial) ** (1.0 / years) - 1) * 100, 2)
+
+
 @dataclass
 class PerplexityBacktestResult:
     strategy_name: str
@@ -28,12 +53,14 @@ class PerplexityBacktestResult:
     initial_capital: float
     final_capital: float
     total_pnl: float
-    total_return_pct: float
+    total_return_pct: float     # equity-curve total return %
+    cagr: float                 # compound annual growth rate %
     total_trades: int
     winning_trades: int
     losing_trades: int
     win_rate_pct: float
     profit_factor: float        # gross wins / gross losses
+    capital_employed: float     # sum of all buy-side position costs
     max_drawdown_pct: float
     sharpe_ratio: Optional[float]
     trades: List[dict] = field(default_factory=list)
@@ -47,6 +74,7 @@ def run_perplexity_backtest(
     initial_capital: float = 100_000.0,
     risk_pct_per_trade: float = 0.01,
     max_position_pct: float = 0.20,        # never put more than 20% of capital in one trade
+    position_pct: float = 0.0,             # >0 = fixed % of capital per trade (overrides risk sizing)
 ) -> PerplexityBacktestResult:
     df_full = get_ohlcv(symbol, period=period)
     if df_full.empty or len(df_full) < 60:
@@ -120,8 +148,13 @@ def run_perplexity_backtest(
                 sig = None
 
             if sig and sig.direction == "BUY":
-                # Position sizing: risk fixed % of current capital by stop distance
-                if sig.stop_price and sig.stop_price < fill_price:
+                if position_pct > 0:
+                    # Fixed % of capital per trade — deploys position_pct of current capital
+                    alloc = capital * min(position_pct, max_position_pct)
+                    qty = alloc / fill_price if fill_price > 0 else 0.0
+                    trade_risk = (fill_price - sig.stop_price) * qty if sig.stop_price else 0.0
+                elif sig.stop_price and sig.stop_price < fill_price:
+                    # Risk-based sizing: risk risk_pct_per_trade of capital on stop distance
                     sz = calculate_position_size(
                         symbol=symbol,
                         entry_price=fill_price,
@@ -203,14 +236,18 @@ def run_perplexity_backtest(
 
     final_capital = capital
     total_pnl = final_capital - initial_capital
-    total_return = total_pnl / initial_capital * 100
 
     sell_trades = [t for t in trades if "SELL" in t["side"]]
+    buy_trades  = [t for t in trades if t["side"] == "BUY"]
     winning = [t for t in sell_trades if (t.get("pnl") or 0) > 0]
     losing  = [t for t in sell_trades if (t.get("pnl") or 0) <= 0]
     win_rate = len(winning) / len(sell_trades) * 100 if sell_trades else 0.0
     # total_trades = round trips (sell count), not raw trade records (buy+sell)
     total_completed_trades = len(sell_trades)
+
+    capital_employed = sum(t["value"] for t in buy_trades) if buy_trades else 0.0
+    total_return = calc_total_return(equity_curve)
+    cagr         = calc_cagr(equity_curve)
 
     gross_wins   = sum(t["pnl"] for t in winning)
     gross_losses = abs(sum(t["pnl"] for t in losing))
@@ -233,7 +270,9 @@ def run_perplexity_backtest(
         initial_capital=initial_capital,
         final_capital=round(final_capital, 2),
         total_pnl=round(total_pnl, 2),
-        total_return_pct=round(total_return, 2),
+        capital_employed=round(capital_employed, 2),
+        total_return_pct=total_return,
+        cagr=cagr,
         total_trades=total_completed_trades,
         winning_trades=len(winning),
         losing_trades=len(losing),

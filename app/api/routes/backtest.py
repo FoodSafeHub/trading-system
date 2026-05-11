@@ -14,7 +14,7 @@ def backtest_strategy(
     strategy_name: str,
     period: str = "1y",
     initial_capital: float = 100000.0,
-    quantity: float = 1.0,
+    quantity: float = 0.0,
 ):
     """
     Run a backtest for a named strategy from strategies.json.

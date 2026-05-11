@@ -5,14 +5,20 @@ import requests
 BASE = "http://127.0.0.1:8000"
 
 
-def _get(path: str, **kwargs):
-    r = requests.get(f"{BASE}{path}", timeout=10, **kwargs)
+def _get(path: str, timeout: int = 10, **kwargs):
+    r = requests.get(f"{BASE}{path}", timeout=timeout, **kwargs)
     r.raise_for_status()
     return r.json()
 
 
 def _post(path: str, **kwargs):
     r = requests.post(f"{BASE}{path}", timeout=10, **kwargs)
+    r.raise_for_status()
+    return r.json()
+
+
+def _delete(path: str, timeout: int = 10):
+    r = requests.delete(f"{BASE}{path}", timeout=timeout)
     r.raise_for_status()
     return r.json()
 

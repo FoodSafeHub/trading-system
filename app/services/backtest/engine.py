@@ -97,9 +97,11 @@ def run_backtest(
 
         # Execute simulated trade
         if direction == "BUY" and position == 0:
-            # Use up to 95% of available capital, buy as many shares as we can afford
+            # Use up to 95% of available capital
             affordable_qty = (capital * 0.95) / fill_price if fill_price > 0 else 0
-            actual_qty = min(quantity, affordable_qty) if affordable_qty >= 0.01 else 0
+            # quantity<=0 means "use all capital"; quantity>0 is a fixed share count cap
+            actual_qty = affordable_qty if quantity <= 0 else min(quantity, affordable_qty)
+            actual_qty = actual_qty if affordable_qty >= 0.01 else 0
             if actual_qty > 0:
                 cost = fill_price * actual_qty
                 capital -= cost

@@ -10,11 +10,11 @@ st.set_page_config(page_title="Strategy & Signals", page_icon="⚙️", layout="
 st.title("⚙️ Strategy & Signals")
 
 PERPLEXITY_STRATEGIES = [
-    "High_Volume_Momentum_Breakout",
-    "Bollinger_Squeeze_Breakout",
-    "MACD_RSI_Momentum",
-    "EMA_Pullback_Support",
-    "Bollinger_Reversion_Uptrend",
+    "EMA_Mean_Reversion",
+    "MA_Crossover_RSI",
+    "Breakout_Consolidation",
+    "BB_Mean_Reversion",
+    "Fib_Pullback_Support",
 ]
 
 ALL_SYMBOLS = ["SPY", "QQQ", "AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "JPM"]
