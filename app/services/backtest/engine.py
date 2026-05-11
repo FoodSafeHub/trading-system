@@ -90,11 +90,8 @@ def run_backtest(
         fill_price = float(opens.iloc[i]) if i < len(opens) else current_close
         today = dates[i]
 
-        try:
-            signal = evaluate_strategy(strategy_type, symbol, price_series, params)
-        except Exception:
-            equity_curve.append({"date": today, "equity": round(capital + position * current_close, 2)})
-            continue
+        df_slice = df.iloc[:i]
+        signal = evaluate_strategy(strategy_type, symbol, price_series, params, ohlcv=df_slice)
 
         direction = signal.direction
 

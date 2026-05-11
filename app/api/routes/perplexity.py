@@ -39,8 +39,8 @@ def get_signals(symbol: str):
     settings = get_settings()
     try:
         df = get_ohlcv(symbol.upper(), period="1y")
-        if df.empty or len(df) < 210:
-            raise HTTPException(400, f"Not enough data for {symbol}")
+        if df.empty or len(df) < 60:
+            raise HTTPException(400, f"Not enough data for {symbol} (need at least 60 bars)")
         signals = run_perplexity_signal(symbol.upper(), df)
         results = []
         for s in signals:

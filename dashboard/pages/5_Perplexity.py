@@ -359,9 +359,9 @@ with tab_backtest:
         bt_symbol = st.text_input("Symbol", value="AAPL", key="px_sym",
                                   help="Type any US stock ticker.").upper().strip()
     with col3:
-        bt_period = st.selectbox("Period", ["2y", "5y"], index=1, key="px_period")
+        bt_period = st.selectbox("Period", ["6mo", "1y", "2y", "5y"], index=2, key="px_period")
     with col4:
-        bt_capital = st.number_input("Capital ($)", value=100000, min_value=10000, step=10000, key="px_cap")
+        bt_capital = st.number_input("Capital ($)", value=10000, min_value=1000, step=1000, key="px_cap")
 
     st.caption(STRATEGY_DESCRIPTIONS.get(chosen_strat, ""))
 
@@ -468,10 +468,10 @@ with tab_compare:
         cmp_symbol = st.text_input("Symbol", value="AAPL", key="cmp_sym",
                                    help="Type any US stock ticker.").upper().strip()
     with col2:
-        cmp_period = st.selectbox("Period", ["2y", "5y"], index=1, key="cmp_period")
+        cmp_period = st.selectbox("Period", ["6mo", "1y", "2y", "5y"], index=2, key="cmp_period")
     with col3:
-        cmp_capital = st.number_input("Capital ($)", value=100000, min_value=10000,
-                                       step=10000, key="cmp_cap")
+        cmp_capital = st.number_input("Capital ($)", value=10000, min_value=1000,
+                                       step=1000, key="cmp_cap")
 
     run_cmp = st.button("▶ Compare All", type="primary", key="px_run_cmp")
 
@@ -490,18 +490,42 @@ with tab_compare:
     if cmp:
         st.divider()
 
-        valid = [r for r in cmp if not r.get("error") and r["total_trades"] >= 5]
+        # Require at least 8 trades for statistical reliability.
+        # 5 trades is too small a sample to trust profit factor or win rate.
+        valid = [r for r in cmp if not r.get("error") and r["total_trades"] >= 8]
 
         # ── Best Strategy Recommendation ─────────────────────
         if valid:
-            # Score: weight profit factor (60%) + win rate (40%), must be profitable
-            def _score(r):
-                pf = r["profit_factor"] if r["profit_factor"] else 0
-                wr = r["win_rate_pct"] / 100
-                return 0.6 * pf + 0.4 * wr
+            # Rank-based scoring: each metric is ranked 1..N independently,
+            # so no single metric dominates due to scale differences.
+            # Weights: Return 40% | Profit Factor 25% | Win Rate 20% | Sharpe 10% | Trades 5%
+            # Trades weight ensures a 12-trade strategy beats a 5-trade one when
+            # other metrics are close — more trades = more statistically reliable.
+            def _ranked_score(strategies):
+                metrics = {
+                    "total_return_pct": 0.40,
+                    "profit_factor":    0.25,
+                    "win_rate_pct":     0.20,
+                    "sharpe_ratio":     0.10,
+                    "total_trades":     0.05,
+                }
+                scores = {r["strategy_name"]: 0.0 for r in strategies}
+                n = len(strategies)
+                for metric, weight in metrics.items():
+                    # profit_factor None = no losing trades = best possible → rank 1st
+                    def _val(r, m=metric):
+                        v = r.get(m)
+                        return float("inf") if v is None else float(v)
+                    ranked = sorted(strategies, key=_val, reverse=True)
+                    for rank, r in enumerate(ranked, start=1):
+                        # rank 1 = best → highest score = (n - rank + 1) / n
+                        scores[r["strategy_name"]] += weight * (n - rank + 1) / n
+                return scores
 
             profitable = [r for r in valid if r["total_return_pct"] > 0]
-            best = max(profitable, key=_score) if profitable else max(valid, key=_score)
+            pool = profitable if profitable else valid
+            scores = _ranked_score(pool)
+            best = max(pool, key=lambda r: scores[r["strategy_name"]])
 
             b_pf = best["profit_factor"] if best["profit_factor"] else 0
             b_ret = best["total_return_pct"]

@@ -49,8 +49,13 @@ def run_perplexity_backtest(
     max_position_pct: float = 0.20,        # never put more than 20% of capital in one trade
 ) -> PerplexityBacktestResult:
     df_full = get_ohlcv(symbol, period=period)
-    if df_full.empty or len(df_full) < 210:
-        raise ValueError(f"Not enough data for {symbol} (need 210+ bars for SMA200)")
+    if df_full.empty or len(df_full) < 60:
+        raise ValueError(f"Not enough data for {symbol} (need at least 60 bars)")
+
+    # Use 210-bar lookback when we have enough data (needed for SMA200).
+    # For shorter periods (6mo/1y) fall back to 60 bars — SMA200 will return
+    # HOLD on most signals but the backtest still runs and shows real results.
+    lookback = min(210, max(60, len(df_full) // 3))
 
     dates = [str(d)[:10] for d in df_full.index]
     capital = initial_capital
@@ -65,7 +70,6 @@ def run_perplexity_backtest(
     max_drawdown = 0.0
     daily_returns: List[float] = []
     prev_equity = initial_capital
-    lookback = 210
 
     for i in range(lookback, len(df_full)):
         df_slice = df_full.iloc[:i]
@@ -205,10 +209,13 @@ def run_perplexity_backtest(
     winning = [t for t in sell_trades if (t.get("pnl") or 0) > 0]
     losing  = [t for t in sell_trades if (t.get("pnl") or 0) <= 0]
     win_rate = len(winning) / len(sell_trades) * 100 if sell_trades else 0.0
+    # total_trades = round trips (sell count), not raw trade records (buy+sell)
+    total_completed_trades = len(sell_trades)
 
     gross_wins   = sum(t["pnl"] for t in winning)
     gross_losses = abs(sum(t["pnl"] for t in losing))
-    profit_factor = round(gross_wins / gross_losses, 2) if gross_losses > 0 else 0.0
+    # None = no losing trades at all (perfect record) — displayed as "—" in UI
+    profit_factor = round(gross_wins / gross_losses, 2) if gross_losses > 0 else None
 
     sharpe = None
     if len(daily_returns) > 1:
@@ -227,7 +234,7 @@ def run_perplexity_backtest(
         final_capital=round(final_capital, 2),
         total_pnl=round(total_pnl, 2),
         total_return_pct=round(total_return, 2),
-        total_trades=len(trades),
+        total_trades=total_completed_trades,
         winning_trades=len(winning),
         losing_trades=len(losing),
         win_rate_pct=round(win_rate, 2),

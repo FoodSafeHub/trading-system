@@ -18,6 +18,7 @@ from app.services.indicators.ema import compute_ema, ema_crossover_signal
 from app.services.indicators.macd import compute_macd
 from app.services.indicators.rsi import compute_rsi
 from app.services.indicators.sma import compute_sma, sma_crossover_signal
+from app.services.indicators.supertrend import compute_supertrend
 from app.services.strategy.models import StrategySignal
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ def _above_sma200(prices: pd.Series) -> bool:
     return float(prices.iloc[-1]) > float(sma200)
 
 
-def rule_sma_rsi(symbol: str, prices: pd.Series, params: Dict[str, Any]) -> StrategySignal:
+def rule_sma_rsi(symbol: str, prices: pd.Series, params: Dict[str, Any], **_) -> StrategySignal:
     """
     BUY  when fast SMA is above slow SMA AND RSI is in momentum zone (45-70)
          AND price is above SMA(200) — trend-following entry.
@@ -86,7 +87,7 @@ def rule_sma_rsi(symbol: str, prices: pd.Series, params: Dict[str, Any]) -> Stra
     )
 
 
-def rule_ema_crossover(symbol: str, prices: pd.Series, params: Dict[str, Any]) -> StrategySignal:
+def rule_ema_crossover(symbol: str, prices: pd.Series, params: Dict[str, Any], **_) -> StrategySignal:
     """
     EMA crossover with trend filter.
     BUY  when fast EMA crosses above slow EMA AND price > SMA(200).
@@ -115,7 +116,7 @@ def rule_ema_crossover(symbol: str, prices: pd.Series, params: Dict[str, Any]) -
     )
 
 
-def rule_macd(symbol: str, prices: pd.Series, params: Dict[str, Any]) -> StrategySignal:
+def rule_macd(symbol: str, prices: pd.Series, params: Dict[str, Any], **_) -> StrategySignal:
     """
     MACD crossover with RSI confirmation and trend filter.
     BUY  on bullish MACD crossover AND RSI > 45 AND price > SMA(200).
@@ -151,7 +152,7 @@ def rule_macd(symbol: str, prices: pd.Series, params: Dict[str, Any]) -> Strateg
     )
 
 
-def rule_bollinger(symbol: str, prices: pd.Series, params: Dict[str, Any]) -> StrategySignal:
+def rule_bollinger(symbol: str, prices: pd.Series, params: Dict[str, Any], **_) -> StrategySignal:
     """
     Bollinger Band mean-reversion WITH trend filter and RSI confirmation.
 
@@ -209,11 +210,183 @@ def rule_bollinger(symbol: str, prices: pd.Series, params: Dict[str, Any]) -> St
     )
 
 
+def rule_supertrend(symbol: str, prices: pd.Series, params: Dict[str, Any], ohlcv: pd.DataFrame | None = None, **_) -> StrategySignal:
+    """
+    Supertrend trend-following strategy.
+    BUY  when Supertrend flips to bullish (direction -1→1) AND price > SMA(200).
+    SELL when Supertrend flips to bearish (direction 1→-1).
+    """
+    period = params.get("st_period", 10)
+    multiplier = params.get("st_multiplier", 3.0)
+
+    if len(prices) < max(period + 5, 50):
+        return StrategySignal(symbol=symbol, direction="HOLD",
+                              price_at_signal=float(prices.iloc[-1]), indicators={},
+                              strategy_name="supertrend")
+
+    # Use real H/L from OHLCV when available, otherwise approximate from close.
+    if ohlcv is not None and "High" in ohlcv.columns and "Low" in ohlcv.columns:
+        high_proxy = ohlcv["High"].reindex(prices.index).fillna(prices)
+        low_proxy  = ohlcv["Low"].reindex(prices.index).fillna(prices)
+    else:
+        daily_move = prices.diff().abs()
+        atr_proxy = daily_move.ewm(span=period, adjust=False).mean().fillna(daily_move.mean())
+        high_proxy = prices + atr_proxy
+        low_proxy  = prices - atr_proxy
+
+    result = compute_supertrend(high_proxy, low_proxy, prices, period=period, multiplier=multiplier)
+
+    dir_now  = int(result.direction.iloc[-1]) if not pd.isna(result.direction.iloc[-1]) else 0
+    dir_prev = int(result.direction.iloc[-2]) if len(result.direction) >= 2 and not pd.isna(result.direction.iloc[-2]) else dir_now
+    st_val   = float(result.values.iloc[-1]) if not pd.isna(result.values.iloc[-1]) else None
+    uptrend  = _above_sma200(prices)
+
+    direction = "HOLD"
+    if dir_prev == -1 and dir_now == 1 and uptrend:
+        direction = "BUY"
+    elif dir_prev == 1 and dir_now == -1:
+        direction = "SELL"
+
+    return StrategySignal(
+        symbol=symbol,
+        direction=direction,
+        price_at_signal=float(prices.iloc[-1]),
+        indicators={
+            "st_direction": dir_now,
+            "st_value": round(st_val, 2) if st_val else None,
+            "above_sma200": uptrend,
+        },
+        strategy_name="supertrend",
+    )
+
+
+def rule_vwap_rsi(symbol: str, prices: pd.Series, params: Dict[str, Any], **_) -> StrategySignal:
+    """
+    VWAP + RSI mean-reversion strategy.
+    Approximates VWAP using a rolling VWAP proxy (EMA of price as VWAP proxy on daily data).
+    BUY  when price is within 1.5% below VWAP proxy AND RSI rebounds from oversold (<40→>40)
+         AND price > SMA(200).
+    SELL when price is 2%+ above VWAP proxy AND RSI > 65, OR RSI > 75.
+    """
+    vwap_period = params.get("vwap_period", 20)
+    rsi_period  = params.get("rsi_period", 14)
+    rsi_oversold = params.get("rsi_oversold", 40)
+    rsi_overbought = params.get("rsi_overbought", 65)
+
+    if len(prices) < max(vwap_period, rsi_period) + 5:
+        return StrategySignal(symbol=symbol, direction="HOLD",
+                              price_at_signal=float(prices.iloc[-1]), indicators={},
+                              strategy_name="vwap_rsi")
+
+    # Rolling VWAP proxy: EWM average (approximates cumulative average on daily data)
+    vwap_proxy = prices.ewm(span=vwap_period, adjust=False).mean()
+    vwap_now   = float(vwap_proxy.iloc[-1])
+    price_now  = float(prices.iloc[-1])
+    price_prev = float(prices.iloc[-2])
+
+    rsi_now  = compute_rsi(prices, rsi_period).latest
+    rsi_vals = compute_rsi(prices, rsi_period)
+    uptrend  = _above_sma200(prices)
+
+    # RSI rebound: previous bar oversold, now recovered
+    try:
+        rsi_series = prices.rolling(rsi_period + 1).apply(
+            lambda x: 100 - 100 / (1 + (x.diff().clip(lower=0).mean() /
+                                         (-x.diff().clip(upper=0).mean() + 1e-9))), raw=False)
+        rsi_prev = float(rsi_series.iloc[-2]) if len(rsi_series) >= 2 else (rsi_now or 50)
+    except Exception:
+        rsi_prev = rsi_now or 50
+
+    vwap_pct = (price_now - vwap_now) / vwap_now * 100 if vwap_now else 0
+
+    direction = "HOLD"
+    if rsi_now is not None and rsi_now > 75:
+        direction = "SELL"
+    elif vwap_pct >= 2.0 and rsi_now is not None and rsi_now > rsi_overbought:
+        direction = "SELL"
+    elif (uptrend and rsi_now is not None and rsi_prev < rsi_oversold and rsi_now >= rsi_oversold
+          and -1.5 <= vwap_pct <= 1.0):
+        direction = "BUY"
+
+    return StrategySignal(
+        symbol=symbol,
+        direction=direction,
+        price_at_signal=price_now,
+        indicators={
+            "vwap_proxy": round(vwap_now, 2),
+            "vwap_pct": round(vwap_pct, 2),
+            "rsi": round(rsi_now, 1) if rsi_now else None,
+            "above_sma200": uptrend,
+        },
+        strategy_name="vwap_rsi",
+    )
+
+
+def rule_ema_ribbon(symbol: str, prices: pd.Series, params: Dict[str, Any], **_) -> StrategySignal:
+    """
+    EMA Ribbon trend-following strategy.
+    Uses 3 EMAs (fast/mid/slow). All aligned (fast>mid>slow) = strong uptrend.
+    BUY  when fast EMA crosses above mid AND mid > slow AND price > SMA(200) AND RSI 45-70.
+    SELL when fast EMA crosses below mid OR RSI > 75.
+    """
+    ema_fast = params.get("ema_fast", 8)
+    ema_mid  = params.get("ema_mid", 21)
+    ema_slow = params.get("ema_slow", 50)
+    rsi_period = params.get("rsi_period", 14)
+
+    if len(prices) < ema_slow + 5:
+        return StrategySignal(symbol=symbol, direction="HOLD",
+                              price_at_signal=float(prices.iloc[-1]), indicators={},
+                              strategy_name="ema_ribbon")
+
+    fast_ema = prices.ewm(span=ema_fast, adjust=False).mean()
+    mid_ema  = prices.ewm(span=ema_mid, adjust=False).mean()
+    slow_ema = prices.ewm(span=ema_slow, adjust=False).mean()
+
+    fast_now  = float(fast_ema.iloc[-1])
+    fast_prev = float(fast_ema.iloc[-2])
+    mid_now   = float(mid_ema.iloc[-1])
+    mid_prev  = float(mid_ema.iloc[-2])
+    slow_now  = float(slow_ema.iloc[-1])
+
+    rsi_now = compute_rsi(prices, rsi_period).latest
+    uptrend = _above_sma200(prices)
+
+    fast_crossed_above = fast_prev <= mid_prev and fast_now > mid_now
+    fast_crossed_below = fast_prev >= mid_prev and fast_now < mid_now
+    ribbon_aligned = fast_now > mid_now > slow_now
+
+    direction = "HOLD"
+    if fast_crossed_below or (rsi_now is not None and rsi_now > 75):
+        direction = "SELL"
+    elif (fast_crossed_above and mid_now > slow_now and uptrend
+          and rsi_now is not None and 45 <= rsi_now <= 70):
+        direction = "BUY"
+
+    return StrategySignal(
+        symbol=symbol,
+        direction=direction,
+        price_at_signal=float(prices.iloc[-1]),
+        indicators={
+            "ema_fast": round(fast_now, 2),
+            "ema_mid": round(mid_now, 2),
+            "ema_slow": round(slow_now, 2),
+            "ribbon_aligned": ribbon_aligned,
+            "rsi": round(rsi_now, 1) if rsi_now else None,
+            "above_sma200": uptrend,
+        },
+        strategy_name="ema_ribbon",
+    )
+
+
 _RULE_REGISTRY = {
     "sma_rsi": rule_sma_rsi,
     "ema_crossover": rule_ema_crossover,
     "macd": rule_macd,
     "bollinger": rule_bollinger,
+    "supertrend": rule_supertrend,
+    "vwap_rsi": rule_vwap_rsi,
+    "ema_ribbon": rule_ema_ribbon,
 }
 
 
@@ -222,8 +395,11 @@ def evaluate_strategy(
     symbol: str,
     prices: pd.Series,
     params: Dict[str, Any],
+    ohlcv: pd.DataFrame | None = None,
 ) -> StrategySignal:
     rule_fn = _RULE_REGISTRY.get(strategy_type)
     if rule_fn is None:
         raise ValueError(f"Unknown strategy type: {strategy_type!r}. Available: {list(_RULE_REGISTRY)}")
+    if ohlcv is not None:
+        return rule_fn(symbol, prices, params, ohlcv=ohlcv)
     return rule_fn(symbol, prices, params)

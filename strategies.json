@@ -1,212 +1,212 @@
 [
   {
-    "name": "SPY_BB_20_2",
+    "name": "SPY_Supertrend",
     "symbol": "SPY",
-    "type": "bollinger",
+    "type": "supertrend",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 2.0 }
+    "params": { "st_period": 10, "st_multiplier": 3.0 }
   },
   {
-    "name": "SPY_BB_20_18",
+    "name": "SPY_VWAP_RSI",
     "symbol": "SPY",
-    "type": "bollinger",
+    "type": "vwap_rsi",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 1.8 }
+    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
   },
   {
-    "name": "SPY_BB_15_2",
+    "name": "SPY_EMA_Ribbon",
     "symbol": "SPY",
-    "type": "bollinger",
+    "type": "ema_ribbon",
     "enabled": true,
-    "params": { "bb_period": 15, "bb_std": 2.0 }
+    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
   },
   {
-    "name": "QQQ_BB_20_2",
+    "name": "QQQ_Supertrend",
     "symbol": "QQQ",
-    "type": "bollinger",
+    "type": "supertrend",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 2.0 }
+    "params": { "st_period": 10, "st_multiplier": 3.0 }
   },
   {
-    "name": "QQQ_BB_20_18",
+    "name": "QQQ_VWAP_RSI",
     "symbol": "QQQ",
-    "type": "bollinger",
+    "type": "vwap_rsi",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 1.8 }
+    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
   },
   {
-    "name": "QQQ_BB_15_2",
+    "name": "QQQ_EMA_Ribbon",
     "symbol": "QQQ",
-    "type": "bollinger",
+    "type": "ema_ribbon",
     "enabled": true,
-    "params": { "bb_period": 15, "bb_std": 2.0 }
+    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
   },
   {
-    "name": "AAPL_BB_20_2",
+    "name": "AAPL_Supertrend",
     "symbol": "AAPL",
-    "type": "bollinger",
+    "type": "supertrend",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 2.0 }
+    "params": { "st_period": 10, "st_multiplier": 3.0 }
   },
   {
-    "name": "AAPL_BB_20_18",
+    "name": "AAPL_VWAP_RSI",
     "symbol": "AAPL",
-    "type": "bollinger",
+    "type": "vwap_rsi",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 1.8 }
+    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
   },
   {
-    "name": "AAPL_BB_15_2",
+    "name": "AAPL_EMA_Ribbon",
     "symbol": "AAPL",
-    "type": "bollinger",
+    "type": "ema_ribbon",
     "enabled": true,
-    "params": { "bb_period": 15, "bb_std": 2.0 }
+    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
   },
   {
-    "name": "TSLA_BB_20_2",
+    "name": "TSLA_Supertrend",
     "symbol": "TSLA",
-    "type": "bollinger",
+    "type": "supertrend",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 2.0 }
+    "params": { "st_period": 7, "st_multiplier": 3.5 }
   },
   {
-    "name": "TSLA_BB_20_18",
+    "name": "TSLA_VWAP_RSI",
     "symbol": "TSLA",
-    "type": "bollinger",
+    "type": "vwap_rsi",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 1.8 }
+    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 38, "rsi_overbought": 68 }
   },
   {
-    "name": "TSLA_BB_15_2",
+    "name": "TSLA_EMA_Ribbon",
     "symbol": "TSLA",
-    "type": "bollinger",
+    "type": "ema_ribbon",
     "enabled": true,
-    "params": { "bb_period": 15, "bb_std": 2.0 }
+    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
   },
   {
-    "name": "NVDA_BB_20_2",
+    "name": "NVDA_Supertrend",
     "symbol": "NVDA",
-    "type": "bollinger",
+    "type": "supertrend",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 2.0 }
+    "params": { "st_period": 10, "st_multiplier": 3.0 }
   },
   {
-    "name": "NVDA_BB_20_18",
+    "name": "NVDA_VWAP_RSI",
     "symbol": "NVDA",
-    "type": "bollinger",
+    "type": "vwap_rsi",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 1.8 }
+    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
   },
   {
-    "name": "NVDA_BB_15_2",
+    "name": "NVDA_EMA_Ribbon",
     "symbol": "NVDA",
-    "type": "bollinger",
+    "type": "ema_ribbon",
     "enabled": true,
-    "params": { "bb_period": 15, "bb_std": 2.0 }
+    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
   },
   {
-    "name": "MSFT_BB_20_2",
+    "name": "MSFT_Supertrend",
     "symbol": "MSFT",
-    "type": "bollinger",
+    "type": "supertrend",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 2.0 }
+    "params": { "st_period": 10, "st_multiplier": 3.0 }
   },
   {
-    "name": "MSFT_BB_20_18",
+    "name": "MSFT_VWAP_RSI",
     "symbol": "MSFT",
-    "type": "bollinger",
+    "type": "vwap_rsi",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 1.8 }
+    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
   },
   {
-    "name": "MSFT_BB_15_2",
+    "name": "MSFT_EMA_Ribbon",
     "symbol": "MSFT",
-    "type": "bollinger",
+    "type": "ema_ribbon",
     "enabled": true,
-    "params": { "bb_period": 15, "bb_std": 2.0 }
+    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
   },
   {
-    "name": "AMZN_BB_20_2",
+    "name": "AMZN_Supertrend",
     "symbol": "AMZN",
-    "type": "bollinger",
+    "type": "supertrend",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 2.0 }
+    "params": { "st_period": 10, "st_multiplier": 3.0 }
   },
   {
-    "name": "AMZN_BB_20_18",
+    "name": "AMZN_VWAP_RSI",
     "symbol": "AMZN",
-    "type": "bollinger",
+    "type": "vwap_rsi",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 1.8 }
+    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
   },
   {
-    "name": "AMZN_BB_15_2",
+    "name": "AMZN_EMA_Ribbon",
     "symbol": "AMZN",
-    "type": "bollinger",
+    "type": "ema_ribbon",
     "enabled": true,
-    "params": { "bb_period": 15, "bb_std": 2.0 }
+    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
   },
   {
-    "name": "META_BB_20_2",
+    "name": "META_Supertrend",
     "symbol": "META",
-    "type": "bollinger",
+    "type": "supertrend",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 2.0 }
+    "params": { "st_period": 10, "st_multiplier": 3.0 }
   },
   {
-    "name": "META_BB_20_18",
+    "name": "META_VWAP_RSI",
     "symbol": "META",
-    "type": "bollinger",
+    "type": "vwap_rsi",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 1.8 }
+    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
   },
   {
-    "name": "META_BB_15_2",
+    "name": "META_EMA_Ribbon",
     "symbol": "META",
-    "type": "bollinger",
+    "type": "ema_ribbon",
     "enabled": true,
-    "params": { "bb_period": 15, "bb_std": 2.0 }
+    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
   },
   {
-    "name": "GOOGL_BB_20_2",
+    "name": "GOOGL_Supertrend",
     "symbol": "GOOGL",
-    "type": "bollinger",
+    "type": "supertrend",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 2.0 }
+    "params": { "st_period": 10, "st_multiplier": 3.0 }
   },
   {
-    "name": "GOOGL_BB_20_18",
+    "name": "GOOGL_VWAP_RSI",
     "symbol": "GOOGL",
-    "type": "bollinger",
+    "type": "vwap_rsi",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 1.8 }
+    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
   },
   {
-    "name": "GOOGL_BB_15_2",
+    "name": "GOOGL_EMA_Ribbon",
     "symbol": "GOOGL",
-    "type": "bollinger",
+    "type": "ema_ribbon",
     "enabled": true,
-    "params": { "bb_period": 15, "bb_std": 2.0 }
+    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
   },
   {
-    "name": "JPM_BB_20_2",
+    "name": "JPM_Supertrend",
     "symbol": "JPM",
-    "type": "bollinger",
+    "type": "supertrend",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 2.0 }
+    "params": { "st_period": 10, "st_multiplier": 3.0 }
   },
   {
-    "name": "JPM_BB_20_18",
+    "name": "JPM_VWAP_RSI",
     "symbol": "JPM",
-    "type": "bollinger",
+    "type": "vwap_rsi",
     "enabled": true,
-    "params": { "bb_period": 20, "bb_std": 1.8 }
+    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
   },
   {
-    "name": "JPM_BB_15_2",
+    "name": "JPM_EMA_Ribbon",
     "symbol": "JPM",
-    "type": "bollinger",
+    "type": "ema_ribbon",
     "enabled": true,
-    "params": { "bb_period": 15, "bb_std": 2.0 }
+    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
   }
 ]
