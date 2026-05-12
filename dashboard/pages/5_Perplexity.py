@@ -2060,6 +2060,7 @@ with tab_config:
                 with c3:
                     cfg["r_multiple"] = st.number_input(
                         "Target R multiple", 1.0, 5.0, cfg["r_multiple"], 0.5, key=f"{s_name}_r")
+                    cfg.setdefault("use_sma200", False)
                     cfg["use_sma200"] = st.toggle(
                         "Require SMA(200) uptrend", value=cfg["use_sma200"], key=f"{s_name}_sma200")
 
@@ -2157,9 +2158,9 @@ with tab_config:
                     cfg["atr_stop_mult"] = st.number_input(
                         "Stop ATR multiple", 1.0, 3.0, cfg["atr_stop_mult"], 0.25,
                         key=f"{s_name}_asm")
-                    cfg["r_multiple"] = st.number_input(
-                        "Target R multiple", 1.0, 5.0, cfg["r_multiple"], 0.5,
-                        key=f"{s_name}_r")
+                    st.markdown(
+                        "**Target is prior swing high — this strategy does not use a configurable R multiple.**"
+                    )
 
                 st.markdown("**🔬 Data-Driven Entry Filters** *(set via Symbol Profiles tab)*")
                 fc1, fc2 = st.columns(2)
