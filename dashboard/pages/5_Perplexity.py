@@ -7,6 +7,8 @@ import plotly.graph_objects as go
 import streamlit as st
 import pandas as pd
 
+from app.config import get_settings
+
 st.set_page_config(page_title="Perplexity Strategies", page_icon="🧠", layout="wide")
 st.title("🧠 Perplexity Swing Strategies")
 st.caption(
@@ -75,10 +77,12 @@ with tab_signals:
         buy_count  = sum(1 for s in sigs if s["direction"] == "BUY")
         sell_count = sum(1 for s in sigs if s["direction"] == "SELL")
         hold_count = sum(1 for s in sigs if s["direction"] == "HOLD")
-        c1, c2, c3 = st.columns(3)
+        regime_label = sigs[0].get("regime", "unknown").replace("_", " ").title() if sigs else "Unknown"
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("🟢 BUY signals",  buy_count)
         c2.metric("🔴 SELL signals", sell_count)
         c3.metric("⬜ HOLD",         hold_count)
+        c4.metric("📈 Market Regime", regime_label)
         st.divider()
 
         for s in sigs:
@@ -511,125 +515,173 @@ with tab_backtest:
                 snapshots = an.get("snapshots", [])
                 patterns  = an.get("patterns", [])
                 timing    = an.get("timing", {})
+                msg       = an.get("message", "")
 
                 wins   = [s for s in snapshots if s["outcome"] == "win"]
                 losses = [s for s in snapshots if s["outcome"] == "loss"]
 
                 if not snapshots:
-                    st.warning("Not enough trades to analyze (need at least 6 completed trades).")
+                    if msg:
+                        st.warning(msg)
+                    else:
+                        st.warning("Not enough trades to analyze (need at least 6 completed trades). "
+                                   "Try a longer period or a different symbol.")
                 else:
-                    st.markdown(f"**{len(snapshots)} trades analyzed** — "
-                                f"🟢 {len(wins)} wins | 🔴 {len(losses)} losses")
+                    # ── Summary header ────────────────────────
+                    avg_win  = sum(s["pnl_pct"] for s in wins)  / len(wins)  if wins  else 0
+                    avg_loss = sum(s["pnl_pct"] for s in losses) / len(losses) if losses else 0
+                    avg_hold = sum(s["hold_bars"] for s in snapshots) / len(snapshots)
+                    sm1, sm2, sm3, sm4 = st.columns(4)
+                    sm1.metric("Trades analyzed", len(snapshots))
+                    sm2.metric("Win rate", f"{len(wins)/len(snapshots)*100:.0f}%",
+                               delta=f"{len(wins)}W / {len(losses)}L", delta_color="off")
+                    sm3.metric("Avg win", f"{avg_win:+.1f}%",
+                               delta=f"loss avg {avg_loss:+.1f}%", delta_color="off")
+                    sm4.metric("Avg hold", f"{avg_hold:.0f} bars")
                     st.divider()
 
-                    # ── Top patterns ──────────────────────────
+                    # ── P&L distribution (most important trader view) ──
+                    pnl_w = [s["pnl_pct"] for s in wins]
+                    pnl_l = [s["pnl_pct"] for s in losses]
+                    if pnl_w or pnl_l:
+                        fig_pnl = go.Figure()
+                        if pnl_w:
+                            fig_pnl.add_trace(go.Histogram(
+                                x=pnl_w, name="Wins", nbinsx=12,
+                                marker_color="rgba(0,212,170,0.75)", opacity=0.8))
+                        if pnl_l:
+                            fig_pnl.add_trace(go.Histogram(
+                                x=pnl_l, name="Losses", nbinsx=12,
+                                marker_color="rgba(255,75,75,0.75)", opacity=0.8))
+                        fig_pnl.add_vline(x=0, line_color="rgba(255,255,255,0.4)", line_dash="dash")
+                        fig_pnl.update_layout(
+                            barmode="overlay",
+                            title="P&L % Distribution — Wins vs Losses",
+                            height=260, template="plotly_dark",
+                            margin=dict(l=0, r=0, t=40, b=0),
+                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                            xaxis_title="P&L %", yaxis_title="# Trades",
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                        )
+                        fig_pnl.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
+                        fig_pnl.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
+                        st.plotly_chart(fig_pnl, use_container_width=True)
+
+                    # ── Top discriminating indicators ─────────
+                    LABEL_MAP = {
+                        "rsi":             "RSI at Entry",
+                        "atr_pct":         "Volatility (ATR%)",
+                        "ema_dist_pct":    "EMA20 Distance %",
+                        "sma200_dist_pct": "SMA200 Distance %",
+                        "bb_pct":          "BB Band Position (0=lower, 1=upper)",
+                        "volume_ratio":    "Volume vs 20d Avg",
+                        "body_pct":        "Candle Body Size (x ATR)",
+                        "lower_wick_pct":  "Lower Wick % of Range (rejection)",
+                        "upper_wick_pct":  "Upper Wick % of Range",
+                        "hold_bars":       "Hold Duration (bars)",
+                        # Strategy-specific
+                        "ema_spread_pct":  "EMA20/50 Spread % (MA Crossover momentum)",
+                        "range_atr_ratio": "Base Range / ATR (Breakout tightness)",
+                        "bb_depth_pct":    "BB Lower Band Depth % (BB oversold severity)",
+                        "fib_level":       "Fibonacci Level Hit (0.382 / 0.50 / 0.618)",
+                    }
+
                     if patterns:
-                        st.subheader("📊 Top Discriminating Indicators")
+                        st.subheader("📊 What Separates Wins from Losses")
                         st.caption(
-                            "Sorted by how strongly each indicator separates wins from losses. "
-                            "High separation = reliable filter. Low = noise."
+                            "Each row shows how strongly an indicator at entry bar predicted outcome. "
+                            "**Separation > 0.5** = reliable filter worth applying. "
+                            "Suggestion is derived from the win distribution's 20th–80th percentile."
                         )
 
-                        LABEL_MAP = {
-                            "rsi":             "RSI at Entry",
-                            "atr_pct":         "Volatility (ATR%)",
-                            "ema_dist_pct":    "EMA20 Distance %",
-                            "sma200_dist_pct": "SMA200 Distance %",
-                            "bb_pct":          "BB Band Position",
-                            "volume_ratio":    "Volume vs Avg",
-                            "body_pct":        "Candle Body Size",
-                            "lower_wick_pct":  "Lower Wick %",
-                            "upper_wick_pct":  "Upper Wick %",
-                            "hold_bars":       "Days Held",
-                        }
-
-                        for p in patterns[:6]:  # top 6
+                        for p in patterns[:8]:
                             label = LABEL_MAP.get(p["indicator"], p["indicator"])
-                            sep = p["separation"]
-                            strength = "🔴 Strong" if sep > 0.6 else ("🟡 Moderate" if sep > 0.3 else "⚪ Weak")
-                            arrow = "↑ higher in wins" if p["direction"] == "higher_is_better" else "↓ lower in wins"
-
+                            sep   = p["separation"]
+                            strength = ("🔴 **Strong**" if sep > 0.6
+                                        else ("🟡 Moderate" if sep > 0.3 else "⚪ Weak"))
                             with st.container():
-                                c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-                                c1.markdown(f"**{label}**  \n{p['description']}")
+                                c1, c2, c3, c4 = st.columns([2.5, 1, 1, 1])
+                                c1.markdown(f"**{label}**")
                                 c2.metric("Win avg",  f"{p['win_mean']:.2f}")
                                 c3.metric("Loss avg", f"{p['loss_mean']:.2f}",
                                           delta=f"{p['win_mean'] - p['loss_mean']:+.2f}",
                                           delta_color="normal" if p["direction"] == "higher_is_better" else "inverse")
-                                c4.metric("Separation", f"{sep:.2f}",
-                                          delta=strength, delta_color="off")
-                                st.caption(f"💡 {p['recommendation']}")
+                                c4.metric("Separation", f"{sep:.2f}", delta=strength, delta_color="off")
+                                st.caption(f"   💡 {p['recommendation']}")
                                 st.write("")
 
-                        # Distribution chart for top indicator
-                        top = patterns[0]
+                        # Distribution of top indicator
+                        top       = patterns[0]
                         top_label = LABEL_MAP.get(top["indicator"], top["indicator"])
-                        w_vals = [s[top["indicator"]] for s in wins  if s.get(top["indicator"]) is not None]
-                        l_vals = [s[top["indicator"]] for s in losses if s.get(top["indicator"]) is not None]
-
+                        w_vals    = [s[top["indicator"]] for s in wins   if s.get(top["indicator"]) is not None]
+                        l_vals    = [s[top["indicator"]] for s in losses if s.get(top["indicator"]) is not None]
                         if w_vals and l_vals:
                             fig_dist = go.Figure()
                             fig_dist.add_trace(go.Histogram(
                                 x=w_vals, name="Wins", nbinsx=15,
-                                marker_color="rgba(0,212,170,0.7)",
-                                opacity=0.75,
-                            ))
+                                marker_color="rgba(0,212,170,0.7)", opacity=0.75))
                             fig_dist.add_trace(go.Histogram(
                                 x=l_vals, name="Losses", nbinsx=15,
-                                marker_color="rgba(255,75,75,0.7)",
-                                opacity=0.75,
-                            ))
-                            fig_dist.update_layout(
-                                barmode="overlay",
-                                title=f"Distribution of {top_label} — Wins vs Losses",
-                                height=280, template="plotly_dark",
-                                margin=dict(l=0, r=0, t=40, b=0),
-                                paper_bgcolor="rgba(0,0,0,0)",
-                                plot_bgcolor="rgba(0,0,0,0)",
-                                xaxis_title=top_label,
-                                yaxis_title="# Trades",
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                            )
+                                marker_color="rgba(255,75,75,0.7)", opacity=0.75))
                             if top.get("suggested_min") is not None:
                                 fig_dist.add_vline(x=top["suggested_min"], line_dash="dash",
                                                    line_color="#FFD700",
-                                                   annotation_text=f"Suggested min: {top['suggested_min']:.2f}")
+                                                   annotation_text=f"Min: {top['suggested_min']:.2f}")
                             if top.get("suggested_max") is not None:
                                 fig_dist.add_vline(x=top["suggested_max"], line_dash="dash",
                                                    line_color="#FFD700",
-                                                   annotation_text=f"Suggested max: {top['suggested_max']:.2f}")
+                                                   annotation_text=f"Max: {top['suggested_max']:.2f}")
+                            fig_dist.update_layout(
+                                barmode="overlay",
+                                title=f"Top Signal: {top_label} distribution",
+                                height=260, template="plotly_dark",
+                                margin=dict(l=0, r=0, t=40, b=0),
+                                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                xaxis_title=top_label, yaxis_title="# Trades",
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                            )
+                            fig_dist.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
+                            fig_dist.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
                             st.plotly_chart(fig_dist, use_container_width=True)
 
-                        # Scatter: RSI vs EMA dist colored by outcome
-                        rsi_vals  = [s["rsi"] for s in snapshots]
-                        ema_vals  = [s["ema_dist_pct"] for s in snapshots]
-                        colors_sc = ["#00d4aa" if s["outcome"] == "win" else "#ff4b4b" for s in snapshots]
-                        if rsi_vals and ema_vals:
+                        # Strategy-aware scatter: top 2 discriminating indicators
+                        _scatter_x_key = patterns[0]["indicator"] if patterns else "rsi"
+                        _scatter_y_key = patterns[1]["indicator"] if len(patterns) > 1 else "ema_dist_pct"
+                        _sx_label = LABEL_MAP.get(_scatter_x_key, _scatter_x_key)
+                        _sy_label = LABEL_MAP.get(_scatter_y_key, _scatter_y_key)
+                        sc_x = [s.get(_scatter_x_key) for s in snapshots]
+                        sc_y = [s.get(_scatter_y_key) for s in snapshots]
+                        sc_c = ["#00d4aa" if s["outcome"] == "win" else "#ff4b4b" for s in snapshots]
+                        if any(v is not None for v in sc_x) and any(v is not None for v in sc_y):
                             fig_sc = go.Figure(go.Scatter(
-                                x=rsi_vals, y=ema_vals, mode="markers",
-                                marker=dict(color=colors_sc, size=9, opacity=0.8),
+                                x=sc_x, y=sc_y, mode="markers",
+                                marker=dict(color=sc_c, size=9, opacity=0.8),
                                 text=[f"{s['date']}<br>P&L: {s['pnl_pct']:+.1f}%" for s in snapshots],
                                 hovertemplate="%{text}<extra></extra>",
                             ))
                             fig_sc.update_layout(
-                                title="RSI vs EMA Distance at Entry  (green=win, red=loss)",
+                                title=f"Top 2 signals: {_sx_label} vs {_sy_label}  (green=win, red=loss)",
                                 height=300, template="plotly_dark",
                                 margin=dict(l=0, r=0, t=40, b=0),
-                                paper_bgcolor="rgba(0,0,0,0)",
-                                plot_bgcolor="rgba(0,0,0,0)",
-                                xaxis_title="RSI", yaxis_title="EMA Distance %",
+                                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                xaxis_title=_sx_label, yaxis_title=_sy_label,
                             )
                             fig_sc.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
                             fig_sc.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
                             st.plotly_chart(fig_sc, use_container_width=True)
 
                     else:
-                        st.info("No strong discriminating patterns found — wins and losses look similar across all indicators. "
-                                "The strategy entry conditions may already be well-calibrated, or there's not enough data.")
+                        st.info(
+                            "No strong discriminating patterns found — wins and losses look similar "
+                            "across all indicators. This usually means either the strategy entry "
+                            "conditions are already well-filtered, or there aren't enough trades "
+                            "yet. Try a longer period (5y–10y) to get more samples."
+                        )
 
                     # ── Timing breakdown ──────────────────────
                     st.divider()
                     st.subheader("📅 Win Rate by Time Period")
+                    st.caption("Find seasonal edges — avoid months/quarters with consistently low win rates.")
 
                     t1, t2, t3 = st.columns(3)
 
@@ -637,22 +689,25 @@ with tab_backtest:
                         if not data:
                             return
                         labels = list(data.keys())
-                        wr = [data[k]["win_rate"] for k in labels]
+                        wr     = [data[k]["win_rate"] for k in labels]
                         trades = [data[k]["trades"] for k in labels]
-                        colors = ["#00d4aa" if w >= 55 else ("#FFD700" if w >= 45 else "#ff4b4b")
-                                  for w in wr]
+                        avg_p  = [data[k].get("avg_pnl_pct", 0) for k in labels]
+                        colors = ["#00d4aa" if w >= 55 else ("#FFD700" if w >= 45 else "#ff4b4b") for w in wr]
                         fig = go.Figure(go.Bar(
-                            x=labels, y=wr,
-                            marker_color=colors,
+                            x=labels, y=wr, marker_color=colors,
                             text=[f"{w:.0f}%<br>({t}t)" for w, t in zip(wr, trades)],
                             textposition="outside",
+                            hovertext=[f"Win rate: {w:.0f}%<br>Trades: {t}<br>Avg P&L: {p:+.1f}%"
+                                       for w, t, p in zip(wr, trades, avg_p)],
+                            hoverinfo="text",
                         ))
-                        fig.add_hline(y=50, line_dash="dash", line_color="rgba(255,255,255,0.3)")
+                        fig.add_hline(y=50, line_dash="dash", line_color="rgba(255,255,255,0.3)",
+                                      annotation_text="50%")
                         fig.update_layout(
-                            title=title, height=240, template="plotly_dark",
+                            title=title, height=250, template="plotly_dark",
                             margin=dict(l=0, r=0, t=40, b=0),
                             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                            yaxis=dict(range=[0, 100], title="Win Rate %"),
+                            yaxis=dict(range=[0, 110], title="Win Rate %"),
                         )
                         container.plotly_chart(fig, use_container_width=True)
 
@@ -665,22 +720,32 @@ with tab_backtest:
                     with st.expander("📋 Full trade snapshot table", expanded=False):
                         snap_rows = []
                         for s in snapshots:
-                            snap_rows.append({
-                                "Date": s["date"],
-                                "Outcome": "🟢 Win" if s["outcome"] == "win" else "🔴 Loss",
-                                "P&L %": f"{s['pnl_pct']:+.2f}%",
-                                "Hold (bars)": s["hold_bars"],
-                                "RSI": s["rsi"],
-                                "ATR%": s["atr_pct"],
-                                "EMA dist%": s["ema_dist_pct"],
+                            row = {
+                                "Date":         s["date"],
+                                "Outcome":      "🟢 Win" if s["outcome"] == "win" else "🔴 Loss",
+                                "P&L %":        f"{s['pnl_pct']:+.2f}%",
+                                "Hold (bars)":  s["hold_bars"],
+                                "RSI":          s["rsi"],
+                                "ATR%":         s["atr_pct"],
+                                "EMA dist%":    s["ema_dist_pct"],
                                 "SMA200 dist%": s["sma200_dist_pct"],
-                                "BB pos": s["bb_pct"],
-                                "Vol ratio": s["volume_ratio"],
-                                "Low wick%": s["lower_wick_pct"],
-                                "Quarter": f"Q{s['quarter']}",
-                                "Prior won": ("✅" if s["prior_trade_won"] else "❌")
-                                             if s["prior_trade_won"] is not None else "—",
-                            })
+                                "BB pos":       s["bb_pct"],
+                                "Vol ratio":    s["volume_ratio"],
+                                "Low wick%":    s["lower_wick_pct"],
+                                "Quarter":      f"Q{s['quarter']}",
+                                "Prior won":    ("Yes" if s["prior_trade_won"] else "No")
+                                                if s["prior_trade_won"] is not None else "—",
+                            }
+                            # Add strategy-specific columns if populated
+                            if s.get("ema_spread_pct") is not None:
+                                row["EMA spread%"] = s["ema_spread_pct"]
+                            if s.get("range_atr_ratio") is not None:
+                                row["Range/ATR"]   = s["range_atr_ratio"]
+                            if s.get("bb_depth_pct") is not None:
+                                row["BB depth%"]   = s["bb_depth_pct"]
+                            if s.get("fib_level") is not None:
+                                row["Fib level"]   = s["fib_level"]
+                            snap_rows.append(row)
                         st.dataframe(pd.DataFrame(snap_rows), use_container_width=True, hide_index=True)
 
 
@@ -1297,111 +1362,227 @@ with tab_walkforward:
                 st.plotly_chart(fig_wfe, use_container_width=True)
 
     # ── Before / After Filter Comparison ─────────────────────
-    if wf_strat == "EMA_Mean_Reversion":
-        st.divider()
-        with st.expander("🔬 Before vs After Filter Comparison — does adding the data-driven filters improve WFE?", expanded=False):
-            st.caption(
-                "Runs rolling walk-forward **twice** on EMA Mean Reversion: once with filters OFF, "
-                "once with the recommended filters ON (EMA dist ≥ 1.5%, Vol ≥ 1.0×, BB pos ≥ 0.72). "
-                "A genuine improvement in OOS WFE means the filters are real, not overfit."
-            )
-            baf_col1, baf_col2, baf_col3 = st.columns(3)
-            with baf_col1:
-                baf_sym = st.text_input("Symbol", value=wf_sym, key="baf_sym").upper().strip()
-            with baf_col2:
-                baf_period = st.selectbox("Period", ["5y", "10y"], index=1, key="baf_period")
-            with baf_col3:
-                baf_capital = st.number_input("Capital ($)", min_value=1000, value=10000,
-                                               step=1000, key="baf_cap")
+    # Available for all strategies — filter inputs auto-populate from saved calibration
+    # profile for the selected symbol, falling back to strategy config defaults.
+    st.divider()
+    with st.expander("🔬 Before vs After Filter Comparison — do the calibrated filters improve WFE?", expanded=False):
+        st.caption(
+            f"Runs rolling walk-forward **twice** on **{wf_strat}**: once with filters OFF, "
+            "once with filters ON using the values from the saved Symbol Profile for this symbol "
+            "(or strategy defaults if no profile exists). A genuine improvement in OOS WFE "
+            "means the filters are real and not overfit."
+        )
 
-            baf_f1, baf_f2, baf_f3 = st.columns(3)
-            with baf_f1:
-                baf_ema_dist = st.number_input("EMA dist filter (≥)", 0.0, 4.0, 1.5, 0.1, key="baf_ema")
-            with baf_f2:
-                baf_vol = st.number_input("Volume ratio filter (≥)", 0.0, 2.0, 1.0, 0.1, key="baf_vol")
-            with baf_f3:
-                baf_bb = st.number_input("BB position filter (≥)", 0.0, 1.0, 0.72, 0.05, key="baf_bb")
+        baf_col1, baf_col2, baf_col3 = st.columns(3)
+        with baf_col1:
+            baf_sym = st.text_input("Symbol", value=wf_sym, key="baf_sym").upper().strip()
+        with baf_col2:
+            baf_period = st.selectbox("Period", ["5y", "10y"], index=1, key="baf_period")
+        with baf_col3:
+            baf_capital = st.number_input("Capital ($)", min_value=1000, value=10000,
+                                          step=1000, key="baf_cap")
 
-            if st.button("▶ Run Before/After Comparison", type="primary", key="baf_run"):
-                with st.spinner("Running both walk-forwards server-side (before + after filters)... ~3 min"):
-                    try:
-                        result = api._get(
-                            f"/perplexity/filter-comparison/EMA_Mean_Reversion/{baf_sym}"
-                            f"?period={baf_period}&train_years=3.0&test_years=1.0&step_years=1.0"
-                            f"&initial_capital={baf_capital}&position_pct=0.0"
-                            f"&ema_dist_min={baf_ema_dist}&vol_min={baf_vol}&bb_pos_min={baf_bb}",
-                            timeout=900,
-                        )
-                        st.session_state["baf_result"] = result
-                    except Exception as e:
-                        st.error(f"Comparison failed: {e}")
+        # ── Auto-load saved profile for this symbol/strategy ──
+        _baf_profile = {}
+        try:
+            _baf_profile = api._get(f"/perplexity/profiles/{wf_strat}/{baf_sym}") or {}
+        except Exception:
+            pass
 
-            baf_res = st.session_state.get("baf_result")
-            bef = baf_res.get("before") if baf_res else None
-            aft = baf_res.get("after")  if baf_res else None
-            if bef and aft:
-                st.divider()
-                b1, b2, b3, b4 = st.columns(4)
-                b1.metric("WITHOUT filters — Global WFE",
-                          f"{bef.get('global_wfe', 0):.2f}×" if bef.get("global_wfe") else "N/A",
-                          delta=bef.get("global_wfe_label", ""))
-                b2.metric("WITHOUT filters — OOS CAGR",
-                          f"{bef.get('global_oos_cagr', 0):+.2f}%")
-                b3.metric("WITH filters — Global WFE",
-                          f"{aft.get('global_wfe', 0):.2f}×" if aft.get("global_wfe") else "N/A",
-                          delta=aft.get("global_wfe_label", ""),
-                          delta_color="normal" if (aft.get("global_wfe") or 0) > (bef.get("global_wfe") or 0) else "inverse")
-                b4.metric("WITH filters — OOS CAGR",
-                          f"{aft.get('global_oos_cagr', 0):+.2f}%",
-                          delta=f"{aft.get('global_oos_cagr', 0) - bef.get('global_oos_cagr', 0):+.2f}% vs no filters",
-                          delta_color="normal" if aft.get("global_oos_cagr", 0) > bef.get("global_oos_cagr", 0) else "inverse")
+        # Helper: read from profile first, then strategy config, then hard fallback
+        def _baf_default(profile_key: str, config_key: str, fallback: float) -> float:
+            v = _baf_profile.get(profile_key)
+            if v and float(v) > 0:
+                return float(v)
+            try:
+                from app.services.strategy.perplexity.runner import PERPLEXITY_STRATEGIES as _PS
+                _cfgmap = {s.name: s for s in _PS}
+                cfg_v = _cfgmap.get(wf_strat, None)
+                if cfg_v:
+                    cv = cfg_v.config.get(config_key, 0.0)
+                    if cv and float(cv) > 0:
+                        return float(cv)
+            except Exception:
+                pass
+            return fallback
 
-                # Side-by-side composite OOS curves
-                bef_curve = bef.get("oos_composite_curve", [])
-                aft_curve = aft.get("oos_composite_curve", [])
-                if bef_curve or aft_curve:
-                    fig_baf = go.Figure()
-                    if bef_curve:
-                        df_b = pd.DataFrame(bef_curve)
-                        fig_baf.add_trace(go.Scatter(
-                            x=df_b["date"], y=df_b["equity"], mode="lines",
-                            name="Without filters", line=dict(color="#ff4b4b", width=2, dash="dot")))
-                    if aft_curve:
-                        df_a = pd.DataFrame(aft_curve)
-                        fig_baf.add_trace(go.Scatter(
-                            x=df_a["date"], y=df_a["equity"], mode="lines",
-                            name="With filters (EMA≥1.5%, Vol≥1.0×, BB≥0.72)",
-                            line=dict(color="#00d4aa", width=2)))
-                    fig_baf.update_layout(
-                        title=f"Composite OOS Equity — EMA_Mean_Reversion on {baf_sym}",
-                        height=320, template="plotly_dark",
-                        margin=dict(l=0, r=0, t=40, b=0),
-                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        if _baf_profile:
+            st.info(f"✅ Loaded saved profile for **{wf_strat} / {baf_sym}** — filter defaults pre-filled from calibration results.")
+        else:
+            st.warning(f"No saved profile found for **{wf_strat} / {baf_sym}**. Run Auto-Calibrate in the Symbol Profiles tab first for best results. Using strategy defaults.")
+
+        # ── Strategy-specific filter inputs ───────────────────
+        baf_params: dict = {}
+
+        if wf_strat == "EMA_Mean_Reversion":
+            f1, f2, f3 = st.columns(3)
+            with f1:
+                baf_params["ema_dist_min"] = st.number_input(
+                    "Min EMA distance % (≥)", 0.0, 10.0,
+                    _baf_default("ema_dist_min", "filter_ema_dist_min", 1.5), 0.1, key="baf_f1")
+            with f2:
+                baf_params["vol_min"] = st.number_input(
+                    "Min volume ratio (≥)", 0.0, 3.0,
+                    _baf_default("vol_min", "filter_vol_min", 1.0), 0.1, key="baf_f2")
+            with f3:
+                baf_params["bb_pos_min"] = st.number_input(
+                    "Min BB position (≥)", 0.0, 1.5,
+                    _baf_default("bb_pos_min", "filter_bb_pos_min", 0.72), 0.05, key="baf_f3")
+            _filter_label = (f"EMA dist≥{baf_params['ema_dist_min']:.1f}%, "
+                             f"Vol≥{baf_params['vol_min']:.1f}×, "
+                             f"BB pos≥{baf_params['bb_pos_min']:.2f}")
+
+        elif wf_strat == "MA_Crossover_RSI":
+            f1, f2 = st.columns(2)
+            with f1:
+                baf_params["vol_min"] = st.number_input(
+                    "Min volume ratio (≥)", 0.0, 3.0,
+                    _baf_default("vol_min", "filter_vol_min", 1.0), 0.1, key="baf_f1")
+            with f2:
+                baf_params["ema_spread_min"] = st.number_input(
+                    "Min EMA spread % (≥)", 0.0, 10.0,
+                    _baf_default("ema_spread_min", "filter_ema_spread_min", 1.0), 0.1, key="baf_f2")
+            _filter_label = (f"Vol≥{baf_params['vol_min']:.1f}×, "
+                             f"EMA spread≥{baf_params['ema_spread_min']:.1f}%")
+
+        elif wf_strat == "Breakout_Consolidation":
+            f1, f2 = st.columns(2)
+            with f1:
+                baf_params["vol_min"] = st.number_input(
+                    "Min volume ratio (≥)", 0.0, 3.0,
+                    _baf_default("vol_min", "filter_vol_min", 1.5), 0.1, key="baf_f1")
+            with f2:
+                baf_params["range_atr_max"] = st.number_input(
+                    "Max range/ATR ratio (≤, 0=off)", 0.0, 5.0,
+                    _baf_default("range_atr_max", "filter_range_atr_max", 0.0), 0.1, key="baf_f2")
+            _filter_label = (f"Vol≥{baf_params['vol_min']:.1f}×" +
+                             (f", Range/ATR≤{baf_params['range_atr_max']:.1f}" if baf_params["range_atr_max"] > 0 else ""))
+
+        elif wf_strat == "BB_Mean_Reversion":
+            f1, f2, f3 = st.columns(3)
+            with f1:
+                baf_params["vol_min"] = st.number_input(
+                    "Min volume ratio (≥)", 0.0, 3.0,
+                    _baf_default("vol_min", "filter_vol_min", 1.0), 0.1, key="baf_f1")
+            with f2:
+                baf_params["atr_pct_max"] = st.number_input(
+                    "Max ATR% (≤, 0=off)", 0.0, 10.0,
+                    _baf_default("atr_pct_max", "filter_atr_pct_max", 0.0), 0.1, key="baf_f2")
+            with f3:
+                baf_params["bb_depth_min"] = st.number_input(
+                    "Min BB depth below lower band (≥)", 0.0, 1.0,
+                    _baf_default("bb_depth_min", "filter_bb_depth_min", 0.0), 0.05, key="baf_f3")
+            _filter_label = (f"Vol≥{baf_params['vol_min']:.1f}×" +
+                             (f", ATR%≤{baf_params['atr_pct_max']:.1f}" if baf_params["atr_pct_max"] > 0 else "") +
+                             (f", BB depth≥{baf_params['bb_depth_min']:.2f}" if baf_params["bb_depth_min"] > 0 else ""))
+
+        elif wf_strat == "Fib_Pullback_Support":
+            f1, f2 = st.columns(2)
+            with f1:
+                baf_params["lower_wick_min"] = st.number_input(
+                    "Min lower wick % of range (≥)", 0.0, 50.0,
+                    _baf_default("lower_wick_min", "filter_lower_wick_min", 0.0), 1.0, key="baf_f1")
+            with f2:
+                baf_params["vol_min"] = st.number_input(
+                    "Min volume ratio (≥)", 0.0, 3.0,
+                    _baf_default("vol_min", "filter_vol_min", 1.0), 0.1, key="baf_f2")
+            _filter_label = (
+                (f"Lower wick≥{baf_params['lower_wick_min']:.0f}%" if baf_params["lower_wick_min"] > 0 else "") +
+                (", " if baf_params["lower_wick_min"] > 0 and baf_params["vol_min"] > 0 else "") +
+                (f"Vol≥{baf_params['vol_min']:.1f}×" if baf_params["vol_min"] > 0 else "")
+            ) or "no filters set"
+        else:
+            baf_params["vol_min"] = st.number_input("Min volume ratio (≥)", 0.0, 3.0, 1.0, 0.1, key="baf_f1")
+            _filter_label = f"Vol≥{baf_params['vol_min']:.1f}×"
+
+        # Build query string from non-zero params
+        _baf_qs = "&".join(f"{k}={v}" for k, v in baf_params.items() if v is not None)
+
+        if st.button("▶ Run Before/After Comparison", type="primary", key="baf_run"):
+            with st.spinner(f"Running both walk-forwards for {wf_strat} / {baf_sym}... ~2–4 min"):
+                try:
+                    result = api._get(
+                        f"/perplexity/filter-comparison/{wf_strat}/{baf_sym}"
+                        f"?period={baf_period}&train_years=3.0&test_years=1.0&step_years=1.0"
+                        f"&initial_capital={baf_capital}&position_pct=0.0"
+                        f"&{_baf_qs}",
+                        timeout=900,
                     )
-                    fig_baf.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
-                    fig_baf.update_yaxes(gridcolor="rgba(255,255,255,0.05)", tickprefix="$")
-                    st.plotly_chart(fig_baf, use_container_width=True)
+                    st.session_state["baf_result"] = result
+                    st.session_state["baf_filter_label"] = _filter_label
+                    st.session_state["baf_strat"] = wf_strat
+                    st.session_state["baf_sym_used"] = baf_sym
+                except Exception as e:
+                    st.error(f"Comparison failed: {e}")
 
-                # Per-window WFE comparison table
-                bef_segs = bef.get("segments", [])
-                aft_segs = aft.get("segments", [])
-                if bef_segs and aft_segs:
-                    st.subheader("Per-Window WFE: Before vs After")
-                    cmp_rows = []
-                    for i, (bs, as_) in enumerate(zip(bef_segs, aft_segs)):
-                        bwfe = bs.get("wfe")
-                        awfe = as_.get("wfe")
-                        improved = (awfe or 0) > (bwfe or 0)
-                        cmp_rows.append({
-                            "Window": f"W{i+1}  {bs['oos_start']}→{bs['oos_end']}",
-                            "Before OOS CAGR": f"{bs['oos_cagr']:+.2f}%",
-                            "Before WFE": f"{bwfe:.2f}×" if bwfe is not None else "N/A",
-                            "After OOS CAGR": f"{as_['oos_cagr']:+.2f}%",
-                            "After WFE": f"{awfe:.2f}×" if awfe is not None else "N/A",
-                            "Improved?": "✅ Yes" if improved else "❌ No",
-                        })
-                    st.dataframe(pd.DataFrame(cmp_rows), use_container_width=True, hide_index=True)
+        baf_res = st.session_state.get("baf_result")
+        _saved_label = st.session_state.get("baf_filter_label", _filter_label)
+        _saved_strat = st.session_state.get("baf_strat", wf_strat)
+        _saved_sym   = st.session_state.get("baf_sym_used", baf_sym)
+        bef = baf_res.get("before") if baf_res else None
+        aft = baf_res.get("after")  if baf_res else None
+
+        if bef and aft:
+            st.divider()
+            b1, b2, b3, b4 = st.columns(4)
+            b1.metric("WITHOUT filters — Global WFE",
+                      f"{bef.get('global_wfe', 0):.2f}×" if bef.get("global_wfe") else "N/A",
+                      delta=bef.get("global_wfe_label", ""))
+            b2.metric("WITHOUT filters — OOS CAGR",
+                      f"{bef.get('global_oos_cagr', 0):+.2f}%")
+            b3.metric("WITH filters — Global WFE",
+                      f"{aft.get('global_wfe', 0):.2f}×" if aft.get("global_wfe") else "N/A",
+                      delta=aft.get("global_wfe_label", ""),
+                      delta_color="normal" if (aft.get("global_wfe") or 0) > (bef.get("global_wfe") or 0) else "inverse")
+            b4.metric("WITH filters — OOS CAGR",
+                      f"{aft.get('global_oos_cagr', 0):+.2f}%",
+                      delta=f"{aft.get('global_oos_cagr', 0) - bef.get('global_oos_cagr', 0):+.2f}% vs no filters",
+                      delta_color="normal" if aft.get("global_oos_cagr", 0) > bef.get("global_oos_cagr", 0) else "inverse")
+
+            bef_curve = bef.get("oos_composite_curve", [])
+            aft_curve = aft.get("oos_composite_curve", [])
+            if bef_curve or aft_curve:
+                fig_baf = go.Figure()
+                if bef_curve:
+                    df_b = pd.DataFrame(bef_curve)
+                    fig_baf.add_trace(go.Scatter(
+                        x=df_b["date"], y=df_b["equity"], mode="lines",
+                        name="Without filters", line=dict(color="#ff4b4b", width=2, dash="dot")))
+                if aft_curve:
+                    df_a = pd.DataFrame(aft_curve)
+                    fig_baf.add_trace(go.Scatter(
+                        x=df_a["date"], y=df_a["equity"], mode="lines",
+                        name=f"With filters ({_saved_label})",
+                        line=dict(color="#00d4aa", width=2)))
+                fig_baf.update_layout(
+                    title=f"Composite OOS Equity — {_saved_strat} on {_saved_sym}",
+                    height=320, template="plotly_dark",
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                )
+                fig_baf.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
+                fig_baf.update_yaxes(gridcolor="rgba(255,255,255,0.05)", tickprefix="$")
+                st.plotly_chart(fig_baf, use_container_width=True)
+
+            bef_segs = bef.get("segments", [])
+            aft_segs = aft.get("segments", [])
+            if bef_segs and aft_segs:
+                st.subheader("Per-Window WFE: Before vs After")
+                cmp_rows = []
+                for i, (bs, as_) in enumerate(zip(bef_segs, aft_segs)):
+                    bwfe = bs.get("wfe")
+                    awfe = as_.get("wfe")
+                    improved = (awfe or 0) > (bwfe or 0)
+                    cmp_rows.append({
+                        "Window": f"W{i+1}  {bs['oos_start']}→{bs['oos_end']}",
+                        "Before OOS CAGR": f"{bs['oos_cagr']:+.2f}%",
+                        "Before WFE": f"{bwfe:.2f}×" if bwfe is not None else "N/A",
+                        "After OOS CAGR": f"{as_['oos_cagr']:+.2f}%",
+                        "After WFE": f"{awfe:.2f}×" if awfe is not None else "N/A",
+                        "Improved?": "✅ Yes" if improved else "❌ No",
+                    })
+                st.dataframe(pd.DataFrame(cmp_rows), use_container_width=True, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1570,27 +1751,22 @@ with tab_profiles:
                 ]
             elif strat == "MA_Crossover_RSI":
                 filters_active = [
-                    f"RSI≥{p['rsi_min']:.0f}"          if p.get('rsi_min', 0)        > 0 else None,
-                    f"Vol≥{p['vol_min']:.1f}×"          if p.get('vol_min', 0)         > 0 else None,
-                    f"Spread≥{p['ema_spread_min']:.1f}%" if p.get('ema_spread_min', 0) > 0 else None,
+                    f"Vol≥{p['vol_min']:.1f}×"           if p.get('vol_min', 0)         > 0 else None,
+                    f"Spread≥{p['ema_spread_min']:.1f}%" if p.get('ema_spread_min', 0)  > 0 else None,
                 ]
             elif strat == "Breakout_Consolidation":
                 filters_active = [
-                    f"Vol≥{p['vol_min']:.1f}×"          if p.get('vol_min', 0)       > 0 else None,
-                    f"RSI≥{p['rsi_min']:.0f}"            if p.get('rsi_min', 0)       > 0 else None,
-                    f"Range/ATR≤{p['range_atr_max']:.1f}" if p.get('range_atr_max', 0) > 0 else None,
+                    f"Vol≥{p['vol_min']:.1f}×" if p.get('vol_min', 0) > 0 else None,
                 ]
             elif strat == "BB_Mean_Reversion":
                 filters_active = [
-                    f"RSI≤{p['rsi_max']:.0f}"          if p.get('rsi_max', 0)      > 0 else None,
-                    f"Vol≥{p['vol_min']:.1f}×"          if p.get('vol_min', 0)       > 0 else None,
-                    f"ATR%≤{p['atr_pct_max']:.1f}%"    if p.get('atr_pct_max', 0)  > 0 else None,
+                    f"Vol≥{p['vol_min']:.1f}×"        if p.get('vol_min', 0)      > 0 else None,
+                    f"ATR%≤{p['atr_pct_max']:.1f}%"   if p.get('atr_pct_max', 0)  > 0 else None,
                 ]
             elif strat == "Fib_Pullback_Support":
                 filters_active = [
-                    f"RSI≥{p['rsi_min']:.0f}"            if p.get('rsi_min', 0)         > 0 else None,
-                    f"Wick≥{p['lower_wick_min']:.0f}%"   if p.get('lower_wick_min', 0)  > 0 else None,
-                    f"Vol≥{p['vol_min']:.1f}×"            if p.get('vol_min', 0)          > 0 else None,
+                    f"Wick≥{p['lower_wick_min']:.0f}%" if p.get('lower_wick_min', 0) > 0 else None,
+                    f"Vol≥{p['vol_min']:.1f}×"          if p.get('vol_min', 0)        > 0 else None,
                 ]
             else:
                 filters_active = []
@@ -1691,6 +1867,29 @@ with tab_config:
         f"With $10,000 account: max risk/trade = **${10000 * risk_pct / 100:.0f}**  |  "
         f"max position = **${10000 * max_pos_pct / 100:.0f}**"
     )
+
+    settings = get_settings()
+    st.markdown("### Market Regime Settings")
+    st.caption("Regime detection adjusts sizing and strategy aggressiveness using the benchmark trend.")
+    mr1, mr2, mr3 = st.columns(3)
+    with mr1:
+        st.write("**Benchmark symbol**")
+        st.write(settings.regime_benchmark_symbol)
+        st.caption("Daily benchmark used for regime detection.")
+    with mr2:
+        st.write("**Bull sizing**")
+        st.write(
+            f"{settings.regime_risk_pct_bull*100:.1f}% risk / "
+            f"{settings.regime_max_account_risk_bull*100:.0f}% max account exposure"
+        )
+    with mr3:
+        st.write("**Bear / Deep Bear sizing**")
+        st.write(
+            f"Bear: {settings.regime_risk_pct_bear*100:.1f}% risk, "
+            f"{settings.regime_max_account_risk_bear*100:.0f}% max exposure\n"
+            f"Deep bear: {settings.regime_risk_pct_deep_bear*100:.2f}% risk, "
+            f"{settings.regime_max_account_risk_deep_bear*100:.0f}% max exposure"
+        )
     st.divider()
 
     # ── Per-strategy panels ───────────────────────────────────
@@ -1792,19 +1991,17 @@ with tab_config:
                         "Require SMA(200) uptrend", value=cfg["use_sma200"], key=f"{s_name}_sma200")
 
                 st.markdown("**🔬 Data-Driven Entry Filters** *(set via Symbol Profiles tab)*")
-                fc1, fc2, fc3 = st.columns(3)
+                fc1, fc2 = st.columns(2)
                 with fc1:
-                    cfg["filter_rsi_min"] = st.number_input(
-                        "Min RSI at crossover (0=off)", 0.0, 80.0,
-                        float(cfg.get("filter_rsi_min", 0.0)), 1.0, key=f"{s_name}_f_rsi")
-                with fc2:
                     cfg["filter_vol_min"] = st.number_input(
-                        "Min volume ratio (0=off)", 0.0, 2.0,
-                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol")
-                with fc3:
+                        "Min volume ratio (0=off)", 0.0, 3.0,
+                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol",
+                        help="Higher volume at crossover = stronger momentum. Calibrated per symbol.")
+                with fc2:
                     cfg["filter_ema_spread_min"] = st.number_input(
-                        "Min EMA spread % (0=off)", 0.0, 5.0,
-                        float(cfg.get("filter_ema_spread_min", 0.0)), 0.1, key=f"{s_name}_f_spread")
+                        "Min EMA spread % (0=off)", 0.0, 10.0,
+                        float(cfg.get("filter_ema_spread_min", 0.0)), 0.1, key=f"{s_name}_f_spread",
+                        help="Wider fast/slow EMA gap = more decisive crossover. Calibrated per symbol.")
 
             elif s_name == "Breakout_Consolidation":
                 with c1:
@@ -1812,7 +2009,7 @@ with tab_config:
                         "Consolidation bars (N)", 3, 30, cfg["consolidation_bars"], 1,
                         key=f"{s_name}_cn")
                     cfg["atr_range_multiple"] = st.number_input(
-                        "Max range (× ATR)", 1.0, 5.0, cfg["atr_range_multiple"], 0.5,
+                        "Max range (× ATR)", 1.0, 15.0, cfg["atr_range_multiple"], 0.5,
                         key=f"{s_name}_arm")
                 with c2:
                     cfg["breakout_buffer_pct"] = st.number_input(
@@ -1829,19 +2026,10 @@ with tab_config:
                         key=f"{s_name}_sbr")
 
                 st.markdown("**🔬 Data-Driven Entry Filters** *(set via Symbol Profiles tab)*")
-                fc1, fc2, fc3 = st.columns(3)
-                with fc1:
-                    cfg["filter_vol_min"] = st.number_input(
-                        "Min volume ratio (0=off)", 0.0, 2.0,
-                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol")
-                with fc2:
-                    cfg["filter_rsi_min"] = st.number_input(
-                        "Min RSI at breakout (0=off)", 0.0, 80.0,
-                        float(cfg.get("filter_rsi_min", 0.0)), 1.0, key=f"{s_name}_f_rsi")
-                with fc3:
-                    cfg["filter_range_atr_max"] = st.number_input(
-                        "Max range/ATR ratio (0=off)", 0.0, 10.0,
-                        float(cfg.get("filter_range_atr_max", 0.0)), 0.5, key=f"{s_name}_f_range")
+                cfg["filter_vol_min"] = st.number_input(
+                    "Min volume ratio (0=off)", 0.0, 3.0,
+                    float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol",
+                    help="Per-symbol volume threshold tuning. RSI and range tightness already enforced by strategy logic.")
 
             elif s_name == "BB_Mean_Reversion":
                 with c1:
@@ -1865,19 +2053,17 @@ with tab_config:
                         key=f"{s_name}_rsi_f")
 
                 st.markdown("**🔬 Data-Driven Entry Filters** *(set via Symbol Profiles tab)*")
-                fc1, fc2, fc3 = st.columns(3)
+                fc1, fc2 = st.columns(2)
                 with fc1:
-                    cfg["filter_rsi_max"] = st.number_input(
-                        "Max RSI at re-entry (0=off)", 0.0, 70.0,
-                        float(cfg.get("filter_rsi_max", 0.0)), 1.0, key=f"{s_name}_f_rsi")
-                with fc2:
                     cfg["filter_vol_min"] = st.number_input(
-                        "Min volume ratio (0=off)", 0.0, 2.0,
-                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol")
-                with fc3:
+                        "Min volume ratio (0=off)", 0.0, 3.0,
+                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol",
+                        help="Higher volume at re-entry confirms demand. Calibrated per symbol.")
+                with fc2:
                     cfg["filter_atr_pct_max"] = st.number_input(
-                        "Max ATR% (0=off)", 0.0, 10.0,
-                        float(cfg.get("filter_atr_pct_max", 0.0)), 0.25, key=f"{s_name}_f_atr")
+                        "Max ATR% of price (0=off)", 0.0, 10.0,
+                        float(cfg.get("filter_atr_pct_max", 0.0)), 0.25, key=f"{s_name}_f_atr",
+                        help="Avoid mean-reversion entries during extreme volatility. Calibrated per symbol.")
 
             elif s_name == "Fib_Pullback_Support":
                 with c1:
@@ -1903,19 +2089,17 @@ with tab_config:
                         key=f"{s_name}_r")
 
                 st.markdown("**🔬 Data-Driven Entry Filters** *(set via Symbol Profiles tab)*")
-                fc1, fc2, fc3 = st.columns(3)
+                fc1, fc2 = st.columns(2)
                 with fc1:
-                    cfg["filter_rsi_min"] = st.number_input(
-                        "Min RSI at entry (0=off)", 0.0, 50.0,
-                        float(cfg.get("filter_rsi_min", 0.0)), 1.0, key=f"{s_name}_f_rsi")
-                with fc2:
                     cfg["filter_lower_wick_min"] = st.number_input(
-                        "Min lower wick % (0=off)", 0.0, 80.0,
-                        float(cfg.get("filter_lower_wick_min", 0.0)), 5.0, key=f"{s_name}_f_wick")
-                with fc3:
+                        "Min lower wick % of range (0=off)", 0.0, 80.0,
+                        float(cfg.get("filter_lower_wick_min", 0.0)), 5.0, key=f"{s_name}_f_wick",
+                        help="Requires a meaningful rejection candle at the Fib level. Calibrated per symbol.")
+                with fc2:
                     cfg["filter_vol_min"] = st.number_input(
-                        "Min volume ratio (0=off)", 0.0, 2.0,
-                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol")
+                        "Min volume ratio (0=off)", 0.0, 3.0,
+                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol",
+                        help="Higher volume confirms support holding at the Fib level. Calibrated per symbol.")
 
             st.caption(
                 f"Current config: `{cfg}`"

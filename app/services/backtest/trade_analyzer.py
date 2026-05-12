@@ -82,6 +82,12 @@ class TradeSnapshot:
     prior_trade_won: Optional[bool]   # did the trade BEFORE this one win?
     bars_since_last_trade: Optional[int]
 
+    # Strategy-specific indicators (None when not applicable)
+    ema_spread_pct: Optional[float] = None   # MA_Crossover: fast/slow EMA spread % at crossover
+    range_atr_ratio: Optional[float] = None  # Breakout: consolidation range / ATR (tightness)
+    bb_depth_pct: Optional[float] = None     # BB_MeanRev: how far below lower band (% of band width)
+    fib_level: Optional[float] = None        # Fib_Pullback: which Fib level was hit (0.382/0.5/0.618)
+
 
 # ── Indicator snapshot ────────────────────────────────────────────────────────
 
@@ -132,11 +138,69 @@ def _snapshot_indicators(df: pd.DataFrame, idx: int) -> Dict[str, float]:
     }
 
 
+# ── Strategy-specific indicators ─────────────────────────────────────────────
+
+def _strategy_indicators(df: pd.DataFrame, idx: int, strategy_name: str, buy_trade: dict) -> Dict[str, Optional[float]]:
+    """
+    Compute indicators that only make sense for a specific strategy.
+    buy_trade contains the recorded stop/target/reason from the backtest.
+    """
+    result: Dict[str, Optional[float]] = {
+        "ema_spread_pct": None,
+        "range_atr_ratio": None,
+        "bb_depth_pct": None,
+        "fib_level": None,
+    }
+    window = df.iloc[: idx + 1]
+    close = window["Close"]
+
+    if strategy_name == "MA_Crossover_RSI":
+        # Fast/slow EMA spread % — how separated were the EMAs at crossover
+        ema20 = _ema(close, 20)
+        ema50 = _ema(close, 50)
+        ef = float(ema20.iloc[-1])
+        es = float(ema50.iloc[-1])
+        result["ema_spread_pct"] = abs(ef - es) / es * 100 if es > 0 else 0.0
+
+    elif strategy_name == "Breakout_Consolidation":
+        # Range tightness: consolidation range / ATR — smaller = tighter base = better breakout
+        atr_val = float(_atr(window, 14).iloc[-1])
+        h10 = float(df["High"].iloc[max(0, idx - 12): idx].max())
+        l10 = float(df["Low"].iloc[max(0, idx - 12): idx].min())
+        range_size = h10 - l10
+        result["range_atr_ratio"] = range_size / atr_val if atr_val > 0 else None
+
+    elif strategy_name == "BB_Mean_Reversion":
+        # How far below the lower band the price dipped (% of band width)
+        # Look back up to 4 bars to find the oversold touch
+        bb_lower, _, bb_upper = _bb(close, 20, 2.0)
+        depth = 0.0
+        for k in range(-4, 0):
+            c_bar = float(close.iloc[k]) if abs(k) <= len(close) else float(close.iloc[-1])
+            bl    = float(bb_lower.iloc[k]) if abs(k) <= len(bb_lower) else float(bb_lower.iloc[-1])
+            bu    = float(bb_upper.iloc[k]) if abs(k) <= len(bb_upper) else float(bb_upper.iloc[-1])
+            bw    = bu - bl
+            if c_bar < bl and bw > 0:
+                depth = max(depth, (bl - c_bar) / bw)
+        result["bb_depth_pct"] = depth
+
+    elif strategy_name == "Fib_Pullback_Support":
+        # Which Fib level was hit — extract from the trade reason string recorded at entry
+        reason = buy_trade.get("reason", "")
+        for lvl in [0.382, 0.50, 0.618]:
+            if f"{lvl:.1%}" in reason or f"{lvl*100:.1f}%" in reason:
+                result["fib_level"] = lvl
+                break
+
+    return result
+
+
 # ── Main analyzer ─────────────────────────────────────────────────────────────
 
 def analyze_trades(
     trades: List[dict],
     df: pd.DataFrame,
+    strategy_name: str = "",
 ) -> List[TradeSnapshot]:
     """
     Match buy/sell pairs from the backtest trade log and snapshot entry-bar
@@ -177,6 +241,7 @@ def analyze_trades(
         hold_bars = (exit_iloc - entry_iloc) if exit_iloc and exit_iloc > entry_iloc else 0
 
         inds = _snapshot_indicators(df, entry_iloc)
+        strat_inds = _strategy_indicators(df, entry_iloc, strategy_name, buy)
 
         # Time features
         try:
@@ -220,6 +285,10 @@ def analyze_trades(
             quarter=quarter,
             prior_trade_won=prior_won,
             bars_since_last_trade=bars_since,
+            ema_spread_pct=round(strat_inds["ema_spread_pct"], 3) if strat_inds["ema_spread_pct"] is not None else None,
+            range_atr_ratio=round(strat_inds["range_atr_ratio"], 3) if strat_inds["range_atr_ratio"] is not None else None,
+            bb_depth_pct=round(strat_inds["bb_depth_pct"], 3) if strat_inds["bb_depth_pct"] is not None else None,
+            fib_level=strat_inds["fib_level"],
         ))
 
     return snapshots
@@ -262,10 +331,14 @@ def find_patterns(snapshots: List[TradeSnapshot]) -> List[PatternInsight]:
         "lower_wick_pct":   ("Lower wick % of range (rejection)", "Lower wick%"),
         "upper_wick_pct":   ("Upper wick % of range", "Upper wick%"),
         "hold_bars":        ("Days held", "Hold bars"),
+        # Strategy-specific
+        "ema_spread_pct":   ("EMA20/50 spread % at crossover (MA_Crossover)", "EMA spread%"),
+        "range_atr_ratio":  ("Consolidation range / ATR (Breakout)", "Range/ATR"),
+        "bb_depth_pct":     ("Depth below BB lower band (BB_MeanRev)", "BB depth%"),
     }
 
     def _vals(group, key):
-        return [getattr(s, key) for s in group]
+        return [v for s in group if (v := getattr(s, key, None)) is not None]
 
     def _pooled_std(a, b):
         if len(a) < 2 and len(b) < 2:
@@ -278,6 +351,9 @@ def find_patterns(snapshots: List[TradeSnapshot]) -> List[PatternInsight]:
     for key, (description, label) in INDICATORS.items():
         w_vals = _vals(wins, key)
         l_vals = _vals(losses, key)
+
+        if not w_vals or not l_vals:
+            continue
 
         w_mean = statistics.mean(w_vals)
         l_mean = statistics.mean(l_vals)
@@ -333,10 +409,11 @@ def time_breakdown(snapshots: List[TradeSnapshot]) -> Dict[str, Any]:
             if not group:
                 continue
             wins = sum(1 for s in group if s.outcome == "win")
+            pnl_vals = [s.pnl_pct for s in group]
             out[name] = {
                 "trades": len(group),
                 "win_rate": round(wins / len(group) * 100, 1),
-                "avg_pnl_pct": round(statistics.mean(s.pnl_pct for s in group), 2),
+                "avg_pnl_pct": round(statistics.mean(pnl_vals), 2) if pnl_vals else 0.0,
             }
         return out
 

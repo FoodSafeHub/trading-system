@@ -88,14 +88,13 @@ def run_consensus_backtest(
             except Exception:
                 continue
 
-        # Check consensus
+        # Check consensus — require unambiguous majority (BUY and SELL must not both qualify)
+        qualifying = {d: names for d, names in votes.items() if len(names) >= min_agreement}
         action = None
         agreeing = []
-        for direction, names in votes.items():
-            if len(names) >= min_agreement:
-                action = direction
-                agreeing = names
-                break
+        if len(qualifying) == 1:
+            action, agreeing = next(iter(qualifying.items()))
+        # If both BUY and SELL qualify simultaneously, skip — conflicting signals
 
         # Execute trade based on consensus
         if action == "BUY" and position == 0:

@@ -167,8 +167,8 @@ def _run_cycle() -> None:
                         )
                         if strat is None or not strat.enabled:
                             continue
-                        df = get_ohlcv(symbol, period="1y")
-                        if df.empty or len(df) < 210:
+                        df = get_ohlcv(symbol, period="2y")
+                        if df.empty or len(df) < 220:
                             continue
                         sig = strat.run(symbol, df)
                         if sig.direction != "HOLD":
@@ -230,8 +230,8 @@ def _run_cycle() -> None:
                     if symbol in assigned_symbols:
                         continue
                     try:
-                        df = get_ohlcv(symbol, period="1y")
-                        if df.empty or len(df) < 210:
+                        df = get_ohlcv(symbol, period="2y")
+                        if df.empty or len(df) < 220:
                             continue
                         pool_sigs = run_perplexity_signal(symbol, df)
                         for sig in pool_sigs:
@@ -255,26 +255,23 @@ def _run_cycle() -> None:
                 loop.run_until_complete(svc.execute(order_req, account_id=account_id))
 
             # ── 4. Execute consensus signals for unassigned symbols
+            # Only act if exactly one direction qualifies — skip if both BUY+SELL agree (conflicting)
             for symbol, directions in votes.items():
-                for direction, agreeing in directions.items():
-                    if len(agreeing) >= min_agree:
-                        logger.info(
-                            f"[scheduler] Consensus: {direction} {symbol} "
-                            f"({len(agreeing)}/{min_agree}: {agreeing})"
-                        )
-                        # For consensus signals we don't have a stop price, so fall back to 1
-                        order_req = OrderRequest(
-                            symbol=symbol,
-                            side=direction,  # type: ignore[arg-type]
-                            order_type="MARKET",
-                            quantity=1,
-                        )
-                        loop.run_until_complete(svc.execute(order_req, account_id=account_id))
-                    else:
-                        logger.debug(
-                            f"[scheduler] No consensus: {direction} {symbol} "
-                            f"({len(agreeing)}/{min_agree})"
-                        )
+                qualifying = {d: v for d, v in directions.items() if len(v) >= min_agree}
+                if len(qualifying) != 1:
+                    continue
+                direction, agreeing = next(iter(qualifying.items()))
+                logger.info(
+                    f"[scheduler] Consensus: {direction} {symbol} "
+                    f"({len(agreeing)}/{min_agree}: {agreeing})"
+                )
+                order_req = OrderRequest(
+                    symbol=symbol,
+                    side=direction,  # type: ignore[arg-type]
+                    order_type="MARKET",
+                    quantity=1,
+                )
+                loop.run_until_complete(svc.execute(order_req, account_id=account_id))
         finally:
             loop.close()
 

@@ -15,6 +15,7 @@ from app.services.backtest.walkforward_engine import (
     run_walkforward_all,
 )
 from app.services.market_data.provider import get_ohlcv
+from app.services.market_regime import get_current_regime, get_regime_risk_caps
 from app.services.risk.position_sizer import calculate_position_size
 from app.services.strategy.perplexity.runner import PERPLEXITY_STRATEGIES, run_perplexity_signal
 
@@ -48,7 +49,9 @@ def get_signals(symbol: str):
         df = get_ohlcv(symbol.upper(), period="1y")
         if df.empty or len(df) < 60:
             raise HTTPException(400, f"Not enough data for {symbol} (need at least 60 bars)")
-        signals = run_perplexity_signal(symbol.upper(), df)
+        regime = get_current_regime(df.index[-1])
+        signals = run_perplexity_signal(symbol.upper(), df, regime=regime)
+        regime_caps = get_regime_risk_caps(regime)
         results = []
         for s in signals:
             item = {
@@ -60,6 +63,7 @@ def get_signals(symbol: str):
                 "confidence": round(s.confidence, 2),
                 "reason": s.reason,
                 "indicators": s.indicators,
+                "regime": regime.value,
                 "position_size": None,
             }
             # Attach position sizing for BUY signals that have a stop price
@@ -69,9 +73,9 @@ def get_signals(symbol: str):
                     entry_price=s.entry_price,
                     stop_price=s.stop_price,
                     account_value=settings.account_value,
-                    risk_pct_per_trade=settings.risk_pct_per_trade,
+                    risk_pct_per_trade=regime_caps["risk_pct_per_trade"],
                     max_position_size_usd=settings.max_position_size_usd,
-                    max_account_risk_pct=settings.max_account_risk_pct,
+                    max_account_risk_pct=regime_caps["max_account_risk_pct"],
                 )
                 item["position_size"] = {
                     "shares": sz.shares,
@@ -322,47 +326,42 @@ def filter_comparison(
     """
     import copy
     from app.services.backtest.symbol_profiles import load_profile as _load_profile
-    s = _STRATEGY_MAP.get(strategy_name)
-    if not s:
+    s_orig = _STRATEGY_MAP.get(strategy_name)
+    if not s_orig:
         raise HTTPException(404, f"Strategy '{strategy_name}' not found")
-    if not any(k.startswith("filter_") for k in s.config):
+    if not any(k.startswith("filter_") for k in s_orig.config):
         raise HTTPException(400, f"Strategy '{strategy_name}' does not support data-driven filters")
 
     # Load saved profile for this symbol to use its calibrated thresholds
     profile = _load_profile(strategy_name, symbol.upper())
 
-    filter_keys = [k for k in s.config if k.startswith("filter_")]
+    filter_keys = [k for k in s_orig.config if k.startswith("filter_")]
 
-    try:
-        # ── Run WITHOUT filters ──────────────────────────────
-        orig_config = copy.deepcopy(s.config)
-        for k in filter_keys:
-            s.config[k] = 0.0
-        r_before = run_rolling_walk_forward(
-            s, symbol.upper(), period=period,
-            train_years=train_years, test_years=test_years, step_years=step_years,
-            initial_capital=initial_capital, position_pct=position_pct,
-        )
+    # Work on isolated copies so concurrent requests don't corrupt each other's config
+    s_before = copy.deepcopy(s_orig)
+    s_after  = copy.deepcopy(s_orig)
 
-        # ── Run WITH filters (from saved profile if available, else params) ──
-        for k in filter_keys:
-            s.config[k] = 0.0
-        if profile:
-            _apply_profile_to_config(strategy_name, s.config, profile)
-        else:
-            # Fallback to query params for EMA_Mean_Reversion compatibility
-            s.config["filter_ema_dist_min"] = ema_dist_min
-            s.config["filter_vol_min"]      = vol_min
-            s.config["filter_bb_pos_min"]   = bb_pos_min
-        r_after = run_rolling_walk_forward(
-            s, symbol.upper(), period=period,
-            train_years=train_years, test_years=test_years, step_years=step_years,
-            initial_capital=initial_capital, position_pct=position_pct,
-        )
+    for k in filter_keys:
+        s_before.config[k] = 0.0
+        s_after.config[k]  = 0.0
 
-    finally:
-        # Always restore original config
-        s.config.update(orig_config)
+    if profile:
+        _apply_profile_to_config(strategy_name, s_after.config, profile)
+    else:
+        s_after.config["filter_ema_dist_min"] = ema_dist_min
+        s_after.config["filter_vol_min"]      = vol_min
+        s_after.config["filter_bb_pos_min"]   = bb_pos_min
+
+    r_before = run_rolling_walk_forward(
+        s_before, symbol.upper(), period=period,
+        train_years=train_years, test_years=test_years, step_years=step_years,
+        initial_capital=initial_capital, position_pct=position_pct,
+    )
+    r_after = run_rolling_walk_forward(
+        s_after, symbol.upper(), period=period,
+        train_years=train_years, test_years=test_years, step_years=step_years,
+        initial_capital=initial_capital, position_pct=position_pct,
+    )
 
     def _wf_summary(r):
         return {
@@ -396,19 +395,16 @@ def _apply_profile_to_config(strategy_name: str, config: dict, profile) -> None:
         config["filter_vol_min"]      = profile.vol_min
         config["filter_bb_pos_min"]   = profile.bb_pos_min
     elif strategy_name == "MA_Crossover_RSI":
-        config["filter_rsi_min"]        = profile.rsi_min
         config["filter_vol_min"]        = profile.vol_min
         config["filter_ema_spread_min"] = profile.ema_spread_min
     elif strategy_name == "Breakout_Consolidation":
         config["filter_vol_min"]       = profile.vol_min
-        config["filter_rsi_min"]       = profile.rsi_min
-        config["filter_range_atr_max"] = profile.range_atr_max
+        config["filter_range_atr_max"] = profile.atr_pct_max   # stored in atr_pct_max field
     elif strategy_name == "BB_Mean_Reversion":
-        config["filter_rsi_max"]     = profile.rsi_max
-        config["filter_vol_min"]     = profile.vol_min
-        config["filter_atr_pct_max"] = profile.atr_pct_max
+        config["filter_vol_min"]      = profile.vol_min
+        config["filter_atr_pct_max"]  = profile.atr_pct_max
+        config["filter_bb_depth_min"] = profile.bb_depth_min
     elif strategy_name == "Fib_Pullback_Support":
-        config["filter_rsi_min"]        = profile.rsi_min
         config["filter_lower_wick_min"] = profile.lower_wick_min
         config["filter_vol_min"]        = profile.vol_min
 
@@ -418,13 +414,13 @@ def _profile_thresholds_dict(strategy_name: str, profile) -> dict:
     if strategy_name == "EMA_Mean_Reversion":
         return {"ema_dist_min": profile.ema_dist_min, "vol_min": profile.vol_min, "bb_pos_min": profile.bb_pos_min}
     if strategy_name == "MA_Crossover_RSI":
-        return {"rsi_min": profile.rsi_min, "vol_min": profile.vol_min, "ema_spread_min": profile.ema_spread_min}
+        return {"vol_min": profile.vol_min, "ema_spread_min": profile.ema_spread_min}
     if strategy_name == "Breakout_Consolidation":
-        return {"vol_min": profile.vol_min, "rsi_min": profile.rsi_min, "range_atr_max": profile.range_atr_max}
+        return {"vol_min": profile.vol_min, "range_atr_max": profile.atr_pct_max}
     if strategy_name == "BB_Mean_Reversion":
-        return {"rsi_max": profile.rsi_max, "vol_min": profile.vol_min, "atr_pct_max": profile.atr_pct_max}
+        return {"vol_min": profile.vol_min, "atr_pct_max": profile.atr_pct_max, "bb_depth_min": profile.bb_depth_min}
     if strategy_name == "Fib_Pullback_Support":
-        return {"rsi_min": profile.rsi_min, "lower_wick_min": profile.lower_wick_min, "vol_min": profile.vol_min}
+        return {"lower_wick_min": profile.lower_wick_min, "vol_min": profile.vol_min}
     return {}
 
 
@@ -463,63 +459,88 @@ def auto_calibrate(
         if df.empty or len(df) < 120:
             raise HTTPException(400, f"Not enough data for {symbol}")
 
-        # Run backtest with all filters OFF to get raw unfiltered trade population
-        orig = copy.deepcopy(strategy.config)
+        # Work on an isolated copy — never mutate the global strategy object
+        s_raw = copy.deepcopy(strategy)
         for k in filter_keys:
-            strategy.config[k] = 0.0
-        try:
-            result = run_perplexity_backtest(strategy, symbol.upper(), period,
-                                             initial_capital, position_pct=position_pct)
-            snapshots = _analyze(result.trades, df)
-        finally:
-            strategy.config.update(orig)
+            s_raw.config[k] = 0.0
+
+        result   = run_perplexity_backtest(s_raw, symbol.upper(), period,
+                                           initial_capital, position_pct=position_pct)
+        snapshots = _analyze(result.trades, df, strategy_name=strategy_name)
 
         if len(snapshots) < 6:
             raise HTTPException(400, f"Not enough trades to calibrate ({len(snapshots)} trades, need ≥ 6)")
 
-        # Derive thresholds using all available indicators from snapshots
+        # Pass all captured indicators — calibrate_from_snapshots selects per strategy
         profile = calibrate_from_snapshots(strategy_name, symbol.upper(),
-                                           [{"outcome": s.outcome,
-                                             "rsi": s.rsi,
-                                             "ema_dist_pct": s.ema_dist_pct,
-                                             "volume_ratio": s.volume_ratio,
-                                             "bb_pct": s.bb_pct,
-                                             "atr_pct": s.atr_pct,
-                                             "lower_wick_pct": s.lower_wick_pct}
+                                           [{"outcome":        s.outcome,
+                                             "rsi":            s.rsi,
+                                             "ema_dist_pct":   s.ema_dist_pct,
+                                             "volume_ratio":   s.volume_ratio,
+                                             "bb_pct":         s.bb_pct,
+                                             "atr_pct":        s.atr_pct,
+                                             "lower_wick_pct": s.lower_wick_pct,
+                                             "ema_spread_pct": s.ema_spread_pct,
+                                             "range_atr_ratio":s.range_atr_ratio,
+                                             "bb_depth_pct":   s.bb_depth_pct}
                                             for s in snapshots])
 
-        # Optional walk-forward verification
+        # Optional walk-forward verification — again using isolated copies
         if verify_wf and len(df) >= 500:
             try:
                 wf_period = "5y" if len(df) < 1500 else "10y"
-                # Before — all filters OFF
+                s_wf_before = copy.deepcopy(strategy)
+                s_wf_after  = copy.deepcopy(strategy)
                 for k in filter_keys:
-                    strategy.config[k] = 0.0
+                    s_wf_before.config[k] = 0.0
+                    s_wf_after.config[k]  = 0.0
+                _apply_profile_to_config(strategy_name, s_wf_after.config, profile)
+
                 r_before = run_rolling_walk_forward(
-                    strategy, symbol.upper(), period=wf_period,
+                    s_wf_before, symbol.upper(), period=wf_period,
                     train_years=2.0, test_years=1.0, step_years=1.0,
                     initial_capital=initial_capital, position_pct=position_pct,
                 )
-                # After — apply calibrated filters
-                _apply_profile_to_config(strategy_name, strategy.config, profile)
                 r_after = run_rolling_walk_forward(
-                    strategy, symbol.upper(), period=wf_period,
+                    s_wf_after, symbol.upper(), period=wf_period,
                     train_years=2.0, test_years=1.0, step_years=1.0,
                     initial_capital=initial_capital, position_pct=position_pct,
                 )
-                strategy.config.update(orig)
 
                 profile.wfe_before      = r_before.global_wfe
                 profile.wfe_after       = r_after.global_wfe
                 profile.oos_cagr_before = r_before.global_oos_cagr
                 profile.oos_cagr_after  = r_after.global_oos_cagr
-                profile.verified        = (
-                    (r_after.global_wfe or 0) >= (r_before.global_wfe or 0) or
-                    r_after.global_oos_cagr > r_before.global_oos_cagr
-                )
+                wfe_improved  = (r_after.global_wfe  or 0) > (r_before.global_wfe  or 0)
+                cagr_improved = (r_after.global_oos_cagr or 0) > (r_before.global_oos_cagr or 0)
+                profile.verified = wfe_improved or cagr_improved
             except Exception:
-                strategy.config.update(orig)
+                pass
 
+        # Only persist the profile when calibration genuinely helps.
+        # If WFE verification ran and filters made things worse, don't save —
+        # the existing strategy (or no profile) is already performing better.
+        wf_was_run = verify_wf and (profile.wfe_before is not None)
+        should_save = (not wf_was_run) or profile.verified
+        if not should_save:
+            return {
+                "symbol": profile.symbol,
+                "strategy": profile.strategy,
+                "calibrated_at": profile.calibrated_at,
+                "n_trades": profile.n_trades,
+                "n_wins": profile.n_wins,
+                "win_rate_pct": profile.win_rate_pct,
+                "thresholds": _profile_thresholds_dict(strategy_name, profile),
+                "verification": {
+                    "wfe_before":      profile.wfe_before,
+                    "wfe_after":       profile.wfe_after,
+                    "oos_cagr_before": profile.oos_cagr_before,
+                    "oos_cagr_after":  profile.oos_cagr_after,
+                    "verified":        False,
+                },
+                "saved": False,
+                "skip_reason": "Calibrated filters did not improve walk-forward efficiency — existing strategy left unchanged",
+            }
         save_profile(profile)
 
         # Build strategy-specific thresholds response
@@ -565,6 +586,17 @@ def list_profiles(strategy_name: str):
     return [asdict(p) for p in profiles]
 
 
+@router.get("/profiles/{strategy_name}/{symbol}")
+def get_profile(strategy_name: str, symbol: str):
+    """Get a single saved filter profile for a strategy+symbol, or {} if none exists."""
+    from app.services.backtest.symbol_profiles import load_profile
+    from dataclasses import asdict
+    profile = load_profile(strategy_name, symbol.upper())
+    if profile is None:
+        return {}
+    return asdict(profile)
+
+
 @router.delete("/profiles/{strategy_name}/{symbol}")
 def delete_profile(strategy_name: str, symbol: str):
     """Delete a saved per-symbol filter profile."""
@@ -597,7 +629,24 @@ def analyze_trades(
             raise HTTPException(400, f"Not enough data for {symbol}")
         result = run_perplexity_backtest(strategy, symbol.upper(), period, initial_capital,
                                          position_pct=position_pct)
-        snapshots = _analyze(result.trades, df)
+        if result.total_trades == 0:
+            return {
+                "strategy_name": result.strategy_name,
+                "symbol": result.symbol,
+                "period": result.period,
+                "total_trades": 0,
+                "win_rate_pct": 0.0,
+                "snapshots": [],
+                "patterns": [],
+                "timing": {},
+                "message": (
+                    f"No trades were generated for {strategy_name} on {symbol.upper()} "
+                    f"over {period}. The market regime filter (golden cross + SMA200) may "
+                    f"have been inactive for most of this period, or no entry conditions "
+                    f"were met. Try a shorter period (3y/5y) or a different symbol."
+                ),
+            }
+        snapshots = _analyze(result.trades, df, strategy_name=strategy_name)
         patterns  = find_patterns(snapshots)
         timing    = time_breakdown(snapshots)
         return {
@@ -622,6 +671,10 @@ def analyze_trades(
                     "quarter": s.quarter,
                     "prior_trade_won": s.prior_trade_won,
                     "bars_since_last_trade": s.bars_since_last_trade,
+                    "ema_spread_pct": s.ema_spread_pct,
+                    "range_atr_ratio": s.range_atr_ratio,
+                    "bb_depth_pct": s.bb_depth_pct,
+                    "fib_level": s.fib_level,
                 }
                 for s in snapshots
             ],

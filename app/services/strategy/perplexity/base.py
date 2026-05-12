@@ -24,11 +24,13 @@ class PerplexitySignal:
     reason: str = ""
 
 
+from app.services.market_regime import MarketRegime
+
 class PerplexityStrategy:
     name: str = "base"
     enabled: bool = True
 
-    def run(self, symbol: str, df: pd.DataFrame) -> PerplexitySignal:
+    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None) -> PerplexitySignal:
         raise NotImplementedError
 
     def _hold(self, symbol: str, reason: str = "") -> PerplexitySignal:

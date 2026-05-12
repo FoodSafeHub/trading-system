@@ -27,24 +27,24 @@ class SymbolFilterProfile:
     n_wins: int
     win_rate_pct: float
 
-    # Filter thresholds (0.0 = disabled) — EMA_Mean_Reversion
-    ema_dist_min: float = 0.0
-    vol_min: float = 0.0
-    bb_pos_min: float = 0.0
+    # Filter thresholds (0.0 = disabled)
+    vol_min: float = 0.0          # all strategies: per-symbol volume ratio minimum
 
-    # MA_Crossover_RSI filters
-    rsi_min: float = 0.0
-    ema_spread_min: float = 0.0
+    # EMA_Mean_Reversion
+    ema_dist_min: float = 0.0     # min % distance from EMA20
+    bb_pos_min: float = 0.0       # min BB position (0=lower band, 1=upper band)
 
-    # Breakout_Consolidation filters
-    range_atr_max: float = 0.0
+    # MA_Crossover_RSI
+    ema_spread_min: float = 0.0   # min fast/slow EMA spread % (wider = stronger momentum)
 
-    # BB_Mean_Reversion filters
-    rsi_max: float = 0.0
-    atr_pct_max: float = 0.0
+    # BB_Mean_Reversion
+    atr_pct_max: float = 0.0      # max ATR% of price (avoid entering during volatility spikes)
+    bb_depth_min: float = 0.0     # min depth below BB lower band as % of band width (deeper = stronger signal)
 
-    # Fib_Pullback_Support filters
-    lower_wick_min: float = 0.0
+    # Breakout_Consolidation — reuses atr_pct_max field as range_atr_max (range/ATR ratio cap)
+
+    # Fib_Pullback_Support
+    lower_wick_min: float = 0.0   # min lower wick % of bar range (quality of rejection candle)
 
     # Evidence means (filled with available indicators)
     win_ema_dist_mean: float = 0.0
@@ -152,11 +152,11 @@ def calibrate_from_snapshots(
         return statistics.mean(vals) if vals else 0.0
 
     def _separation(w_vals, l_vals):
-        if len(w_vals) < 2 or len(l_vals) < 2:
+        if len(w_vals) < 2 and len(l_vals) < 2:
             return 0.0
         wm, lm = _mean(w_vals), _mean(l_vals)
-        var_w = statistics.variance(w_vals)
-        var_l = statistics.variance(l_vals)
+        var_w = statistics.variance(w_vals) if len(w_vals) >= 2 else 0.0
+        var_l = statistics.variance(l_vals) if len(l_vals) >= 2 else 0.0
         pooled = ((var_w + var_l) / 2) ** 0.5 or 1.0
         return abs(wm - lm) / pooled
 
@@ -191,7 +191,7 @@ def calibrate_from_snapshots(
             # Apply filter: keep only trades where indicator >= thresh
             surviving = [s for s in all_snaps
                          if (_get(s, indicator_key) or 0) >= thresh]
-            if len(surviving) < 3:
+            if len(surviving) < 5:  # need at least 5 trades to draw a conclusion
                 continue
             survival_rate = len(surviving) / len(all_snaps)
             if survival_rate < min_survive:
@@ -220,7 +220,7 @@ def calibrate_from_snapshots(
         for thresh in sorted(candidates, reverse=True):
             surviving = [s for s in all_snaps
                          if (_get(s, indicator_key) or 999) <= thresh]
-            if len(surviving) < 3:
+            if len(surviving) < 5:
                 continue
             if len(surviving) / len(all_snaps) < min_survive:
                 continue
@@ -254,34 +254,36 @@ def calibrate_from_snapshots(
     vol_min = _calibrate_indicator("volume_ratio", higher_is_better=True)
 
     # ── Strategy-specific indicator calibration ────────────────
-    ema_dist_min = 0.0
-    bb_pos_min   = 0.0
-    rsi_min      = 0.0
+    ema_dist_min   = 0.0
+    bb_pos_min     = 0.0
     ema_spread_min = 0.0
-    range_atr_max  = 0.0
-    rsi_max        = 0.0
     atr_pct_max    = 0.0
+    bb_depth_min   = 0.0
     lower_wick_min = 0.0
 
     if strategy == "EMA_Mean_Reversion":
+        # Higher EMA distance and higher BB position both correlate with stronger pullback quality
         ema_dist_min = _calibrate_indicator("ema_dist_pct", higher_is_better=True)
         bb_pos_min   = _calibrate_indicator("bb_pct",       higher_is_better=True)
 
     elif strategy == "MA_Crossover_RSI":
-        rsi_min        = _calibrate_indicator("rsi",            higher_is_better=True)
-        ema_spread_min = _calibrate_indicator("ema_dist_pct",   higher_is_better=True)
+        # Wider EMA spread at crossover = more separation = stronger momentum signal
+        # Now captured correctly via ema_spread_pct in the trade analyzer
+        ema_spread_min = _calibrate_indicator("ema_spread_pct", higher_is_better=True)
 
     elif strategy == "Breakout_Consolidation":
-        rsi_min       = _calibrate_indicator("rsi",          higher_is_better=True)
-        range_atr_max = _calibrate_indicator("bb_pct",       higher_is_better=False)  # bb_pct proxy for tightness
+        # Tighter base (lower range/ATR ratio) = better breakout quality
+        # range_atr_ratio: lower is better — a ratio of 1.5 is much tighter than 2.8
+        atr_pct_max = _calibrate_indicator("range_atr_ratio", higher_is_better=False)
 
     elif strategy == "BB_Mean_Reversion":
-        rsi_max     = _calibrate_indicator("rsi",     higher_is_better=False)
-        atr_pct_max = _calibrate_indicator("atr_pct", higher_is_better=False)
+        # Lower ATR% = calmer regime; deeper BB touch = stronger oversold signal
+        atr_pct_max  = _calibrate_indicator("atr_pct",      higher_is_better=False)
+        bb_depth_min = _calibrate_indicator("bb_depth_pct", higher_is_better=True)
 
     elif strategy == "Fib_Pullback_Support":
-        rsi_min        = _calibrate_indicator("rsi",              higher_is_better=True)
-        lower_wick_min = _calibrate_indicator("lower_wick_pct",   higher_is_better=True)
+        # Larger lower wick = stronger rejection candle at Fib level
+        lower_wick_min = _calibrate_indicator("lower_wick_pct", higher_is_better=True)
 
     # ── Evidence means ─────────────────────────────────────────
     w_ema = _vals(wins,   "ema_dist_pct")
@@ -300,14 +302,12 @@ def calibrate_from_snapshots(
         n_trades=n_trades,
         n_wins=n_wins,
         win_rate_pct=round(win_rate, 1),
-        ema_dist_min=ema_dist_min,
         vol_min=vol_min,
+        ema_dist_min=ema_dist_min,
         bb_pos_min=bb_pos_min,
-        rsi_min=rsi_min,
         ema_spread_min=ema_spread_min,
-        range_atr_max=range_atr_max,
-        rsi_max=rsi_max,
         atr_pct_max=atr_pct_max,
+        bb_depth_min=bb_depth_min,
         lower_wick_min=lower_wick_min,
         win_ema_dist_mean=round(_mean(w_ema), 3),
         loss_ema_dist_mean=round(_mean(l_ema), 3),
@@ -322,8 +322,8 @@ def calibrate_from_snapshots(
 
 def get_filters_for_symbol(strategy: str, symbol: str) -> dict:
     """
-    Returns the filter thresholds for this strategy+symbol. Falls back to zeros if no profile.
-    Keys returned depend on the strategy so each strategy's run() can use .get(key, 0.0).
+    Returns calibrated filter thresholds for this strategy+symbol.
+    Falls back to empty dict (no filtering) if no profile exists.
     """
     profile = load_profile(strategy, symbol)
     if profile is None:
@@ -331,11 +331,11 @@ def get_filters_for_symbol(strategy: str, symbol: str) -> dict:
     if strategy == "EMA_Mean_Reversion":
         return {"ema_dist_min": profile.ema_dist_min, "vol_min": profile.vol_min, "bb_pos_min": profile.bb_pos_min}
     if strategy == "MA_Crossover_RSI":
-        return {"rsi_min": profile.rsi_min, "vol_min": profile.vol_min, "ema_spread_min": profile.ema_spread_min}
+        return {"vol_min": profile.vol_min, "ema_spread_min": profile.ema_spread_min}
     if strategy == "Breakout_Consolidation":
-        return {"vol_min": profile.vol_min, "rsi_min": profile.rsi_min, "range_atr_max": profile.range_atr_max}
+        return {"vol_min": profile.vol_min, "atr_pct_max": profile.atr_pct_max}
     if strategy == "BB_Mean_Reversion":
-        return {"rsi_max": profile.rsi_max, "vol_min": profile.vol_min, "atr_pct_max": profile.atr_pct_max}
+        return {"vol_min": profile.vol_min, "atr_pct_max": profile.atr_pct_max, "bb_depth_min": profile.bb_depth_min}
     if strategy == "Fib_Pullback_Support":
-        return {"rsi_min": profile.rsi_min, "lower_wick_min": profile.lower_wick_min, "vol_min": profile.vol_min}
+        return {"lower_wick_min": profile.lower_wick_min, "vol_min": profile.vol_min}
     return {}

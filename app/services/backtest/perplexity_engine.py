@@ -14,6 +14,7 @@ from typing import List, Optional
 import pandas as pd
 
 from app.services.market_data.provider import get_ohlcv
+from app.services.market_regime import get_current_regime, get_regime_risk_caps
 from app.services.risk.position_sizer import calculate_position_size
 from app.services.strategy.perplexity.base import PerplexityStrategy
 
@@ -80,18 +81,22 @@ def run_perplexity_backtest(
     if df_full.empty or len(df_full) < 60:
         raise ValueError(f"Not enough data for {symbol} (need at least 60 bars)")
 
-    # Use 210-bar lookback when we have enough data (needed for SMA200).
-    # For shorter periods (6mo/1y) fall back to 60 bars — SMA200 will return
-    # HOLD on most signals but the backtest still runs and shows real results.
-    lookback = min(210, max(60, len(df_full) // 3))
+    # Warm up 210 bars so SMA(200) is valid from the first active bar.
+    # For very short datasets (< 350 bars), cap at 60% so some trading still occurs.
+    if len(df_full) >= 350:
+        lookback = 210
+    else:
+        lookback = min(210, max(60, len(df_full) * 6 // 10))
 
     dates = [str(d)[:10] for d in df_full.index]
     capital = initial_capital
     position = 0.0
     position_cost = 0.0
+    entry_price_rec: Optional[float] = None   # recorded fill price for trailing stop math
+    initial_risk: Optional[float] = None       # entry - original stop (1R in dollars/share)
     entry_stop: Optional[float] = None
     entry_target: Optional[float] = None
-    open_risk_usd: float = 0.0          # dollars currently at risk in open position
+    open_risk_usd: float = 0.0
     trades: List[dict] = []
     equity_curve: List[dict] = []
     peak_equity = initial_capital
@@ -102,7 +107,7 @@ def run_perplexity_backtest(
     for i in range(lookback, len(df_full)):
         df_slice = df_full.iloc[:i]
         current_close = float(df_full["Close"].iloc[i])
-        fill_price    = float(df_full["Open"].iloc[i]) if i < len(df_full) else current_close
+        fill_price    = float(df_full["Open"].iloc[i])   # always valid — i is bounded by range()
         today = dates[i]
 
         # ── Check stop / target on open if in position ──────────
@@ -114,14 +119,25 @@ def run_perplexity_backtest(
                 pnl = proceeds - position_cost
                 capital += proceeds
                 trades.append(_trade("SELL (stop)", today, open_price, position, proceeds, pnl))
-                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None
             # Gap up through target
             elif entry_target and open_price >= entry_target:
                 proceeds = open_price * position
                 pnl = proceeds - position_cost
                 capital += proceeds
                 trades.append(_trade("SELL (target)", today, open_price, position, proceeds, pnl))
-                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None
+
+        # ── Trailing stop: once price moves 1R, trail at 0.5R below high-water mark ──
+        # This locks in profit on mid-term trades without exiting too early on momentum.
+        if position > 0 and entry_stop is not None and entry_price_rec and initial_risk:
+            high_today = float(df_full["High"].iloc[i])
+            profit_per_share = high_today - entry_price_rec
+            if profit_per_share >= initial_risk:
+                # Move stop to: high_water_mark - 0.5R (trail tightly after 1R gain)
+                trail_stop = high_today - 0.5 * initial_risk
+                if trail_stop > entry_stop:
+                    entry_stop = trail_stop
 
         # ── Intraday stop / target on close ─────────────────────
         if position > 0 and entry_stop is not None:
@@ -132,18 +148,20 @@ def run_perplexity_backtest(
                 capital += entry_stop * position
                 trades.append(_trade("SELL (stop)", today, entry_stop, position,
                                      entry_stop * position, pnl))
-                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None
             elif entry_target and high_today >= entry_target:
                 pnl = entry_target * position - position_cost
                 capital += entry_target * position
                 trades.append(_trade("SELL (target)", today, entry_target, position,
                                      entry_target * position, pnl))
-                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None
 
         # ── Run strategy signal ──────────────────────────────────
+        regime = get_current_regime(df_full.index[i - 1])
+        regime_caps = get_regime_risk_caps(regime)
         if position == 0:
             try:
-                sig = strategy.run(symbol, df_slice)
+                sig = strategy.run(symbol, df_slice, regime=regime)
             except Exception:
                 sig = None
 
@@ -154,14 +172,15 @@ def run_perplexity_backtest(
                     qty = alloc / fill_price if fill_price > 0 else 0.0
                     trade_risk = (fill_price - sig.stop_price) * qty if sig.stop_price else 0.0
                 elif sig.stop_price and sig.stop_price < fill_price:
-                    # Risk-based sizing: risk risk_pct_per_trade of capital on stop distance
+                    # Risk-based sizing: use regime-specific risk caps
                     sz = calculate_position_size(
                         symbol=symbol,
                         entry_price=fill_price,
                         stop_price=sig.stop_price,
                         account_value=capital,
-                        risk_pct_per_trade=risk_pct_per_trade,
+                        risk_pct_per_trade=regime_caps["risk_pct_per_trade"],
                         max_position_size_usd=capital * max_position_pct,
+                        max_account_risk_pct=regime_caps["max_account_risk_pct"],
                         current_open_risk_usd=open_risk_usd,
                     )
                     qty = sz.shares if sz.viable else 0.0
@@ -178,8 +197,10 @@ def run_perplexity_backtest(
                     position = qty
                     position_cost = cost
                     open_risk_usd += trade_risk
-                    entry_stop   = sig.stop_price
-                    entry_target = sig.target_price
+                    entry_stop      = sig.stop_price
+                    entry_target    = sig.target_price
+                    entry_price_rec = fill_price
+                    initial_risk    = (fill_price - sig.stop_price) if sig.stop_price else None
                     trades.append({
                         "date": today, "side": "BUY",
                         "price": round(fill_price, 2), "quantity": round(qty, 4),
@@ -193,7 +214,7 @@ def run_perplexity_backtest(
 
         elif position > 0:
             try:
-                sig = strategy.run(symbol, df_slice)
+                sig = strategy.run(symbol, df_slice, regime=regime)
             except Exception:
                 sig = None
 
@@ -210,7 +231,7 @@ def run_perplexity_backtest(
                     "reason": sig.reason if sig else "",
                     "risk_usd": None,
                 })
-                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None
 
         # ── Mark-to-market ───────────────────────────────────────
         equity = capital + position * current_close

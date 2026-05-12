@@ -72,6 +72,21 @@ class Settings(BaseSettings):
     max_account_risk_pct: float = 0.06      # never commit more than 6% total open risk
     account_value: float = 100_000.0        # your total account size (update this)
 
+    # ── Market regime settings ───────────────────────────────
+    regime_benchmark_symbol: str = "SPY"
+    regime_sma_long: int = 200
+    regime_sma_mid: int = 50
+    regime_deep_bear_drawdown: float = 0.20
+    regime_risk_pct_bull: float = 0.01
+    regime_risk_pct_bear: float = 0.003
+    regime_risk_pct_deep_bear: float = 0.002
+    regime_max_positions_bull: int = 10
+    regime_max_positions_bear: int = 3
+    regime_max_positions_deep_bear: int = 1
+    regime_max_account_risk_bull: float = 0.20
+    regime_max_account_risk_bear: float = 0.08
+    regime_max_account_risk_deep_bear: float = 0.04
+
     # ── Signal consensus ─────────────────────────────────────
     # Minimum number of strategies that must agree on the same
     # symbol + direction before an order is placed.

@@ -11,6 +11,7 @@ TODO: Add a broker-native historical data endpoint when Schwab makes one availab
 """
 
 import logging
+import time
 from typing import Optional
 
 import pandas as pd
@@ -18,7 +19,31 @@ import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
+_CACHE_TTL_SECONDS = 3600   # 1 hour
+_CACHE_MAX_ENTRIES = 150
+
 _cache: dict[str, pd.DataFrame] = {}
+_cache_ts: dict[str, float] = {}   # timestamp each entry was populated
+
+
+def _cache_get(key: str) -> Optional[pd.DataFrame]:
+    if key not in _cache:
+        return None
+    if time.time() - _cache_ts.get(key, 0) > _CACHE_TTL_SECONDS:
+        del _cache[key]
+        del _cache_ts[key]
+        return None
+    return _cache[key]
+
+
+def _cache_set(key: str, df: pd.DataFrame) -> None:
+    if len(_cache) >= _CACHE_MAX_ENTRIES:
+        # Evict the oldest entry
+        oldest = min(_cache_ts, key=_cache_ts.get)
+        del _cache[oldest]
+        del _cache_ts[oldest]
+    _cache[key] = df
+    _cache_ts[key] = time.time()
 
 
 def get_price_series(
@@ -32,15 +57,16 @@ def get_price_series(
     Returns a pd.Series of closing prices indexed by date.
     """
     cache_key = f"{symbol}:{period}:{interval}"
-    if use_cache and cache_key in _cache:
-        df = _cache[cache_key]
+    cached = _cache_get(cache_key) if use_cache else None
+    if cached is not None:
+        df = cached
     else:
         logger.debug("[market_data] Fetching %s period=%s interval=%s", symbol, period, interval)
         ticker = yf.Ticker(symbol)
         df = ticker.history(period=period, interval=interval)
         if df.empty:
             raise ValueError(f"No price data returned for {symbol!r}")
-        _cache[cache_key] = df
+        _cache_set(cache_key, df)
 
     return df["Close"].dropna()
 
@@ -50,13 +76,20 @@ def get_ohlcv(
     period: str = "6mo",
     interval: str = "1d",
 ) -> pd.DataFrame:
-    """Return full OHLCV DataFrame for a symbol."""
+    """Return full OHLCV DataFrame for a symbol. Results cached for 1 hour."""
+    cache_key = f"ohlcv:{symbol}:{period}:{interval}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    logger.debug("[market_data] Fetching OHLCV %s period=%s interval=%s", symbol, period, interval)
     ticker = yf.Ticker(symbol)
     df = ticker.history(period=period, interval=interval)
     if df.empty:
         raise ValueError(f"No OHLCV data for {symbol!r}")
+    _cache_set(cache_key, df)
     return df
 
 
 def clear_cache() -> None:
     _cache.clear()
+    _cache_ts.clear()
