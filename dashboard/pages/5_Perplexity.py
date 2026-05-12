@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
+import sys
+import os
+
+dashboard_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+workspace_root = os.path.abspath(os.path.join(dashboard_root, ".."))
+sys.path.insert(0, workspace_root)
+sys.path.insert(0, dashboard_root)
+
 import api
 
 import plotly.graph_objects as go
