@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Optional
 
 import pandas as pd
@@ -16,6 +17,15 @@ from app.services.backtest.walkforward_engine import (
 )
 from app.services.market_data.provider import get_ohlcv
 from app.services.market_regime import get_current_regime, get_regime_risk_caps
+from app.services.performance_breakdown import (
+    breakdown_by_regime,
+    breakdown_by_volatility,
+    breakdown_by_r_bucket,
+)
+from app.services.perplexity.suitability import (
+    load_suitability_config,
+    save_suitability_config,
+)
 from app.services.risk.position_sizer import calculate_position_size
 from app.services.strategy.perplexity.runner import PERPLEXITY_STRATEGIES, run_perplexity_signal
 
@@ -64,6 +74,9 @@ def get_signals(symbol: str):
                 "reason": s.reason,
                 "indicators": s.indicators,
                 "regime": regime.value,
+                "volatility_bucket": s.volatility_bucket,
+                "suitability_blocked": s.suitability_blocked,
+                "suitability_reason": s.suitability_reason,
                 "position_size": None,
             }
             # Attach position sizing for BUY signals that have a stop price
@@ -183,6 +196,7 @@ def backtest(
     period: str = "5y",
     initial_capital: float = 100_000.0,
     position_pct: float = 0.0,
+    breakdown: bool = False,
 ):
     """Run a single Perplexity strategy backtest.
     position_pct: 0 = risk-based sizing (1% risk/trade); >0 = fixed % of capital per trade (e.g. 0.20 = 20%).
@@ -210,10 +224,23 @@ def backtest(
             "losing_trades": result.losing_trades,
             "win_rate_pct": result.win_rate_pct,
             "profit_factor": result.profit_factor,
+            "avg_win_pct": result.avg_win_pct,
+            "avg_loss_pct": result.avg_loss_pct,
+            "expectancy_pct": result.expectancy_pct,
+            "expectancy_r": result.expectancy_r,
+            "average_holding_days": result.average_holding_days,
+            "average_r_multiple": result.average_r_multiple,
             "max_drawdown_pct": result.max_drawdown_pct,
             "sharpe_ratio": result.sharpe_ratio,
             "equity_curve": result.equity_curve,
             "trades": result.trades,
+            **({
+                "breakdown": {
+                    "by_regime": {k: asdict(v) for k, v in breakdown_by_regime(result.trade_pairs, result.strategy_name, result.symbol, result.period, result.initial_capital).items()},
+                    "by_volatility": {k: asdict(v) for k, v in breakdown_by_volatility(result.trade_pairs, result.strategy_name, result.symbol, result.period, result.initial_capital).items()},
+                    "by_r_bucket": {k: asdict(v) for k, v in breakdown_by_r_bucket(result.trade_pairs, result.strategy_name, result.symbol, result.period, result.initial_capital).items()},
+                }
+            } if breakdown else {}),
         }
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -239,6 +266,12 @@ def backtest_all(
                 "total_trades": r.total_trades,
                 "win_rate_pct": r.win_rate_pct,
                 "profit_factor": r.profit_factor,
+                "avg_win_pct": r.avg_win_pct,
+                "avg_loss_pct": r.avg_loss_pct,
+                "expectancy_pct": r.expectancy_pct,
+                "expectancy_r": r.expectancy_r,
+                "average_holding_days": r.average_holding_days,
+                "average_r_multiple": r.average_r_multiple,
                 "total_return_pct": r.total_return_pct,
                 "cagr": r.cagr,
                 "total_pnl": r.total_pnl,
@@ -249,6 +282,17 @@ def backtest_all(
         except Exception as exc:
             results.append({"strategy_name": strategy.name, "error": str(exc)})
     return results
+
+
+@router.get("/suitability")
+def get_suitability_config():
+    return load_suitability_config()
+
+
+@router.post("/suitability")
+def update_suitability_config(config: dict):
+    save_suitability_config(config)
+    return {"updated": True, "config": config}
 
 
 @router.get("/portfolio/{strategy_name}")

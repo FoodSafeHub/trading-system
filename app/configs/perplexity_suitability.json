@@ -1,0 +1,42 @@
+{
+  "EMA_Mean_Reversion": {
+    "allowed_regimes": [],
+    "blocked_regimes": [],
+    "allowed_symbols": [],
+    "blocked_symbols": [],
+    "allowed_volatility_buckets": [],
+    "blocked_volatility_buckets": []
+  },
+  "MA_Crossover_RSI": {
+    "allowed_regimes": [],
+    "blocked_regimes": [],
+    "allowed_symbols": [],
+    "blocked_symbols": [],
+    "allowed_volatility_buckets": [],
+    "blocked_volatility_buckets": []
+  },
+  "Breakout_Consolidation": {
+    "allowed_regimes": [],
+    "blocked_regimes": [],
+    "allowed_symbols": [],
+    "blocked_symbols": [],
+    "allowed_volatility_buckets": [],
+    "blocked_volatility_buckets": []
+  },
+  "BB_Mean_Reversion": {
+    "allowed_regimes": [],
+    "blocked_regimes": [],
+    "allowed_symbols": [],
+    "blocked_symbols": [],
+    "allowed_volatility_buckets": [],
+    "blocked_volatility_buckets": []
+  },
+  "Fib_Pullback_Support": {
+    "allowed_regimes": [],
+    "blocked_regimes": [],
+    "allowed_symbols": [],
+    "blocked_symbols": [],
+    "allowed_volatility_buckets": [],
+    "blocked_volatility_buckets": []
+  }
+}

@@ -15,6 +15,14 @@ import pandas as pd
 
 from app.services.market_data.provider import get_ohlcv
 from app.services.market_regime import get_current_regime, get_regime_risk_caps
+from app.services.performance_breakdown import bucket_atr_pct
+from app.services.performance_metrics import (
+    calc_cagr,
+    calc_total_return,
+    calculate_performance_from_pairs,
+    pair_trade_records,
+)
+from app.services.perplexity.suitability import load_suitability_config
 from app.services.risk.position_sizer import calculate_position_size
 from app.services.strategy.perplexity.base import PerplexityStrategy
 
@@ -64,8 +72,32 @@ class PerplexityBacktestResult:
     capital_employed: float     # sum of all buy-side position costs
     max_drawdown_pct: float
     sharpe_ratio: Optional[float]
+    avg_win_pct: float
+    avg_loss_pct: float
+    expectancy_pct: float
+    expectancy_r: Optional[float]
+    average_holding_days: float
+    average_r_multiple: Optional[float]
+    trade_pairs: List[dict] = field(default_factory=list)
     trades: List[dict] = field(default_factory=list)
     equity_curve: List[dict] = field(default_factory=list)
+
+
+def _atr_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high, low, close = df["High"], df["Low"], df["Close"]
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / period, adjust=False).mean()
+
+
+def _current_atr(df: pd.DataFrame, period: int = 14) -> float:
+    atr = _atr_series(df, period)
+    last = atr.iloc[-1]
+    return float(last) if not pd.isna(last) else float(df["Close"].iloc[-1]) * 0.02
 
 
 def run_perplexity_backtest(
@@ -159,9 +191,22 @@ def run_perplexity_backtest(
         # ── Run strategy signal ──────────────────────────────────
         regime = get_current_regime(df_full.index[i - 1])
         regime_caps = get_regime_risk_caps(regime)
+        suitability_config = None
+        try:
+            suitability_config = load_suitability_config()
+        except Exception:
+            suitability_config = None
+
+        volatility_bucket = bucket_atr_pct(_current_atr(df_slice))
         if position == 0:
             try:
-                sig = strategy.run(symbol, df_slice, regime=regime)
+                sig = strategy.run(
+                    symbol,
+                    df_slice,
+                    regime=regime,
+                    volatility_bucket=volatility_bucket,
+                    suitability_config=suitability_config,
+                )
             except Exception:
                 sig = None
 
@@ -201,6 +246,7 @@ def run_perplexity_backtest(
                     entry_target    = sig.target_price
                     entry_price_rec = fill_price
                     initial_risk    = (fill_price - sig.stop_price) if sig.stop_price else None
+                    atr_pct = round(_current_atr(df_slice) / fill_price * 100, 3) if fill_price else 0.0
                     trades.append({
                         "date": today, "side": "BUY",
                         "price": round(fill_price, 2), "quantity": round(qty, 4),
@@ -210,11 +256,22 @@ def run_perplexity_backtest(
                         "confidence": sig.confidence,
                         "reason": sig.reason,
                         "risk_usd": round(trade_risk, 2),
+                        "regime": regime.value,
+                        "atr_pct": atr_pct,
+                        "volatility_bucket": volatility_bucket,
+                        "strategy_name": strategy.name,
+                        "symbol": symbol,
                     })
 
         elif position > 0:
             try:
-                sig = strategy.run(symbol, df_slice, regime=regime)
+                sig = strategy.run(
+                    symbol,
+                    df_slice,
+                    regime=regime,
+                    volatility_bucket=volatility_bucket,
+                    suitability_config=suitability_config,
+                )
             except Exception:
                 sig = None
 
@@ -230,6 +287,9 @@ def run_perplexity_backtest(
                     "confidence": sig.confidence if sig else None,
                     "reason": sig.reason if sig else "",
                     "risk_usd": None,
+                    "regime": regime.value,
+                    "strategy_name": strategy.name,
+                    "symbol": symbol,
                 })
                 position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None
 
@@ -282,6 +342,16 @@ def run_perplexity_backtest(
         if std > 0:
             sharpe = round((avg / std) * (252 ** 0.5), 2)
 
+    trade_pairs = pair_trade_records(trades)
+    trade_perf = calculate_performance_from_pairs(
+        strategy_name=strategy.name,
+        symbol=symbol,
+        period=period,
+        initial_capital=initial_capital,
+        trade_pairs=trade_pairs,
+        equity_curve=equity_curve,
+    )
+
     return PerplexityBacktestResult(
         strategy_name=strategy.name,
         symbol=symbol,
@@ -301,6 +371,13 @@ def run_perplexity_backtest(
         profit_factor=profit_factor,
         max_drawdown_pct=round(max_drawdown, 2),
         sharpe_ratio=sharpe,
+        avg_win_pct=trade_perf.avg_win_pct,
+        avg_loss_pct=trade_perf.avg_loss_pct,
+        expectancy_pct=trade_perf.expectancy_pct,
+        expectancy_r=trade_perf.expectancy_r,
+        average_holding_days=trade_perf.average_holding_days,
+        average_r_multiple=trade_perf.average_r_multiple,
+        trade_pairs=trade_pairs,
         trades=trades,
         equity_curve=equity_curve,
     )

@@ -88,13 +88,19 @@ with tab_signals:
         for s in sigs:
             direction = s["direction"]
             name = s["strategy"]
-            icon = "🟢" if direction == "BUY" else ("🔴" if direction == "SELL" else "⬜")
+            blocked = s.get("suitability_blocked", False)
+            icon = "🚫" if blocked else ("🟢" if direction == "BUY" else ("🔴" if direction == "SELL" else "⬜"))
             conf_str = f"confidence: {s['confidence']:.0%}" if s["confidence"] else ""
+            bucket_str = f" | Vol bucket: {s['volatility_bucket']}" if s.get("volatility_bucket") else ""
 
-            with st.expander(f"{icon} **{name}** — {direction}  |  {conf_str}",
-                             expanded=(direction == "BUY")):
+            with st.expander(
+                f"{icon} **{name}** — {direction}{bucket_str}  |  {conf_str}",
+                expanded=(direction == "BUY"),
+            ):
                 st.caption(STRATEGY_DESCRIPTIONS.get(name, ""))
-                if s["reason"]:
+                if s.get("suitability_blocked"):
+                    st.warning(f"Blocked by suitability: {s.get('suitability_reason', 'Rule mismatch')}")
+                if s["reason"] and not s.get("suitability_blocked"):
                     st.info(f"**Reason:** {s['reason']}")
 
                 # Entry / Stop / Target
@@ -397,7 +403,7 @@ with tab_backtest:
             try:
                 r = api._get(
                     f"/perplexity/backtest/{chosen_strat}/{bt_symbol}"
-                    f"?period={bt_period}&initial_capital={bt_capital}&position_pct={bt_pos_pct}",
+                    f"?period={bt_period}&initial_capital={bt_capital}&position_pct={bt_pos_pct}&breakdown=true",
                     timeout=180,
                 )
                 st.session_state["px_bt_result"] = r
@@ -423,6 +429,11 @@ with tab_backtest:
         c6.metric("Max Drawdown", f"{r['max_drawdown_pct']:.1f}%", delta_color="inverse")
         c7.metric("Sharpe",       r["sharpe_ratio"] if r["sharpe_ratio"] else "—")
         c8.metric("Trades",       r["total_trades"])
+        c9, c10, c11, c12 = st.columns([1, 1, 1, 1])
+        c9.metric("Avg Win",      f"{r.get('avg_win_pct', 0):+.2f}%")
+        c10.metric("Avg Loss",    f"{r.get('avg_loss_pct', 0):+.2f}%")
+        c11.metric("Expectancy",  f"{r.get('expectancy_pct', 0):+.2f}%")
+        c12.metric("Avg Hold",    f"{r.get('average_holding_days', 0):.1f} bars")
 
         # Equity curve
         if r.get("equity_curve"):
@@ -483,6 +494,58 @@ with tab_backtest:
                     "reason":         t.get("reason", ""),
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        if r.get("breakdown"):
+            st.divider()
+            bd = r["breakdown"]
+            with st.expander("📊 Performance Breakdown", expanded=False):
+                regimes = bd.get("by_regime", {})
+                if regimes:
+                    regime_rows = [
+                        {
+                            "Regime": key.title(),
+                            "Trades": v["total_trades"],
+                            "Win Rate": f"{v['win_rate_pct']:.1f}%",
+                            "PF": v["profit_factor"] if v["profit_factor"] else "—",
+                            "Expectancy": f"{v['expectancy_pct']:+.2f}%",
+                            "Avg Hold": f"{v['average_holding_days']:.1f}"
+                        }
+                        for key, v in regimes.items()
+                    ]
+                    st.write("**By regime**")
+                    st.dataframe(pd.DataFrame(regime_rows), use_container_width=True, hide_index=True)
+
+                volatility = bd.get("by_volatility", {})
+                if volatility:
+                    vol_rows = [
+                        {
+                            "Volatility": key.title(),
+                            "Trades": v["total_trades"],
+                            "Win Rate": f"{v['win_rate_pct']:.1f}%",
+                            "PF": v["profit_factor"] if v["profit_factor"] else "—",
+                            "Expectancy": f"{v['expectancy_pct']:+.2f}%",
+                            "Avg Hold": f"{v['average_holding_days']:.1f}"
+                        }
+                        for key, v in volatility.items()
+                    ]
+                    st.write("**By volatility bucket**")
+                    st.dataframe(pd.DataFrame(vol_rows), use_container_width=True, hide_index=True)
+
+                r_buckets = bd.get("by_r_bucket", {})
+                if r_buckets:
+                    r_rows = [
+                        {
+                            "R bucket": key,
+                            "Trades": v["total_trades"],
+                            "Win Rate": f"{v['win_rate_pct']:.1f}%",
+                            "PF": v["profit_factor"] if v["profit_factor"] else "—",
+                            "Expectancy": f"{v['expectancy_pct']:+.2f}%",
+                            "Avg Hold": f"{v['average_holding_days']:.1f}"
+                        }
+                        for key, v in r_buckets.items()
+                    ]
+                    st.write("**By R bucket**")
+                    st.dataframe(pd.DataFrame(r_rows), use_container_width=True, hide_index=True)
 
         # ── Trade Analyzer ────────────────────────────────────
         st.divider()
@@ -869,8 +932,9 @@ with tab_compare:
         for r in cmp:
             if r.get("error"):
                 rows.append({"Strategy": r["strategy_name"], "Trades": "—", "Win Rate": "—",
-                             "Profit Factor": "—", "Total Return": "ERROR", "CAGR": "—",
-                             "Total P&L": r["error"], "Max Drawdown": "—", "Sharpe": "—"})
+                             "Profit Factor": "—", "Avg Win": "—", "Expectancy": "—",
+                             "Total Return": "ERROR", "CAGR": "—", "Total P&L": r["error"],
+                             "Max Drawdown": "—", "Sharpe": "—"})
                 continue
             pnl = r["total_pnl"]
             is_best = valid and r["strategy_name"] == best["strategy_name"]
@@ -879,6 +943,8 @@ with tab_compare:
                 "Trades":        r["total_trades"],
                 "Win Rate":      f"{r['win_rate_pct']:.1f}%",
                 "Profit Factor": r["profit_factor"] if r["profit_factor"] else "—",
+                "Avg Win":       f"{r.get('avg_win_pct', 0):+.2f}%",
+                "Expectancy":    f"{r.get('expectancy_pct', 0):+.2f}%",
                 "Total Return":  f"{r['total_return_pct']:+.2f}%",
                 "CAGR":          f"{r.get('cagr', 0):+.2f}%",
                 "Total P&L":     f"+${pnl:,.0f}" if pnl >= 0 else f"-${abs(pnl):,.0f}",
