@@ -14,7 +14,7 @@ from typing import List, Optional
 import pandas as pd
 
 from app.services.market_data.provider import get_ohlcv
-from app.services.market_regime import get_current_regime, get_regime_risk_caps
+from app.services.market_regime import MarketRegime, get_regime_risk_caps
 from app.services.performance_breakdown import bucket_atr_pct
 from app.services.performance_metrics import (
     calc_cagr,
@@ -100,6 +100,24 @@ def _current_atr(df: pd.DataFrame, period: int = 14) -> float:
     return float(last) if not pd.isna(last) else float(df["Close"].iloc[-1]) * 0.02
 
 
+def _regime_from_spy(spy_close: pd.Series, as_of_date: pd.Timestamp) -> MarketRegime:
+    """
+    Compute market regime from SPY SMA200 as of a specific date.
+    Uses the SPY close series pre-fetched for the full backtest period.
+    Falls back to BULL if SPY data doesn't reach that date.
+    """
+    history = spy_close.loc[spy_close.index <= as_of_date]
+    if len(history) < 50:
+        return MarketRegime.BULL
+    sma200 = float(history.rolling(200).mean().iloc[-1]) if len(history) >= 200 else float(history.mean())
+    c = float(history.iloc[-1])
+    if c < sma200 * 0.80:
+        return MarketRegime.DEEP_BEAR
+    if c < sma200:
+        return MarketRegime.BEAR
+    return MarketRegime.BULL
+
+
 def run_perplexity_backtest(
     strategy: PerplexityStrategy,
     symbol: str,
@@ -112,6 +130,13 @@ def run_perplexity_backtest(
     df_full = get_ohlcv(symbol, period=period)
     if df_full.empty or len(df_full) < 60:
         raise ValueError(f"Not enough data for {symbol} (need at least 60 bars)")
+
+    # Fetch SPY for regime detection — always 10y so historical backtests work.
+    # If the symbol IS SPY, reuse its own data to avoid a redundant download.
+    try:
+        spy_raw = df_full["Close"] if symbol.upper() == "SPY" else get_ohlcv("SPY", period="10y")["Close"]
+    except Exception:
+        spy_raw = df_full["Close"]   # fallback: use symbol itself as regime proxy
 
     # Warm up 210 bars so SMA(200) is valid from the first active bar.
     # For very short datasets (< 350 bars), cap at 60% so some trading still occurs.
@@ -189,7 +214,7 @@ def run_perplexity_backtest(
                 position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None
 
         # ── Run strategy signal ──────────────────────────────────
-        regime = get_current_regime(df_full.index[i - 1])
+        regime = _regime_from_spy(spy_raw, df_full.index[i - 1])
         regime_caps = get_regime_risk_caps(regime)
         suitability_config = None
         try:

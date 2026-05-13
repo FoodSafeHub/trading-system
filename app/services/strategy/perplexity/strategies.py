@@ -150,7 +150,7 @@ class EmaMeanReversionUptrend(PerplexityStrategy):
         "filter_bb_pos_min":   0.0,
     }
 
-    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None) -> PerplexitySignal:
+    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None, **kwargs) -> PerplexitySignal:
         cfg = self.config
         if len(df) < cfg["min_data_bars"]:
             return self._hold(symbol, "not enough data")
@@ -254,7 +254,7 @@ class MaCrossoverRsi(PerplexityStrategy):
         "filter_ema_spread_min": 0.0,
     }
 
-    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None) -> PerplexitySignal:
+    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None, **kwargs) -> PerplexitySignal:
         cfg = self.config
         if len(df) < cfg["min_data_bars"]:
             return self._hold(symbol, "not enough data")
@@ -383,7 +383,7 @@ class BreakoutConsolidation(PerplexityStrategy):
         "filter_range_atr_max": 0.0,
     }
 
-    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None) -> PerplexitySignal:
+    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None, **kwargs) -> PerplexitySignal:
         cfg = self.config
         if len(df) < cfg["min_data_bars"]:
             return self._hold(symbol, "not enough data")
@@ -503,7 +503,7 @@ class BollingerMeanReversionUptrend(PerplexityStrategy):
         "filter_bb_depth_min": 0.0,
     }
 
-    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None) -> PerplexitySignal:
+    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None, **kwargs) -> PerplexitySignal:
         cfg = self.config
         if len(df) < cfg["min_data_bars"]:
             return self._hold(symbol, "not enough data")
@@ -611,7 +611,7 @@ class FibPullbackSupport(PerplexityStrategy):
         "filter_vol_min":        0.0,
     }
 
-    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None) -> PerplexitySignal:
+    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None, **kwargs) -> PerplexitySignal:
         cfg = self.config
         if len(df) < cfg["min_data_bars"]:
             return self._hold(symbol, "not enough data")
