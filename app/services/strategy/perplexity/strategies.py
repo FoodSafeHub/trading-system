@@ -242,12 +242,13 @@ class MaCrossoverRsi(PerplexityStrategy):
         "macd_slow":            26,
         "macd_signal":          9,
         "rsi_period":           14,
-        "rsi_min":              45,
-        "rsi_max":              65,
-        "vol_ratio_min":        1.1,
+        "rsi_min":              35,
+        "rsi_max":              75,
+        "vol_ratio_min":        0.8,
         "atr_stop_multiplier":  1.5,
-        "atr_tp_multiplier":    2.0,
+        "atr_tp_multiplier":    2.5,
         "max_hold_bars":        20,
+        "crossover_lookback":   5,    # allow crossover within N bars (not exact)
         # ── Calibration filters ──
         "filter_vol_min":        0.0,
         "filter_ema_spread_min": 0.0,
@@ -280,8 +281,17 @@ class MaCrossoverRsi(PerplexityStrategy):
         )
         atr_v = _current_atr(df, 14)
 
-        bullish_cross = e9_prev <= e21_prev and e9_now > e21_now
-        bearish_cross = e9_prev >= e21_prev and e9_now < e21_now
+        # Crossover within the last N bars (not just exact bar)
+        lb = cfg.get("crossover_lookback", 3)
+        lb = min(lb, len(ema9) - 1)
+        bullish_cross = (e9_now > e21_now) and any(
+            float(ema9.iloc[-(i+2)]) <= float(ema21.iloc[-(i+2)])
+            for i in range(lb)
+        )
+        bearish_cross = (e9_now < e21_now) and any(
+            float(ema9.iloc[-(i+2)]) >= float(ema21.iloc[-(i+2)])
+            for i in range(lb)
+        )
 
         vol_ratio = 1.0
         if "Volume" in df.columns and len(df) > 21:
@@ -362,11 +372,11 @@ class BreakoutConsolidation(PerplexityStrategy):
         # ── New logic params ──
         "bb_period":       20,
         "bb_std":          2.0,
-        "squeeze_bars":    5,          # consecutive bars of narrowing bandwidth
+        "squeeze_bars":    3,          # consecutive bars of narrowing bandwidth
         "rsi_period":      14,
-        "rsi_entry_min":   50,         # RSI must be above 50 at breakout
+        "rsi_entry_min":   45,         # RSI must be above 45 at breakout
         "rsi_overbought":  80,
-        "vol_ratio_min":   1.3,
+        "vol_ratio_min":   1.1,
         "max_hold_bars":   15,
         # ── Calibration filters ──
         "filter_vol_min":       0.0,
@@ -388,15 +398,19 @@ class BreakoutConsolidation(PerplexityStrategy):
         bb_upper, bb_mid, bb_lower = _bb_bands(close, cfg["bb_period"], cfg["bb_std"])
         bw = bb_upper - bb_lower  # bandwidth series
 
-        # Check squeeze: last squeeze_bars all narrowing
+        # Check squeeze: squeeze happened recently (within squeeze_bars * 2 window)
         n = cfg["squeeze_bars"]
-        if len(bw) < n + 2:
+        window = n * 2
+        if len(bw) < window + 2:
             return self._hold(symbol, "not enough bars for squeeze detection")
 
-        squeeze = all(
-            float(bw.iloc[-(i+1)]) < float(bw.iloc[-(i+2)])
-            for i in range(n)
-        )
+        # Any consecutive run of n narrowing bars in the recent window
+        bw_window = [float(bw.iloc[-(window - i)]) for i in range(window)]
+        squeeze = False
+        for start in range(len(bw_window) - n):
+            if all(bw_window[start + j + 1] < bw_window[start + j] for j in range(n)):
+                squeeze = True
+                break
 
         rsi14   = _rsi(close, cfg["rsi_period"])
         rsi_now = float(rsi14.iloc[-1])
@@ -473,11 +487,11 @@ class BollingerMeanReversionUptrend(PerplexityStrategy):
         # ── New logic params ──
         "ema_trend":                50,
         "ema_slope_bars":           5,    # bars to measure EMA slope (must be positive)
-        "price_ema_proximity_pct":  1.0,  # price within ±1% of EMA50
+        "price_ema_proximity_pct":  3.0,  # price within ±3% of EMA50
         "rsi_period":               14,
-        "rsi_min":                  35,
-        "rsi_max":                  55,
-        "wick_ratio_min":           0.4,  # lower wick ≥ 40% of bar range
+        "rsi_min":                  30,
+        "rsi_max":                  60,
+        "wick_ratio_min":           0.3,  # lower wick ≥ 30% of bar range
         "exit_rsi":                 65,
         "exit_extension_pct":       3.0,  # sell if price > entry + 3%
         "hard_stop_pct":            2.0,
@@ -580,14 +594,14 @@ class FibPullbackSupport(PerplexityStrategy):
         "min_data_bars":    220,
         # ── New logic params ──
         "atr_period":           14,
-        "atr_spike_threshold":  3.0,   # ATR% > 3% = fear spike
-        "atr_exit_threshold":   2.0,   # ATR% < 2% = volatility normalized → exit
+        "atr_spike_threshold":  1.5,   # ATR% > 1.5% = fear/elevated volatility
+        "atr_exit_threshold":   1.0,   # ATR% < 1% = volatility normalized → exit
         "rsi_period":           14,
-        "rsi_entry_max":        30,    # RSI < 30 = oversold panic
-        "rsi_exit":             55,    # RSI recovers → exit
-        "bb_pos_max":           0.15,  # BB%B < 0.15 = near lower band
-        "wick_ratio_min":       0.5,   # strong lower rejection wick
-        "prior_decline_pct":    2.0,   # prior 3-bar decline ≥ 2%
+        "rsi_entry_max":        45,    # RSI < 45 = oversold/weak momentum
+        "rsi_exit":             60,    # RSI recovers → exit
+        "bb_pos_max":           0.35,  # BB%B < 0.35 = below midline
+        "wick_ratio_min":       0.30,  # rejection wick ≥ 30% of bar range
+        "prior_decline_pct":    1.0,   # prior 3-bar decline ≥ 1%
         "prior_decline_bars":   3,
         "hard_stop_pct":        4.0,
         "take_profit_pct":      6.0,

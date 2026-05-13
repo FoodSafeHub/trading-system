@@ -1229,16 +1229,18 @@ with tab_walkforward:
         with st.spinner("Running walk-forward validation..."):
             try:
                 if wf_mode == "Simple 70/30 Split":
-                    url = (f"/perplexity/walkforward/{wf_strat}/{wf_sym}"
-                           f"?mode=simple&period={wf_period}&train_pct={wf_train_pct}"
-                           f"&initial_capital={wf_capital}&position_pct={wf_pos_pct}")
+                    result = api.perplexity_walkforward(
+                        wf_strat, wf_sym, mode="simple", period=wf_period,
+                        train_pct=wf_train_pct, initial_capital=wf_capital,
+                        position_pct=wf_pos_pct,
+                    )
                 else:
-                    url = (f"/perplexity/walkforward/{wf_strat}/{wf_sym}"
-                           f"?mode=rolling&period={wf_period}"
-                           f"&train_years={wf_train_years}&test_years={wf_test_years}"
-                           f"&step_years={wf_step_years}"
-                           f"&initial_capital={wf_capital}&position_pct={wf_pos_pct}")
-                result = api._get(url, timeout=600)
+                    result = api.perplexity_walkforward(
+                        wf_strat, wf_sym, mode="rolling", period=wf_period,
+                        train_years=wf_train_years, test_years=wf_test_years,
+                        step_years=wf_step_years, initial_capital=wf_capital,
+                        position_pct=wf_pos_pct,
+                    )
                 st.session_state["px_walkforward"] = result
             except Exception as e:
                 st.error(f"Walk-forward failed: {e}")

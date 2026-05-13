@@ -302,6 +302,24 @@ def _backtest_on_slice(
         if std > 0:
             sharpe = round((avg / std) * (_TRADING_DAYS_PER_YEAR ** 0.5), 2)
 
+    # Per-trade performance extras
+    win_pcts  = [t["pnl"] / (t["value"] or 1) * 100 for t in winning if t.get("value")]
+    loss_pcts = [t["pnl"] / (t["value"] or 1) * 100 for t in losing  if t.get("value")]
+    avg_win_pct  = round(sum(win_pcts)  / len(win_pcts),  2) if win_pcts  else 0.0
+    avg_loss_pct = round(sum(loss_pcts) / len(loss_pcts), 2) if loss_pcts else 0.0
+    expectancy_pct = round(
+        (win_rate / 100) * avg_win_pct + (1 - win_rate / 100) * avg_loss_pct, 2
+    ) if sell_trades else 0.0
+
+    # Average holding days (use hold_bars as proxy — already in days for daily bars)
+    hold_bars_list = [t.get("hold_bars", 0) for t in sell_trades]
+    avg_hold = round(sum(hold_bars_list) / len(hold_bars_list), 1) if hold_bars_list else 0.0
+
+    # Average R-multiple (pnl / risk_usd per trade)
+    r_multiples = [t["pnl"] / t["risk_usd"] for t in sell_trades
+                   if t.get("risk_usd") and t["risk_usd"] > 0]
+    avg_r = round(sum(r_multiples) / len(r_multiples), 2) if r_multiples else None
+
     from app.services.backtest.perplexity_engine import calc_total_return as _tr, calc_cagr as _cagr
     return PerplexityBacktestResult(
         strategy_name=strategy.name, symbol=symbol, period="slice",
@@ -318,6 +336,12 @@ def _backtest_on_slice(
         losing_trades=len(losing),
         win_rate_pct=round(win_rate, 2),
         profit_factor=profit_factor,
+        avg_win_pct=avg_win_pct,
+        avg_loss_pct=avg_loss_pct,
+        expectancy_pct=expectancy_pct,
+        expectancy_r=avg_r,
+        average_holding_days=avg_hold,
+        average_r_multiple=avg_r,
         max_drawdown_pct=round(max_drawdown, 2),
         sharpe_ratio=sharpe,
         trades=trades,
