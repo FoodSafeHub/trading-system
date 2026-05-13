@@ -24,27 +24,26 @@ st.caption(
 )
 
 STRATEGY_DESCRIPTIONS = {
-    "EMA_Mean_Reversion":    "Mean reversion to the 20 EMA inside a strong uptrend (close > SMA200). "
-                              "Waits for a pullback within 2% of EMA(20) then buys the first bullish reversal candle. "
-                              "Stop: min(candle low, EMA20 − 1.5%). Target: 2.5×R. "
-                              "Best on: AAPL, MSFT, GOOGL — smooth trending large-caps.",
-    "MA_Crossover_RSI":      "Catches new momentum swings when EMA(20) crosses above EMA(50) "
-                              "with RSI in the 40–65 zone (not already overbought). "
-                              "Stop: below EMA(50) or recent swing low. Target: 2.5×R. "
-                              "Best on: QQQ, SPY, NVDA — trending ETFs and growth names.",
-    "Breakout_Consolidation":"Breakout from a tight consolidation range (last 10 bars) with volume > 1.5× average. "
-                              "Requires close > SMA(50) AND SMA(200). "
-                              "Stop: just below range high. Target: 2.5×R. "
-                              "Best on: TSLA, META, AMZN — volatile momentum names.",
-    "BB_Mean_Reversion":     "Fades short-term oversold extremes in a bullish regime. "
-                              "Price must touch below the lower BB then close back inside within 3 bars. "
-                              "Optional RSI filter (cross above 32). Stop: 1.5×ATR. Target: BB upper. "
-                              "Best on: AAPL, NVDA, SPY — stocks that snap back in uptrends.",
-    "Fib_Pullback_Support":  "Buys pullbacks to the 38.2%, 50%, or 61.8% Fibonacci retracement "
-                              "of the most recent impulse swing in an uptrend. "
-                              "Entry requires a bullish rejection candle OR RSI turning up from oversold. "
-                              "Stop: 1.5×ATR below Fib level. Target: prior swing high. "
-                              "Best on: GOOGL, JPM, AAPL — structured trending names.",
+    "EMA_Mean_Reversion":    "Connors RSI(2) mean reversion — BULL market only (price > SMA200). "
+                              "Buys when RSI(2) drops below 10 (extreme oversold), skips high-volatility spike days (ATR% guard). "
+                              "Exit: RSI(2) > 70 OR close > SMA(5). Stop: 5% hard stop. Target: +8%. Max hold: 10 bars. "
+                              "Highest-frequency strategy, 7–8 trades/year. Best on: AAPL, MSFT, GOOGL, SPY.",
+    "MA_Crossover_RSI":      "EMA(9/21) bullish crossover confirmed by MACD above its signal line. "
+                              "BULL only. Requires RSI in 45–65 zone + volume ≥ 1.1× average at crossover. "
+                              "Stop: entry − 1.5×ATR. Target: entry + 2×ATR. Max hold: 20 bars. "
+                              "Best on: SPY, QQQ, NVDA — trending names with clean momentum transitions.",
+    "Breakout_Consolidation":"Bollinger Band Width squeeze (5+ consecutive bars of narrowing bandwidth) "
+                              "followed by close above the upper BB with volume ≥ 1.3× average. BULL only. "
+                              "Stop: lower BB at entry. Target: entry + one full BB width. Max hold: 15 bars. "
+                              "Best on: TSLA, META, AMZN — stocks that compress then explode.",
+    "BB_Mean_Reversion":     "Pullback to rising EMA(50) with bullish rejection wick. Works in BULL and mild BEAR. "
+                              "Requires: EMA(50) slope up + price within ±1% of EMA(50) + RSI 35–55 "
+                              "+ lower wick ≥ 40% of bar range. Stop: 2% hard stop. Target: +3%. Max hold: 20 bars. "
+                              "Highest-frequency strategy. Best on: AAPL, MSFT, GOOGL — smooth EMA50 tapestry.",
+    "Fib_Pullback_Support":  "ATR-spike / fear-capitulation reversal. Works in BULL and mild BEAR. "
+                              "Triggers when ATR% > 3% (panic day) + RSI < 30 + BB%B < 0.15 + lower rejection wick ≥ 50% "
+                              "+ 3-bar prior decline ≥ 2%. Stop: 4% hard stop. Target: +6%. Max hold: 8 bars. "
+                              "Best on: SPY, AAPL, MSFT — liquid names that recover fast after selloffs.",
 }
 
 SYMBOLS = ["SPY", "QQQ", "IWM", "AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "META", "GOOGL"]
@@ -74,7 +73,7 @@ with tab_signals:
     if run_sig:
         with st.spinner(f"Fetching signals for {sig_symbol}..."):
             try:
-                signals = api._get(f"/perplexity/signals/{sig_symbol}")
+                signals = api.perplexity_signals(sig_symbol)
                 st.session_state["px_signals"] = signals
             except Exception as e:
                 st.error(f"Failed: {e}")
@@ -283,11 +282,10 @@ If the stop is hit you lose ~1% of your account. If the target is hit you typica
             st.error("Stop price must be below entry price.")
         else:
             try:
-                result = api._get(
-                    f"/perplexity/size?symbol={sz_symbol}"
-                    f"&entry_price={sz_entry}&stop_price={sz_stop}"
-                    f"&account_value={sz_account}&risk_pct={sz_risk/100}"
-                    f"&max_position_size_usd={sz_maxpos}"
+                result = api.perplexity_size(
+                    sz_symbol, sz_entry, sz_stop,
+                    account_value=sz_account, risk_pct=sz_risk / 100,
+                    max_position_size_usd=sz_maxpos,
                 )
                 st.session_state["sz_result"] = {
                     **result, "_target": sz_target, "_account": sz_account, "_maxpos": sz_maxpos
@@ -367,7 +365,7 @@ with tab_backtest:
     st.subheader("Backtest a Single Strategy")
 
     try:
-        strat_list = api._get("/perplexity/strategies")
+        strat_list = api.perplexity_strategies()
         strat_names = [s["name"] for s in strat_list]
     except Exception as e:
         st.error(f"Cannot reach API: {e}")
@@ -408,11 +406,9 @@ with tab_backtest:
     if run_bt:
         with st.spinner(f"Backtesting {chosen_strat} on {bt_symbol} over {bt_period}..."):
             try:
-                r = api._get(
-                    f"/perplexity/backtest/{chosen_strat}/{bt_symbol}"
-                    f"?period={bt_period}&initial_capital={bt_capital}&position_pct={bt_pos_pct}&breakdown=true",
-                    timeout=180,
-                )
+                r = api.perplexity_backtest(chosen_strat, bt_symbol, period=bt_period,
+                                            initial_capital=bt_capital, position_pct=bt_pos_pct,
+                                            breakdown=True)
                 st.session_state["px_bt_result"] = r
             except Exception as e:
                 st.error(f"Backtest failed: {e}")
@@ -571,11 +567,10 @@ with tab_backtest:
             if run_analyze:
                 with st.spinner("Analyzing trade patterns..."):
                     try:
-                        analysis = api._get(
-                            f"/perplexity/analyze/{chosen_strat}/{bt_symbol}"
-                            f"?period={bt_period}&initial_capital={bt_capital}&position_pct={bt_pos_pct}",
-                            timeout=180,
-                        )
+                        analysis = api.perplexity_analyze(chosen_strat, bt_symbol,
+                                                          period=bt_period,
+                                                          initial_capital=bt_capital,
+                                                          position_pct=bt_pos_pct)
                         st.session_state["px_analysis"] = analysis
                     except Exception as e:
                         st.error(f"Analysis failed: {e}")
@@ -859,11 +854,9 @@ with tab_compare:
     if run_cmp:
         with st.spinner(f"Running all 5 strategies on {cmp_symbol} over {cmp_period}..."):
             try:
-                results = api._get(
-                    f"/perplexity/backtest-all/{cmp_symbol}"
-                    f"?period={cmp_period}&initial_capital={cmp_capital}&position_pct={cmp_pos_pct}",
-                    timeout=300,
-                )
+                results = api.perplexity_backtest_all(cmp_symbol, period=cmp_period,
+                                                      initial_capital=cmp_capital,
+                                                      position_pct=cmp_pos_pct)
                 st.session_state["px_compare"] = results
             except Exception as e:
                 st.error(f"Comparison failed: {e}")
@@ -871,12 +864,10 @@ with tab_compare:
     if run_wf_cmp:
         with st.spinner(f"Running walk-forward for all 5 strategies on {cmp_symbol} (10y, 3y IS / 1y OOS)... this takes ~2 min"):
             try:
-                wf_results = api._get(
-                    f"/perplexity/walkforward-all/{cmp_symbol}"
-                    f"?period=10y&train_years=3.0&test_years=1.0&step_years=1.0"
-                    f"&initial_capital={cmp_capital}&position_pct={cmp_pos_pct}",
-                    timeout=720,
-                )
+                wf_results = api.perplexity_walkforward_all(cmp_symbol, period="10y",
+                                                             train_years=3.0, test_years=1.0, step_years=1.0,
+                                                             initial_capital=cmp_capital,
+                                                             position_pct=cmp_pos_pct)
                 st.session_state["px_wf_compare"] = {"symbol": cmp_symbol, "data": wf_results}
             except Exception as e:
                 st.error(f"Walk-forward comparison failed: {e}")
@@ -1130,13 +1121,10 @@ with tab_portfolio:
     if st.button("▶ Run Portfolio Backtest", type="primary", key="port_run"):
         with st.spinner(f"Running {port_strat} across portfolio..."):
             try:
-                r = api._get(
-                    f"/perplexity/portfolio/{port_strat}"
-                    f"?symbols={port_symbols_input}&period={port_period}"
-                    f"&initial_capital={port_capital}&position_pct={port_pos_pct}"
-                    f"&max_open_positions={port_max_pos}",
-                    timeout=300,
-                )
+                r = api.perplexity_portfolio(port_strat, symbols=port_symbols_input,
+                                             period=port_period, initial_capital=port_capital,
+                                             position_pct=port_pos_pct,
+                                             max_open_positions=port_max_pos)
                 st.session_state["px_portfolio"] = r
             except Exception as e:
                 st.error(f"Portfolio backtest failed: {e}")
@@ -1458,7 +1446,7 @@ with tab_walkforward:
         # ── Auto-load saved profile for this symbol/strategy ──
         _baf_profile = {}
         try:
-            _baf_profile = api._get(f"/perplexity/profiles/{wf_strat}/{baf_sym}") or {}
+            _baf_profile = api.perplexity_profile(wf_strat, baf_sym) or {}
         except Exception:
             pass
 
@@ -1574,12 +1562,11 @@ with tab_walkforward:
         if st.button("▶ Run Before/After Comparison", type="primary", key="baf_run"):
             with st.spinner(f"Running both walk-forwards for {wf_strat} / {baf_sym}... ~2–4 min"):
                 try:
-                    result = api._get(
-                        f"/perplexity/filter-comparison/{wf_strat}/{baf_sym}"
-                        f"?period={baf_period}&train_years=3.0&test_years=1.0&step_years=1.0"
-                        f"&initial_capital={baf_capital}&position_pct=0.0"
-                        f"&{_baf_qs}",
-                        timeout=900,
+                    result = api.perplexity_filter_comparison(
+                        wf_strat, baf_sym,
+                        period=baf_period, train_years=3.0, test_years=1.0, step_years=1.0,
+                        initial_capital=baf_capital, position_pct=0.0,
+                        **{k: v for k, v in baf_params.items() if v is not None},
                     )
                     st.session_state["baf_result"] = result
                     st.session_state["baf_filter_label"] = _filter_label
@@ -1705,12 +1692,8 @@ with tab_profiles:
     if st.button("⚡ Auto-Calibrate", type="primary", key="cal_run", use_container_width=True):
         with st.spinner(f"Calibrating {prof_strat} for {cal_sym}... analyzing trades + {'verifying WF' if cal_verify else 'skipping WF'}"):
             try:
-                cal_result = api._get(
-                    f"/perplexity/calibrate/{prof_strat}/{cal_sym}"
-                    f"?period={cal_period}&initial_capital={cal_capital}"
-                    f"&verify_wf={'true' if cal_verify else 'false'}",
-                    timeout=600,
-                )
+                cal_result = api.perplexity_calibrate(prof_strat, cal_sym, period=cal_period,
+                                                      initial_capital=cal_capital, verify_wf=cal_verify)
                 st.session_state["cal_result"] = cal_result
                 st.success(f"✅ Profile saved for {cal_sym}!")
             except Exception as e:
@@ -1805,7 +1788,7 @@ with tab_profiles:
     st.markdown("### Saved Profiles")
 
     try:
-        all_profiles = api._get(f"/perplexity/profiles/{prof_strat}")
+        all_profiles = api.perplexity_profiles(prof_strat)
     except Exception as e:
         st.error(f"Could not load profiles: {e}")
         all_profiles = []
@@ -1866,7 +1849,7 @@ with tab_profiles:
                                key="del_sym")
         if del_sym and st.button(f"🗑 Delete {del_sym} profile", key="del_prof"):
             try:
-                api._delete(f"/perplexity/profiles/{prof_strat}/{del_sym}")
+                api.perplexity_delete_profile(prof_strat, del_sym)
                 st.success(f"Deleted profile for {del_sym}")
                 st.rerun()
             except Exception as e:
@@ -1886,14 +1869,13 @@ with tab_profiles:
         for i, sym in enumerate(syms):
             progress.progress((i) / len(syms), text=f"Calibrating {sym}...")
             try:
-                r = api._get(
-                    f"/perplexity/calibrate/{prof_strat}/{sym}"
-                    f"?period={batch_period}&initial_capital=10000&verify_wf=true",
-                    timeout=600,
-                )
+                r = api.perplexity_calibrate(prof_strat, sym, period=batch_period,
+                                             initial_capital=10000, verify_wf=True)
+                thr = r.get("thresholds", {})
+                filters_str = " | ".join(f"{k}={v:.2f}" for k, v in thr.items() if v and v > 0) or "none"
                 batch_results.append({"Symbol": sym, "Status": "✅ Done",
-                                      "Filters": f"EMA≥{r['thresholds']['ema_dist_min']:.1f}% | Vol≥{r['thresholds']['vol_min']:.1f}× | BB≥{r['thresholds']['bb_pos_min']:.2f}",
-                                      "Verified": "✅" if r["verification"].get("verified") else "⚠️"})
+                                      "Filters": filters_str,
+                                      "Verified": "✅" if r.get("verification", {}).get("verified") else "⚠️"})
             except Exception as e:
                 batch_results.append({"Symbol": sym, "Status": f"❌ {e}", "Filters": "—", "Verified": "—"})
         progress.progress(1.0, text="Done!")
@@ -1912,7 +1894,7 @@ with tab_config:
     )
 
     try:
-        strats = api._get("/perplexity/strategies")
+        strats = api.perplexity_strategies()
         strat_enabled = {s["name"]: s["enabled"] for s in strats}
     except Exception as e:
         st.error(f"Cannot reach API: {e}")
@@ -1982,8 +1964,7 @@ with tab_config:
                 new_enabled = st.toggle("Enabled", value=enabled, key=f"tog_{s_name}")
                 if new_enabled != enabled:
                     try:
-                        api._post(f"/perplexity/strategies/{s_name}/toggle"
-                                  f"?enabled={str(new_enabled).lower()}", {})
+                        api.perplexity_toggle_strategy(s_name, new_enabled)
                         st.rerun()
                     except Exception as e:
                         st.error(str(e))
@@ -1994,186 +1975,148 @@ with tab_config:
 
             # ── Strategy-specific params ──────────────────────
             if s_name == "EMA_Mean_Reversion":
+                st.caption("RSI(2) Mean Reversion — BULL only. Entry: RSI(2) < threshold. Exit: RSI(2) > exit OR close > SMA(5).")
                 with c1:
-                    cfg["ema_period"] = st.number_input(
-                        "EMA period", 5, 50, cfg["ema_period"], 1, key=f"{s_name}_ema_p")
-                    cfg["ema_distance_pct"] = st.number_input(
-                        "Max EMA distance (%)", 0.5, 5.0, cfg["ema_distance_pct"], 0.5,
-                        key=f"{s_name}_dist")
+                    cfg["rsi_entry_threshold"] = st.number_input(
+                        "RSI(2) entry threshold (<)", 1, 20,
+                        int(cfg.get("rsi_entry_threshold", 10)), 1, key=f"{s_name}_rsi_e",
+                        help="Buy when RSI(2) falls below this. Lower = more extreme oversold, fewer trades.")
+                    cfg["rsi_exit_threshold"] = st.number_input(
+                        "RSI(2) exit threshold (>)", 50, 95,
+                        int(cfg.get("rsi_exit_threshold", 70)), 5, key=f"{s_name}_rsi_x",
+                        help="Exit when RSI(2) recovers above this. 70 = full mean reversion.")
                 with c2:
-                    cfg["stop_pct"] = st.number_input(
-                        "Stop % below EMA", 0.5, 5.0, cfg["stop_pct"], 0.5, key=f"{s_name}_stp")
-                    cfg["r_multiple"] = st.number_input(
-                        "Target R multiple", 1.0, 5.0, cfg["r_multiple"], 0.5, key=f"{s_name}_r")
+                    cfg["hard_stop_pct"] = st.number_input(
+                        "Hard stop (%)", 1.0, 10.0,
+                        float(cfg.get("hard_stop_pct", 5.0)), 0.5, key=f"{s_name}_stp",
+                        help="% below entry price for emergency stop.")
+                    cfg["take_profit_pct"] = st.number_input(
+                        "Take profit (%)", 2.0, 20.0,
+                        float(cfg.get("take_profit_pct", 8.0)), 0.5, key=f"{s_name}_tp",
+                        help="% above entry price for target.")
                 with c3:
-                    cfg["exit_bars_below"] = st.number_input(
-                        "Exit after N bars below EMA", 1, 5, cfg["exit_bars_below"], 1,
-                        key=f"{s_name}_n")
-                    cfg["rsi_exit"] = st.number_input(
-                        "RSI exit threshold", 65, 85, cfg["rsi_exit"], 1, key=f"{s_name}_rsix")
-
-                st.markdown("**🔬 Data-Driven Entry Filters** *(discovered via trade pattern analysis across AAPL, SPY, NVDA, MSFT)*")
-                st.caption("Set to 0 to disable a filter. Recommended values shown — verified consistent across 4 symbols.")
-                fc1, fc2, fc3 = st.columns(3)
-                with fc1:
-                    cfg["filter_ema_dist_min"] = st.number_input(
-                        "Min EMA distance % (0=off)", 0.0, 4.0,
-                        float(cfg.get("filter_ema_dist_min", 0.0)), 0.1,
-                        key=f"{s_name}_f_ema",
-                        help="Only enter when price is at least this % away from EMA20. "
-                             "Recommended: 1.5 — wins averaged 2.95% vs losses 1.74% across all symbols.")
-                with fc2:
-                    cfg["filter_vol_min"] = st.number_input(
-                        "Min volume ratio (0=off)", 0.0, 2.0,
-                        float(cfg.get("filter_vol_min", 0.0)), 0.1,
-                        key=f"{s_name}_f_vol",
-                        help="Only enter when today's volume >= this × 20d avg. "
-                             "Recommended: 1.0 — wins averaged 1.09× vs losses 0.93× across all symbols.")
-                with fc3:
-                    cfg["filter_bb_pos_min"] = st.number_input(
-                        "Min BB position (0=off)", 0.0, 1.0,
-                        float(cfg.get("filter_bb_pos_min", 0.0)), 0.05,
-                        key=f"{s_name}_f_bb",
-                        help="Only enter when price is >= this fraction through the BB range (0=lower, 1=upper). "
-                             "Recommended: 0.72 — wins averaged 0.805 vs losses 0.678 across all symbols.")
-                if any(v > 0 for v in [cfg["filter_ema_dist_min"], cfg["filter_vol_min"], cfg["filter_bb_pos_min"]]):
-                    active = []
-                    if cfg["filter_ema_dist_min"] > 0:
-                        active.append(f"EMA dist ≥ {cfg['filter_ema_dist_min']:.1f}%")
-                    if cfg["filter_vol_min"] > 0:
-                        active.append(f"Vol ratio ≥ {cfg['filter_vol_min']:.1f}×")
-                    if cfg["filter_bb_pos_min"] > 0:
-                        active.append(f"BB pos ≥ {cfg['filter_bb_pos_min']:.2f}")
-                    st.success(f"✅ Active filters: {' | '.join(active)}")
+                    cfg["max_hold_bars"] = st.number_input(
+                        "Max hold (bars)", 3, 30,
+                        int(cfg.get("max_hold_bars", 10)), 1, key=f"{s_name}_hold")
+                    cfg["atr_skip_threshold"] = st.number_input(
+                        "ATR% spike skip (>)", 1.0, 10.0,
+                        float(cfg.get("atr_skip_threshold", 5.0)), 0.5, key=f"{s_name}_atr_skip",
+                        help="Skip entry if ATR% exceeds this — avoids buying into market panic.")
 
             elif s_name == "MA_Crossover_RSI":
+                st.caption("EMA(9/21) crossover + MACD confirmation — BULL only. ATR-based stop/target.")
                 with c1:
-                    cfg["ema_fast"] = st.number_input(
-                        "Fast EMA", 5, 50, cfg["ema_fast"], 1, key=f"{s_name}_ef")
-                    cfg["ema_slow"] = st.number_input(
-                        "Slow EMA", 20, 100, cfg["ema_slow"], 5, key=f"{s_name}_es")
+                    cfg["ema_fast_new"] = st.number_input(
+                        "Fast EMA", 5, 20,
+                        int(cfg.get("ema_fast_new", 9)), 1, key=f"{s_name}_ef")
+                    cfg["ema_slow_new"] = st.number_input(
+                        "Slow EMA", 15, 50,
+                        int(cfg.get("ema_slow_new", 21)), 1, key=f"{s_name}_es")
                 with c2:
-                    cfg["rsi_low"] = st.number_input(
-                        "RSI lower bound", 30, 60, cfg["rsi_low"], 5, key=f"{s_name}_rl")
-                    cfg["rsi_high"] = st.number_input(
-                        "RSI upper bound", 50, 80, cfg["rsi_high"], 5, key=f"{s_name}_rh")
+                    cfg["rsi_min"] = st.number_input(
+                        "RSI min at crossover", 30, 60,
+                        int(cfg.get("rsi_min", 45)), 5, key=f"{s_name}_rl")
+                    cfg["rsi_max"] = st.number_input(
+                        "RSI max at crossover", 50, 80,
+                        int(cfg.get("rsi_max", 65)), 5, key=f"{s_name}_rh")
                 with c3:
-                    cfg["r_multiple"] = st.number_input(
-                        "Target R multiple", 1.0, 5.0, cfg["r_multiple"], 0.5, key=f"{s_name}_r")
-                    cfg.setdefault("use_sma200", False)
-                    cfg["use_sma200"] = st.toggle(
-                        "Require SMA(200) uptrend", value=cfg["use_sma200"], key=f"{s_name}_sma200")
-
-                st.markdown("**🔬 Data-Driven Entry Filters** *(set via Symbol Profiles tab)*")
-                fc1, fc2 = st.columns(2)
-                with fc1:
-                    cfg["filter_vol_min"] = st.number_input(
-                        "Min volume ratio (0=off)", 0.0, 3.0,
-                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol",
-                        help="Higher volume at crossover = stronger momentum. Calibrated per symbol.")
-                with fc2:
-                    cfg["filter_ema_spread_min"] = st.number_input(
-                        "Min EMA spread % (0=off)", 0.0, 10.0,
-                        float(cfg.get("filter_ema_spread_min", 0.0)), 0.1, key=f"{s_name}_f_spread",
-                        help="Wider fast/slow EMA gap = more decisive crossover. Calibrated per symbol.")
+                    cfg["atr_stop_multiplier"] = st.number_input(
+                        "Stop ATR multiple", 0.5, 3.0,
+                        float(cfg.get("atr_stop_multiplier", 1.5)), 0.25, key=f"{s_name}_atr_s")
+                    cfg["atr_tp_multiplier"] = st.number_input(
+                        "Target ATR multiple", 1.0, 5.0,
+                        float(cfg.get("atr_tp_multiplier", 2.0)), 0.25, key=f"{s_name}_atr_t")
+                cfg["vol_ratio_min"] = st.number_input(
+                    "Min volume ratio at crossover", 0.5, 3.0,
+                    float(cfg.get("vol_ratio_min", 1.1)), 0.1, key=f"{s_name}_vol",
+                    help="Volume must be ≥ this × 20-day average at the crossover bar.")
 
             elif s_name == "Breakout_Consolidation":
-                with c1:
-                    cfg["consolidation_bars"] = st.number_input(
-                        "Consolidation bars (N)", 3, 30, cfg["consolidation_bars"], 1,
-                        key=f"{s_name}_cn")
-                    cfg["atr_range_multiple"] = st.number_input(
-                        "Max range (× ATR)", 1.0, 15.0, cfg["atr_range_multiple"], 0.5,
-                        key=f"{s_name}_arm")
-                with c2:
-                    cfg["breakout_buffer_pct"] = st.number_input(
-                        "Breakout buffer (%)", 0.0, 2.0, cfg["breakout_buffer_pct"], 0.1,
-                        key=f"{s_name}_buf")
-                    cfg["vol_multiple"] = st.number_input(
-                        "Volume multiple (× 20d avg)", 1.0, 3.0, cfg["vol_multiple"], 0.25,
-                        key=f"{s_name}_vm")
-                with c3:
-                    cfg["r_multiple"] = st.number_input(
-                        "Target R multiple", 1.0, 5.0, cfg["r_multiple"], 0.5, key=f"{s_name}_r")
-                    cfg["stop_below_range"] = st.toggle(
-                        "Stop below range high (vs range low)", value=cfg["stop_below_range"],
-                        key=f"{s_name}_sbr")
-
-                st.markdown("**🔬 Data-Driven Entry Filters** *(set via Symbol Profiles tab)*")
-                cfg["filter_vol_min"] = st.number_input(
-                    "Min volume ratio (0=off)", 0.0, 3.0,
-                    float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol",
-                    help="Per-symbol volume threshold tuning. RSI and range tightness already enforced by strategy logic.")
-
-            elif s_name == "BB_Mean_Reversion":
+                st.caption("BB Width squeeze → expansion breakout — BULL only. Close above upper BB after 5+ contracting bars.")
                 with c1:
                     cfg["bb_period"] = st.number_input(
-                        "BB period", 10, 50, cfg["bb_period"], 1, key=f"{s_name}_bbp")
-                    cfg["bb_std"] = st.number_input(
-                        "BB std dev", 1.0, 3.0, cfg["bb_std"], 0.25, key=f"{s_name}_bbs")
+                        "BB period", 10, 30,
+                        int(cfg.get("bb_period", 20)), 1, key=f"{s_name}_bbp")
+                    cfg["squeeze_bars"] = st.number_input(
+                        "Squeeze bars (consecutive narrowing)", 3, 10,
+                        int(cfg.get("squeeze_bars", 5)), 1, key=f"{s_name}_sq",
+                        help="Consecutive bars of narrowing BB width before watching for breakout.")
                 with c2:
-                    cfg["reentry_bars"] = st.number_input(
-                        "Re-entry window (bars)", 1, 10, cfg["reentry_bars"], 1,
-                        key=f"{s_name}_reb")
-                    cfg["atr_multiple"] = st.number_input(
-                        "Stop ATR multiple", 1.0, 3.0, cfg["atr_multiple"], 0.25,
-                        key=f"{s_name}_atrm")
+                    cfg["rsi_entry_min"] = st.number_input(
+                        "RSI min at breakout", 40, 70,
+                        int(cfg.get("rsi_entry_min", 50)), 5, key=f"{s_name}_rsi_e",
+                        help="RSI must be above this at the breakout bar — below 50 lacks momentum.")
+                    cfg["rsi_overbought"] = st.number_input(
+                        "RSI exit (overbought)", 65, 90,
+                        int(cfg.get("rsi_overbought", 80)), 5, key=f"{s_name}_rsi_x")
                 with c3:
-                    cfg["rsi_re_entry"] = st.number_input(
-                        "RSI re-entry threshold", 20, 50, cfg["rsi_re_entry"], 1,
-                        key=f"{s_name}_rre")
-                    cfg["use_rsi_filter"] = st.toggle(
-                        "Require RSI crossover", value=cfg["use_rsi_filter"],
-                        key=f"{s_name}_rsi_f")
+                    cfg["vol_ratio_min"] = st.number_input(
+                        "Min volume ratio at breakout", 0.5, 3.0,
+                        float(cfg.get("vol_ratio_min", 1.3)), 0.1, key=f"{s_name}_vol")
+                    cfg["max_hold_bars"] = st.number_input(
+                        "Max hold (bars)", 5, 30,
+                        int(cfg.get("max_hold_bars", 15)), 1, key=f"{s_name}_hold")
 
-                st.markdown("**🔬 Data-Driven Entry Filters** *(set via Symbol Profiles tab)*")
-                fc1, fc2 = st.columns(2)
-                with fc1:
-                    cfg["filter_vol_min"] = st.number_input(
-                        "Min volume ratio (0=off)", 0.0, 3.0,
-                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol",
-                        help="Higher volume at re-entry confirms demand. Calibrated per symbol.")
-                with fc2:
-                    cfg["filter_atr_pct_max"] = st.number_input(
-                        "Max ATR% of price (0=off)", 0.0, 10.0,
-                        float(cfg.get("filter_atr_pct_max", 0.0)), 0.25, key=f"{s_name}_f_atr",
-                        help="Avoid mean-reversion entries during extreme volatility. Calibrated per symbol.")
+            elif s_name == "BB_Mean_Reversion":
+                st.caption("Pullback to rising EMA(50) with rejection wick — BULL + mild BEAR. Highest-frequency strategy.")
+                with c1:
+                    cfg["ema_trend"] = st.number_input(
+                        "Trend EMA period", 20, 100,
+                        int(cfg.get("ema_trend", 50)), 5, key=f"{s_name}_ema_t")
+                    cfg["price_ema_proximity_pct"] = st.number_input(
+                        "Price ↔ EMA proximity (%)", 0.2, 5.0,
+                        float(cfg.get("price_ema_proximity_pct", 1.0)), 0.1, key=f"{s_name}_prox",
+                        help="Price must be within this % of the EMA to qualify as a pullback entry.")
+                with c2:
+                    cfg["rsi_min"] = st.number_input(
+                        "RSI min", 20, 50,
+                        int(cfg.get("rsi_min", 35)), 5, key=f"{s_name}_rl")
+                    cfg["rsi_max"] = st.number_input(
+                        "RSI max", 40, 70,
+                        int(cfg.get("rsi_max", 55)), 5, key=f"{s_name}_rh")
+                with c3:
+                    cfg["wick_ratio_min"] = st.number_input(
+                        "Min lower wick ratio", 0.1, 0.8,
+                        float(cfg.get("wick_ratio_min", 0.4)), 0.05, key=f"{s_name}_wick",
+                        help="Lower wick must be ≥ this fraction of the bar's total range (bullish rejection).")
+                    cfg["hard_stop_pct"] = st.number_input(
+                        "Hard stop (%)", 0.5, 5.0,
+                        float(cfg.get("hard_stop_pct", 2.0)), 0.25, key=f"{s_name}_stp")
+                cfg["bear_skip_threshold_pct"] = st.number_input(
+                    "Deep bear skip threshold (% below SMA200)", 5.0, 20.0,
+                    float(cfg.get("bear_skip_threshold_pct", 10.0)), 1.0, key=f"{s_name}_bear_skip",
+                    help="Skip entries when price is this far below SMA(200). Prevents buying falling knives.")
 
             elif s_name == "Fib_Pullback_Support":
+                st.caption("ATR-spike / fear-capitulation reversal — BULL + mild BEAR. Buys panic selling with tight stops.")
                 with c1:
-                    cfg["swing_lookback"] = st.number_input(
-                        "Swing lookback (bars)", 15, 100, cfg["swing_lookback"], 5,
-                        key=f"{s_name}_sl")
-                    cfg["fib_zone_pct"] = st.number_input(
-                        "Fib zone tolerance (%)", 0.5, 4.0, cfg["fib_zone_pct"], 0.25,
-                        key=f"{s_name}_fzp")
+                    cfg["atr_spike_threshold"] = st.number_input(
+                        "ATR% spike threshold (>)", 1.0, 8.0,
+                        float(cfg.get("atr_spike_threshold", 3.0)), 0.25, key=f"{s_name}_atr_e",
+                        help="ATR% must exceed this to qualify as a fear/panic spike day.")
+                    cfg["rsi_entry_max"] = st.number_input(
+                        "RSI max at entry (<)", 15, 45,
+                        int(cfg.get("rsi_entry_max", 30)), 5, key=f"{s_name}_rsi_e",
+                        help="RSI must be below this — deeply oversold panic only.")
                 with c2:
-                    cfg["rsi_oversold_low"] = st.number_input(
-                        "RSI floor (min)", 20, 45, cfg["rsi_oversold_low"], 5,
-                        key=f"{s_name}_ros_l")
-                    cfg["rsi_oversold_hi"] = st.number_input(
-                        "RSI ceiling at entry", 40, 70, cfg["rsi_oversold_hi"], 5,
-                        key=f"{s_name}_ros_h")
+                    cfg["bb_pos_max"] = st.number_input(
+                        "BB%B max (near lower band)", 0.05, 0.40,
+                        float(cfg.get("bb_pos_max", 0.15)), 0.05, key=f"{s_name}_bb",
+                        help="Price must be near the lower Bollinger Band (0=lower, 1=upper).")
+                    cfg["wick_ratio_min"] = st.number_input(
+                        "Min lower wick ratio", 0.2, 0.8,
+                        float(cfg.get("wick_ratio_min", 0.5)), 0.05, key=f"{s_name}_wick")
                 with c3:
-                    cfg["atr_stop_mult"] = st.number_input(
-                        "Stop ATR multiple", 1.0, 3.0, cfg["atr_stop_mult"], 0.25,
-                        key=f"{s_name}_asm")
-                    st.markdown(
-                        "**Target is prior swing high — this strategy does not use a configurable R multiple.**"
-                    )
-
-                st.markdown("**🔬 Data-Driven Entry Filters** *(set via Symbol Profiles tab)*")
-                fc1, fc2 = st.columns(2)
-                with fc1:
-                    cfg["filter_lower_wick_min"] = st.number_input(
-                        "Min lower wick % of range (0=off)", 0.0, 80.0,
-                        float(cfg.get("filter_lower_wick_min", 0.0)), 5.0, key=f"{s_name}_f_wick",
-                        help="Requires a meaningful rejection candle at the Fib level. Calibrated per symbol.")
-                with fc2:
-                    cfg["filter_vol_min"] = st.number_input(
-                        "Min volume ratio (0=off)", 0.0, 3.0,
-                        float(cfg.get("filter_vol_min", 0.0)), 0.1, key=f"{s_name}_f_vol",
-                        help="Higher volume confirms support holding at the Fib level. Calibrated per symbol.")
+                    cfg["hard_stop_pct"] = st.number_input(
+                        "Hard stop (%)", 1.0, 8.0,
+                        float(cfg.get("hard_stop_pct", 4.0)), 0.5, key=f"{s_name}_stp")
+                    cfg["take_profit_pct"] = st.number_input(
+                        "Take profit (%)", 2.0, 15.0,
+                        float(cfg.get("take_profit_pct", 6.0)), 0.5, key=f"{s_name}_tp")
+                cfg["prior_decline_pct"] = st.number_input(
+                    "Prior N-bar decline required (%)", 0.5, 8.0,
+                    float(cfg.get("prior_decline_pct", 2.0)), 0.25, key=f"{s_name}_dec",
+                    help="Price must have declined at least this % over the prior 3 bars to confirm a selloff setup.")
 
             st.caption(
                 f"Current config: `{cfg}`"

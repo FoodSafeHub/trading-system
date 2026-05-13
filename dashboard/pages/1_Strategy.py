@@ -270,8 +270,8 @@ with st.expander("View all configured strategies", expanded=False):
         perp = api._get("/perplexity/strategies")
         if perp:
             df_p = pd.DataFrame(perp)
-            df_p.columns = ["name", "enabled"]
-            df_p["enabled"] = df_p["enabled"].map({True: "✅", False: "❌"})
+            if "enabled" in df_p.columns:
+                df_p["enabled"] = df_p["enabled"].map({True: "✅", False: "❌"})
             st.dataframe(df_p, use_container_width=True, hide_index=True)
     except Exception as e:
         st.warning(f"Could not load Perplexity strategies: {e}")

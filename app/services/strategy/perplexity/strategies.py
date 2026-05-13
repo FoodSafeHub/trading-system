@@ -1,26 +1,15 @@
 from __future__ import annotations
 
 """
-5 Perplexity swing trading strategies.
+5 Perplexity swing trading strategies — rewritten for higher frequency (8-20 trades/year).
 
-Strategy 1 — 20 EMA Mean Reversion in Uptrend
-Strategy 2 — MA Crossover with RSI Confirmation
-Strategy 3 — Breakout from Consolidation with Volume
-Strategy 4 — Bollinger Band Mean Reversion in Uptrend
-Strategy 5 — Support / Fibonacci Pullback in Trend
+Strategy 1 — EmaMeanReversionUptrend  → RSI-2 Mean Reversion (Connors)
+Strategy 2 — MaCrossoverRsi           → EMA(9/21) + MACD Confirmation
+Strategy 3 — BreakoutConsolidation    → BB Width Squeeze → Expansion Breakout
+Strategy 4 — BollingerMeanReversionUptrend → Pullback to Rising EMA(50) + Wick
+Strategy 5 — FibPullbackSupport       → ATR-Spike / Fear-Capitulation Reversal
 
-All operate on daily OHLCV bars.
-All are long-only with configurable parameters exposed via the Config tab.
-
-BULL MARKET PHILOSOPHY
-─────────────────────
-• Only trade when SMA50 > SMA200 (golden cross) — the structural uptrend is intact.
-• Close > SMA200 required for all entries — no trading below the long-term trend line.
-• ADX > 20 required for trend-following entries — avoids flat, choppy markets.
-• Reversion strategies (EMA pullback, BB, Fib) use a lighter ADX gate because they
-  BUY INTO weakness — but the golden cross must still be intact (not a bear market).
-• BEAR MARKET EXIT: if SMA50 crosses below SMA200 while in a position, all strategies
-  exit immediately — capital preservation over holding through a trend reversal.
+All operate on daily OHLCV bars. Long-only. Configurable via the Config tab.
 """
 
 import pandas as pd
@@ -75,7 +64,6 @@ def _current_atr(df: pd.DataFrame, period: int = 14) -> float:
 
 
 def _adx(df: pd.DataFrame, period: int = 14) -> float:
-    """ADX > 20 = trending. ADX < 20 = choppy/sideways."""
     high  = df["High"]
     low   = df["Low"]
     close = df["Close"]
@@ -91,109 +79,71 @@ def _adx(df: pd.DataFrame, period: int = 14) -> float:
     return adx_val if not pd.isna(adx_val) else 0.0
 
 
-def _bull_market_check(df: pd.DataFrame) -> tuple[bool, str]:
-    """
-    Core bear-market filter shared by ALL strategies.
-    Returns (is_bull, reason).
-    Conditions (from strictest to loosest requirement):
-      1. close > SMA(200) — not in long-term downtrend
-      2. SMA(50) > SMA(200) — golden cross: structural bull market intact
-    This is the minimum gate. Strategies add their own on top.
-    """
+def _spy_is_bull(df: pd.DataFrame) -> bool:
+    """SPY above its own SMA(200) = BULL."""
     close = df["Close"]
-    if len(df) < 200:
-        return False, "not enough data for SMA(200)"
-    c_now  = float(close.iloc[-1])
-    sma50  = float(_sma(close, 50).iloc[-1])
-    sma200 = float(_sma(close, 200).iloc[-1])
-    if c_now <= sma200:
-        return False, f"price below SMA(200) — bear market"
-    if sma50 <= sma200:
-        return False, f"SMA(50) ≤ SMA(200) — death cross / bear market structure"
-    return True, "bull market"
+    if len(close) < 200:
+        return True
+    return float(close.iloc[-1]) > float(_sma(close, 200).iloc[-1])
 
 
-def _is_death_cross(df: pd.DataFrame) -> bool:
-    """
-    Returns True if SMA50 just crossed below SMA200 (or is already below it).
-    Used as an emergency exit trigger for all open positions.
-    """
-    close  = df["Close"]
-    sma50  = _sma(close, 50)
-    sma200 = _sma(close, 200)
-    if len(sma50) < 2 or len(sma200) < 2:
-        return False
-    return float(sma50.iloc[-1]) < float(sma200.iloc[-1])
+def _macd_line(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    """Returns (macd, signal_line) as floats for the last bar."""
+    ema_fast = series.ewm(span=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, adjust=False).mean()
+    macd     = ema_fast - ema_slow
+    sig      = macd.ewm(span=signal, adjust=False).mean()
+    return float(macd.iloc[-1]), float(sig.iloc[-1]), macd, sig
 
 
-def _market_regime_trend(df: pd.DataFrame) -> tuple[bool, str]:
-    """
-    Strict gate for trend-following entries (Breakout).
-    Requires: bull market + close > SMA50 + ADX > 20.
-    Close must be ABOVE SMA50 — we are trading with confirmed momentum, not buying dips.
-    """
-    is_bull, reason = _bull_market_check(df)
-    if not is_bull:
-        return False, reason
-    close = df["Close"]
-    c_now  = float(close.iloc[-1])
-    sma50  = float(_sma(close, 50).iloc[-1])
-    if c_now <= sma50:
-        return False, f"price below SMA(50) — wait for price to reclaim medium-term trend"
-    adx_val = _adx(df, 14)
-    if adx_val < 20:
-        return False, f"ADX={adx_val:.1f} — sideways/choppy market, no breakout edge"
-    return True, f"bull trend confirmed (ADX={adx_val:.1f})"
-
-
-def _market_regime_reversion(df: pd.DataFrame) -> tuple[bool, str]:
-    """
-    Gate for pullback/reversion entries (EMA, BB, Fib, MA Crossover).
-    Requires: bull market (golden cross + above SMA200).
-    Does NOT require close > SMA50 or ADX > 20 — these strategies intentionally
-    buy into temporary weakness while the overall bull structure is intact.
-    A light ADX floor of 15 ensures we aren't in a dead-flat market.
-    """
-    is_bull, reason = _bull_market_check(df)
-    if not is_bull:
-        return False, reason
-    adx_val = _adx(df, 14)
-    if adx_val < 15:
-        return False, f"ADX={adx_val:.1f} — market too flat, no directional edge"
-    return True, f"bull market, pullback entry allowed (ADX={adx_val:.1f})"
+def _bb_bands(series: pd.Series, period: int = 20, std: float = 2.0):
+    """Returns (upper, middle, lower) as pd.Series."""
+    mid   = series.rolling(period).mean()
+    sigma = series.rolling(period).std(ddof=0)
+    return mid + std * sigma, mid, mid - std * sigma
 
 
 def _swing_high_low(highs: pd.Series, lows: pd.Series, lookback: int = 30):
-    """Return (swing_low_price, swing_high_price) from last `lookback` bars."""
     window_h = highs.iloc[-lookback:]
     window_l = lows.iloc[-lookback:]
     return float(window_l.min()), float(window_h.max())
 
 
 # ══════════════════════════════════════════════════════════════
-# STRATEGY 1 — 20 EMA Mean Reversion in Uptrend
+# STRATEGY 1 — RSI-2 Mean Reversion (Connors)
 # ══════════════════════════════════════════════════════════════
 class EmaMeanReversionUptrend(PerplexityStrategy):
     """
-    Buy pullbacks to the 20 EMA in an ongoing bull market uptrend.
+    Connors RSI(2) mean reversion: buy extreme short-term oversold dips
+    in a structural bull market (price > SMA200).
 
-    BUY : Golden cross intact + above SMA200 + price pulled back to EMA20
-          + bullish reversal candle + RSI in recovery zone (45–68).
-    SELL: RSI overbought OR N consecutive closes below EMA20 OR death cross.
-    Stop : % below EMA20 (gives room for intraday wick through EMA).
-    Target: entry + r_multiple × risk.
+    BUY : price > SMA(200) (BULL only) + RSI(2) < entry_threshold
+          + not in high-volatility spike (ATR% guard).
+    SELL: RSI(2) > exit_threshold OR close > SMA(exit_sma) OR max_hold reached.
+    Stop : hard_stop_pct % below entry.
+    Target: entry × (1 + take_profit_pct/100).
     """
     name = "EMA_Mean_Reversion"
 
     config: dict = {
-        "ema_period":       20,
-        "ema_distance_pct": 5.0,   # max % pullback from EMA to qualify (catches multi-week pullbacks)
-        "min_ema_dist_pct": 0.5,   # minimum % from EMA — avoids entries already back at EMA with no pullback
-        "stop_pct":         2.5,   # % below EMA for stop — 2.5% gives room on volatile stocks
-        "r_multiple":       3.0,   # reward:risk target multiple
-        "exit_bars_below":  3,     # consecutive closes below EMA to exit (3 bars = confirmed breakdown)
-        "rsi_exit":         76,    # RSI overbought exit
+        "ema_period":       20,        # kept for UI compatibility (unused in new logic)
+        "ema_distance_pct": 5.0,       # kept for UI compatibility
+        "min_ema_dist_pct": 0.5,       # kept for UI compatibility
+        "stop_pct":         2.5,       # kept for UI compatibility
+        "r_multiple":       3.0,       # kept for UI compatibility
+        "exit_bars_below":  3,         # kept for UI compatibility
+        "rsi_exit":         76,        # kept for UI compatibility
         "min_data_bars":    220,
+        # ── New logic params ──
+        "rsi_period":            2,
+        "rsi_entry_threshold":   10,   # RSI(2) < 10 → deeply oversold
+        "rsi_exit_threshold":    70,   # RSI(2) > 70 → mean reversion complete
+        "sma_trend":             200,  # must be above this for BULL
+        "exit_sma":              5,    # close > SMA(5) as alternate exit
+        "hard_stop_pct":         5.0,
+        "take_profit_pct":       8.0,
+        "max_hold_bars":         10,
+        "atr_skip_threshold":    5.0,  # skip if ATR% > this (volatile spike day)
         # ── Calibration filters ──
         "filter_ema_dist_min": 0.0,
         "filter_vol_min":      0.0,
@@ -206,167 +156,98 @@ class EmaMeanReversionUptrend(PerplexityStrategy):
             return self._hold(symbol, "not enough data")
 
         regime = regime or MarketRegime.BULL
-        if regime == MarketRegime.DEEP_BEAR:
-            return self._hold(symbol, "OFF in Deep Bear Regime")
+        if regime != MarketRegime.BULL:
+            return self._hold(symbol, "RSI-2 BULL only")
 
         close = df["Close"]
-        high  = df["High"]
-        low   = df["Low"]
-        opens = df["Open"]
-
         c_now = float(close.iloc[-1])
-        sma200 = float(_sma(close, 200).iloc[-1])
-        if regime == MarketRegime.BEAR and symbol not in _INDEX_ETFS and c_now <= sma200:
-            return self._hold(symbol, "bear regime: only SPY/QQQ/DIA/IWM or symbols above SMA200")
 
-        in_uptrend, regime_reason = _market_regime_reversion(df)
-        if not in_uptrend:
-            return self._hold(symbol, regime_reason)
+        # Must be above SMA(200)
+        sma200 = float(_sma(close, cfg["sma_trend"]).iloc[-1])
+        if c_now <= sma200:
+            return self._hold(symbol, f"price below SMA({cfg['sma_trend']})")
 
-        ema20  = _ema(close, cfg["ema_period"])
-        rsi    = _rsi(close, 14)
-        atr_v  = _current_atr(df, 14)
+        # Skip high-volatility spike days
+        atr_v   = _current_atr(df, 14)
+        atr_pct = atr_v / c_now * 100
+        if atr_pct > cfg["atr_skip_threshold"]:
+            return self._hold(symbol, f"ATR%={atr_pct:.1f} — volatility spike, skip")
 
-        c_now   = float(close.iloc[-1])
-        o_now   = float(opens.iloc[-1])
-        h_now   = float(high.iloc[-1])
-        l_now   = float(low.iloc[-1])
-        ema_now = float(ema20.iloc[-1])
-        rsi_now = float(rsi.iloc[-1])
+        rsi2    = _rsi(close, cfg["rsi_period"])
+        rsi_now = float(rsi2.iloc[-1])
+        sma5    = float(_sma(close, cfg["exit_sma"]).iloc[-1])
 
-        ema_dist_pct = abs(c_now - ema_now) / ema_now * 100
-
-        max_ema_distance = cfg["ema_distance_pct"]
-        rsi_floor = 45
-        if regime == MarketRegime.BEAR:
-            max_ema_distance = min(max_ema_distance, 3.0)
-            rsi_floor = 50
-
-        bar_range      = h_now - l_now
-        upper_half     = (c_now - l_now) / bar_range > 0.40 if bar_range > 0 else False
-        bullish_candle = (c_now > o_now) and upper_half
-
-        # Price touched or crossed below EMA within last 3 bars (actual pullback happened)
-        touched_ema = any(
-            float(low.iloc[i]) <= float(ema20.iloc[i]) * 1.002
-            for i in range(-3, 0)
-        )
-
-        # ── Bear market emergency exit ────────────────────────
-        if _is_death_cross(df):
-            return PerplexitySignal(
-                symbol=symbol, strategy_name=self.name, direction="SELL",
-                entry_price=c_now, confidence=0.95,
-                reason="DEATH CROSS — SMA50 crossed below SMA200, exiting bull positions",
-                indicators={"ema20": round(ema_now, 2), "rsi": round(rsi_now, 1)},
-            )
-
-        # ── Per-symbol calibration filters ───────────────────
-        from app.services.backtest.symbol_profiles import get_filters_for_symbol
-        _sym_filters = get_filters_for_symbol(self.name, symbol)
-        _f_ema = cfg["filter_ema_dist_min"] if cfg["filter_ema_dist_min"] > 0 else _sym_filters.get("ema_dist_min", 0.0)
-        _f_vol = cfg["filter_vol_min"]      if cfg["filter_vol_min"]      > 0 else _sym_filters.get("vol_min", 0.0)
-        _f_bb  = cfg["filter_bb_pos_min"]   if cfg["filter_bb_pos_min"]   > 0 else _sym_filters.get("bb_pos_min", 0.0)
-
-        ema_dist_ok = ema_dist_pct >= _f_ema if _f_ema > 0 else True
-
-        vol_ratio = 1.0
-        if "Volume" in df.columns:
-            avg_vol   = float(df["Volume"].iloc[-21:-1].mean()) if len(df) > 21 else 1.0
-            cur_vol   = float(df["Volume"].iloc[-1])
-            vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 1.0
-        vol_ok = vol_ratio >= _f_vol if _f_vol > 0 else True
-
-        bb_pos_ok = True
-        if _f_bb > 0:
-            bb_mid   = float(_sma(close, 20).iloc[-1])
-            bb_std   = float(close.rolling(20).std().iloc[-1]) if len(close) >= 20 else 0.0
-            bb_lower = bb_mid - 2.0 * bb_std
-            bb_upper = bb_mid + 2.0 * bb_std
-            bb_width = bb_upper - bb_lower
-            bb_pos   = (c_now - bb_lower) / bb_width if bb_width > 0 else 0.5
-            bb_pos_ok = bb_pos >= _f_bb
-
-        # ── BUY ──────────────────────────────────────────────
-        # RSI 45–68: in bull market pullbacks, RSI bottoms around 45-50, not 35-40.
-        # RSI < 45 at the EMA = deeper correction underway, not a clean pullback.
-        near_ema_now = ema_dist_pct <= cfg["ema_distance_pct"] * 2
-        in_pullback  = (cfg["min_ema_dist_pct"] <= ema_dist_pct <= max_ema_distance) \
-                       or (touched_ema and near_ema_now)
-
-        if in_pullback and bullish_candle and c_now > ema_now \
-                and rsi_floor < rsi_now < 68 and ema_dist_ok and vol_ok and bb_pos_ok:
-            stop   = ema_now * (1 - cfg["stop_pct"] / 100)
-            risk   = c_now - stop
-            if risk < atr_v * 0.25:
-                return self._hold(symbol, "stop too tight")
-            target = c_now + cfg["r_multiple"] * risk
+        # ── BUY ──
+        if rsi_now < cfg["rsi_entry_threshold"]:
+            stop   = c_now * (1 - cfg["hard_stop_pct"] / 100)
+            target = c_now * (1 + cfg["take_profit_pct"] / 100)
+            confidence = max(0.5, min(0.95, 1.0 - rsi_now / cfg["rsi_entry_threshold"]))
             return PerplexitySignal(
                 symbol=symbol, strategy_name=self.name, direction="BUY",
                 entry_price=round(c_now, 2),
                 stop_price=round(stop, 2),
                 target_price=round(target, 2),
-                confidence=0.75,
-                reason=f"Bull pullback to EMA({cfg['ema_period']}) "
-                       f"(dist={ema_dist_pct:.1f}%, RSI={rsi_now:.0f})",
+                confidence=round(confidence, 2),
+                reason=f"RSI({cfg['rsi_period']})={rsi_now:.1f} < {cfg['rsi_entry_threshold']} — extreme oversold in bull trend",
                 indicators={
-                    "ema20":        round(ema_now, 2),
-                    "ema_dist_pct": round(ema_dist_pct, 2),
-                    "rsi":          round(rsi_now, 1),
-                    "atr":          round(atr_v, 2),
-                    "stop":         round(stop, 2),
-                    "target":       round(target, 2),
+                    "rsi2":   round(rsi_now, 1),
+                    "sma200": round(sma200, 2),
+                    "atr_pct": round(atr_pct, 2),
                 },
             )
 
-        # ── SELL ─────────────────────────────────────────────
-        if rsi_now > cfg["rsi_exit"]:
+        # ── SELL ──
+        if rsi_now > cfg["rsi_exit_threshold"] or c_now > sma5:
+            reason = (f"RSI({cfg['rsi_period']})={rsi_now:.1f} > {cfg['rsi_exit_threshold']}"
+                      if rsi_now > cfg["rsi_exit_threshold"]
+                      else f"close > SMA({cfg['exit_sma']}) — mean reversion complete")
             return PerplexitySignal(
                 symbol=symbol, strategy_name=self.name, direction="SELL",
                 entry_price=c_now, confidence=0.80,
-                reason=f"RSI {rsi_now:.0f} > {cfg['rsi_exit']} — overbought",
-                indicators={"rsi": round(rsi_now, 1), "ema20": round(ema_now, 2)},
+                reason=reason,
+                indicators={"rsi2": round(rsi_now, 1), "sma5": round(sma5, 2)},
             )
-
-        n = cfg["exit_bars_below"]
-        if len(close) >= n:
-            consecutive_below = all(
-                float(close.iloc[i]) < float(ema20.iloc[i])
-                for i in range(-n, 0)
-            )
-            if consecutive_below:
-                return PerplexitySignal(
-                    symbol=symbol, strategy_name=self.name, direction="SELL",
-                    entry_price=c_now, confidence=0.72,
-                    reason=f"{n} consecutive closes below EMA({cfg['ema_period']})",
-                    indicators={"ema20": round(ema_now, 2), "rsi": round(rsi_now, 1)},
-                )
 
         return self._hold(symbol)
 
 
 # ══════════════════════════════════════════════════════════════
-# STRATEGY 2 — MA Crossover with RSI Confirmation
+# STRATEGY 2 — EMA(9/21) Crossover + MACD Confirmation
 # ══════════════════════════════════════════════════════════════
 class MaCrossoverRsi(PerplexityStrategy):
     """
-    Catch early-trend momentum when EMA(fast) crosses above EMA(slow) in a bull market.
+    Buy when EMA(9) crosses above EMA(21) with MACD above its signal line
+    and RSI in momentum zone. BULL market only.
 
-    BUY : Bull market intact + EMA(20) crosses above EMA(50) + RSI in momentum zone.
-    SELL: EMA(20) crosses below EMA(50) OR RSI overbought OR death cross.
-    Stop : below recent 10-bar swing low or slow EMA, whichever is lower.
-    Target: entry + r_multiple × risk.
+    BUY : BULL + EMA(9) crosses above EMA(21) + MACD > signal + RSI in [rsi_min, rsi_max]
+          + volume ≥ vol_ratio_min × 20-bar avg.
+    SELL: EMA(9) crosses below EMA(21) OR max_hold OR ATR stop hit.
+    Stop : entry − atr_stop_multiplier × ATR.
+    Target: entry + atr_tp_multiplier × ATR.
     """
     name = "MA_Crossover_RSI"
 
     config: dict = {
-        "ema_fast":      20,
-        "ema_slow":      50,
-        "rsi_low":       45,    # RSI floor at crossover — below 45 = weak momentum, skip
-        "rsi_high":      68,    # RSI ceiling at crossover — above 68 = already extended, skip
-        "rsi_exit":      78,    # exit on overbought
-        "r_multiple":    3.0,
+        "ema_fast":      20,       # kept for UI compatibility
+        "ema_slow":      50,       # kept for UI compatibility
+        "rsi_low":       45,       # kept for UI compatibility
+        "rsi_high":      68,       # kept for UI compatibility
+        "rsi_exit":      78,       # kept for UI compatibility
+        "r_multiple":    3.0,      # kept for UI compatibility
         "min_data_bars": 220,
+        # ── New logic params ──
+        "ema_fast_new":         9,
+        "ema_slow_new":         21,
+        "macd_fast":            12,
+        "macd_slow":            26,
+        "macd_signal":          9,
+        "rsi_period":           14,
+        "rsi_min":              45,
+        "rsi_max":              65,
+        "vol_ratio_min":        1.1,
+        "atr_stop_multiplier":  1.5,
+        "atr_tp_multiplier":    2.0,
+        "max_hold_bars":        20,
         # ── Calibration filters ──
         "filter_vol_min":        0.0,
         "filter_ema_spread_min": 0.0,
@@ -378,123 +259,115 @@ class MaCrossoverRsi(PerplexityStrategy):
             return self._hold(symbol, "not enough data")
 
         regime = regime or MarketRegime.BULL
+        if regime != MarketRegime.BULL:
+            return self._hold(symbol, "EMA/MACD crossover BULL only")
 
         close = df["Close"]
-        ema_f = _ema(close, cfg["ema_fast"])
-        ema_s = _ema(close, cfg["ema_slow"])
-        rsi   = _rsi(close, 14)
+        c_now = float(close.iloc[-1])
+
+        ema9  = _ema(close, cfg["ema_fast_new"])
+        ema21 = _ema(close, cfg["ema_slow_new"])
+        rsi14 = _rsi(close, cfg["rsi_period"])
+
+        e9_now  = float(ema9.iloc[-1])
+        e9_prev = float(ema9.iloc[-2])
+        e21_now = float(ema21.iloc[-1])
+        e21_prev = float(ema21.iloc[-2])
+        rsi_now = float(rsi14.iloc[-1])
+
+        macd_val, sig_val, macd_s, sig_s = _macd_line(
+            close, cfg["macd_fast"], cfg["macd_slow"], cfg["macd_signal"]
+        )
         atr_v = _current_atr(df, 14)
 
-        ef_now  = float(ema_f.iloc[-1])
-        ef_prev = float(ema_f.iloc[-2])
-        es_now  = float(ema_s.iloc[-1])
-        es_prev = float(ema_s.iloc[-2])
-        rsi_now = float(rsi.iloc[-1])
-        c_now   = float(close.iloc[-1])
-
-        bullish_cross = ef_prev <= es_prev and ef_now > es_now
-        bearish_cross = ef_prev >= es_prev and ef_now < es_now
-
-        swing_low_10 = float(df["Low"].iloc[-11:-1].min())
-
-        # ── Bear market emergency exit ────────────────────────
-        if _is_death_cross(df):
-            return PerplexitySignal(
-                symbol=symbol, strategy_name=self.name, direction="SELL",
-                entry_price=c_now, confidence=0.95,
-                reason="DEATH CROSS — SMA50 crossed below SMA200, exiting bull positions",
-                indicators={"ema_fast": round(ef_now, 2), "ema_slow": round(es_now, 2)},
-            )
-
-        # ── Per-symbol calibration filters ───────────────────
-        from app.services.backtest.symbol_profiles import get_filters_for_symbol
-        _sym_filters = get_filters_for_symbol(self.name, symbol)
-        _f_vol    = cfg["filter_vol_min"]        if cfg["filter_vol_min"]        > 0 else _sym_filters.get("vol_min", 0.0)
-        _f_spread = cfg["filter_ema_spread_min"] if cfg["filter_ema_spread_min"] > 0 else _sym_filters.get("ema_spread_min", 0.0)
+        bullish_cross = e9_prev <= e21_prev and e9_now > e21_now
+        bearish_cross = e9_prev >= e21_prev and e9_now < e21_now
 
         vol_ratio = 1.0
-        if "Volume" in df.columns:
-            avg_vol   = float(df["Volume"].iloc[-21:-1].mean()) if len(df) > 21 else 1.0
+        if "Volume" in df.columns and len(df) > 21:
+            avg_vol   = float(df["Volume"].iloc[-21:-1].mean())
             cur_vol   = float(df["Volume"].iloc[-1])
             vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 1.0
-        vol_ok = vol_ratio >= _f_vol if _f_vol > 0 else True
 
-        ema_spread_pct = abs(ef_now - es_now) / es_now * 100 if es_now > 0 else 0.0
-        spread_ok = ema_spread_pct >= _f_spread if _f_spread > 0 else True
-
-        # ── BUY ──────────────────────────────────────────────
-        if bullish_cross and cfg["rsi_low"] <= rsi_now <= cfg["rsi_high"] \
-                and vol_ok and spread_ok:
-            if regime != MarketRegime.BULL:
-                return self._hold(symbol, "OFF in Bear Regime")
-            stop   = min(swing_low_10, es_now * 0.995)
-            risk   = c_now - stop
-            if risk < atr_v * 0.2:
-                return self._hold(symbol, "stop too tight at crossover")
-            if risk > atr_v * 3.0:
-                return self._hold(symbol, "stop too wide — risk exceeds 3×ATR")
-            target = c_now + cfg["r_multiple"] * risk
+        # ── BUY ──
+        if (bullish_cross
+                and macd_val > sig_val
+                and cfg["rsi_min"] <= rsi_now <= cfg["rsi_max"]
+                and vol_ratio >= cfg["vol_ratio_min"]):
+            stop   = c_now - cfg["atr_stop_multiplier"] * atr_v
+            target = c_now + cfg["atr_tp_multiplier"] * atr_v
             return PerplexitySignal(
                 symbol=symbol, strategy_name=self.name, direction="BUY",
                 entry_price=round(c_now, 2),
                 stop_price=round(stop, 2),
                 target_price=round(target, 2),
-                confidence=0.78,
-                reason=f"EMA({cfg['ema_fast']}) crossed above EMA({cfg['ema_slow']}) "
-                       f"RSI={rsi_now:.0f} [{cfg['rsi_low']}–{cfg['rsi_high']}]",
+                confidence=0.75,
+                reason=f"EMA(9) crossed EMA(21), MACD above signal, RSI={rsi_now:.0f}, vol={vol_ratio:.1f}×",
                 indicators={
-                    "ema_fast":  round(ef_now, 2),
-                    "ema_slow":  round(es_now, 2),
-                    "rsi":       round(rsi_now, 1),
-                    "atr":       round(atr_v, 2),
-                    "swing_low": round(swing_low_10, 2),
+                    "ema9":    round(e9_now, 2),
+                    "ema21":   round(e21_now, 2),
+                    "macd":    round(macd_val, 4),
+                    "signal":  round(sig_val, 4),
+                    "rsi":     round(rsi_now, 1),
+                    "atr":     round(atr_v, 2),
+                    "vol_ratio": round(vol_ratio, 2),
                 },
             )
 
-        # ── SELL ─────────────────────────────────────────────
+        # ── SELL ──
         if bearish_cross:
             return PerplexitySignal(
                 symbol=symbol, strategy_name=self.name, direction="SELL",
-                entry_price=c_now, confidence=0.82,
-                reason=f"EMA({cfg['ema_fast']}) crossed BELOW EMA({cfg['ema_slow']}) — momentum gone",
-                indicators={"ema_fast": round(ef_now, 2), "ema_slow": round(es_now, 2),
-                            "rsi": round(rsi_now, 1)},
+                entry_price=c_now, confidence=0.80,
+                reason="EMA(9) crossed below EMA(21) — momentum lost",
+                indicators={"ema9": round(e9_now, 2), "ema21": round(e21_now, 2), "rsi": round(rsi_now, 1)},
             )
         if rsi_now > cfg["rsi_exit"]:
             return PerplexitySignal(
                 symbol=symbol, strategy_name=self.name, direction="SELL",
                 entry_price=c_now, confidence=0.72,
-                reason=f"RSI {rsi_now:.0f} > {cfg['rsi_exit']} — overbought",
-                indicators={"rsi": round(rsi_now, 1), "ema_fast": round(ef_now, 2)},
+                reason=f"RSI={rsi_now:.0f} > {cfg['rsi_exit']} — overbought",
+                indicators={"rsi": round(rsi_now, 1)},
             )
 
         return self._hold(symbol)
 
 
 # ══════════════════════════════════════════════════════════════
-# STRATEGY 3 — Breakout from Consolidation with Volume
+# STRATEGY 3 — BB Width Squeeze → Expansion Breakout
 # ══════════════════════════════════════════════════════════════
 class BreakoutConsolidation(PerplexityStrategy):
     """
-    Buy confirmed breakouts from tight consolidation bases in a bull market.
+    Detect Bollinger Band squeeze (bandwidth contracting squeeze_bars in a row)
+    then buy the expansion (close above upper BB) with volume confirmation.
+    BULL only.
 
-    Requires price ABOVE SMA50 (already in trend) + golden cross + ADX > 20.
-    BUY : tight base (< 2.5×ATR range) + close > range_high + strong volume (≥ 2×avg).
-    SELL: failed breakout reversal OR RSI overbought OR death cross.
-    Stop : just below range_high (the base of the breakout).
-    Target: entry + r_multiple × risk.
+    BUY : BULL + BB width contracting squeeze_bars consecutively + close > upper_BB
+          + RSI > rsi_entry_min + volume ≥ vol_ratio_min × avg.
+    SELL: RSI > rsi_overbought OR max_hold reached.
+    Stop : lower BB at entry.
+    Target: entry + (upper_BB − lower_BB) (one bandwidth extension).
     """
     name = "Breakout_Consolidation"
 
     config: dict = {
-        "consolidation_bars":  15,    # bars defining the base — 15 catches 3-week bases
-        "atr_range_multiple":  2.5,   # base range must be < 2.5×ATR — tighter bases break out harder
-        "breakout_buffer_pct": 0.3,   # % above range_high for confirmed breakout
-        "vol_multiple":        2.0,   # volume must be ≥ 2× avg — real breakouts need conviction
-        "r_multiple":          3.0,
-        "rsi_exit":            80,    # breakout momentum can carry RSI very high
-        "stop_below_range":    True,
+        "consolidation_bars":  15,    # kept for UI compatibility
+        "atr_range_multiple":  2.5,   # kept for UI compatibility
+        "breakout_buffer_pct": 0.3,   # kept for UI compatibility
+        "vol_multiple":        2.0,   # kept for UI compatibility
+        "r_multiple":          3.0,   # kept for UI compatibility
+        "rsi_exit":            80,    # kept for UI compatibility
+        "stop_below_range":    True,  # kept for UI compatibility
         "min_data_bars":       220,
+        # ── New logic params ──
+        "bb_period":       20,
+        "bb_std":          2.0,
+        "squeeze_bars":    5,          # consecutive bars of narrowing bandwidth
+        "rsi_period":      14,
+        "rsi_entry_min":   50,         # RSI must be above 50 at breakout
+        "rsi_overbought":  80,
+        "vol_ratio_min":   1.3,
+        "max_hold_bars":   15,
         # ── Calibration filters ──
         "filter_vol_min":       0.0,
         "filter_range_atr_max": 0.0,
@@ -506,136 +379,110 @@ class BreakoutConsolidation(PerplexityStrategy):
             return self._hold(symbol, "not enough data")
 
         regime = regime or MarketRegime.BULL
+        if regime != MarketRegime.BULL:
+            return self._hold(symbol, "BB squeeze breakout BULL only")
 
-        # Strict gate: must be above SMA50 with ADX > 20 (confirmed bull trend momentum)
-        in_uptrend, regime_reason = _market_regime_trend(df)
-        if not in_uptrend:
-            return self._hold(symbol, regime_reason)
+        close = df["Close"]
+        c_now = float(close.iloc[-1])
 
-        close   = df["Close"]
-        c_now   = float(close.iloc[-1])
-        sma50   = float(_sma(close, 50).iloc[-1])
-        sma200  = float(_sma(close, 200).iloc[-1])
-        n       = cfg["consolidation_bars"]
-        atr_v   = _current_atr(df, 14)
-        rsi     = _rsi(close, 14)
-        rsi_now = float(rsi.iloc[-1])
+        bb_upper, bb_mid, bb_lower = _bb_bands(close, cfg["bb_period"], cfg["bb_std"])
+        bw = bb_upper - bb_lower  # bandwidth series
 
-        window_h   = df["High"].iloc[-n - 1:-1]
-        window_l   = df["Low"].iloc[-n - 1:-1]
-        range_high = float(window_h.max())
-        range_low  = float(window_l.min())
-        range_size = range_high - range_low
+        # Check squeeze: last squeeze_bars all narrowing
+        n = cfg["squeeze_bars"]
+        if len(bw) < n + 2:
+            return self._hold(symbol, "not enough bars for squeeze detection")
 
-        if range_size > cfg["atr_range_multiple"] * atr_v:
-            return self._hold(symbol, f"base too wide ({range_size:.2f} > {cfg['atr_range_multiple']}×ATR)")
+        squeeze = all(
+            float(bw.iloc[-(i+1)]) < float(bw.iloc[-(i+2)])
+            for i in range(n)
+        )
 
-        buffer   = range_high * cfg["breakout_buffer_pct"] / 100
-        breakout = c_now > range_high + buffer
+        rsi14   = _rsi(close, cfg["rsi_period"])
+        rsi_now = float(rsi14.iloc[-1])
+        upper_now = float(bb_upper.iloc[-1])
+        lower_now = float(bb_lower.iloc[-1])
+        bw_now    = upper_now - lower_now
 
         vol_ratio = 1.0
-        vol_ok    = True
-        if "Volume" in df.columns:
+        if "Volume" in df.columns and len(df) > 21:
             avg_vol   = float(df["Volume"].iloc[-21:-1].mean())
             cur_vol   = float(df["Volume"].iloc[-1])
             vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 1.0
-            vol_ok    = cur_vol >= cfg["vol_multiple"] * avg_vol if avg_vol > 0 else True
 
-        # ── Bear market emergency exit ────────────────────────
-        if _is_death_cross(df):
-            return PerplexitySignal(
-                symbol=symbol, strategy_name=self.name, direction="SELL",
-                entry_price=c_now, confidence=0.95,
-                reason="DEATH CROSS — SMA50 crossed below SMA200, exiting bull positions",
-                indicators={"sma50": round(sma50, 2), "sma200": round(sma200, 2)},
-            )
-
-        # ── Per-symbol calibration filters ───────────────────
-        from app.services.backtest.symbol_profiles import get_filters_for_symbol
-        _sym_filters    = get_filters_for_symbol(self.name, symbol)
-        _f_vol          = cfg["filter_vol_min"]       if cfg["filter_vol_min"]       > 0 else _sym_filters.get("vol_min", 0.0)
-        _f_range_atr    = cfg["filter_range_atr_max"] if cfg["filter_range_atr_max"] > 0 else _sym_filters.get("atr_pct_max", 0.0)
-        extra_vol_ok    = vol_ratio >= _f_vol if _f_vol > 0 else True
-        range_atr_ratio = range_size / atr_v if atr_v > 0 else 0.0
-        range_tight_ok  = range_atr_ratio <= _f_range_atr if _f_range_atr > 0 else True
-
-        # ── BUY ──────────────────────────────────────────────
-        # RSI 50–75: breakout with RSI < 50 lacks momentum; > 75 = already extended
-        if breakout and vol_ok and 50 < rsi_now < 75 and extra_vol_ok and range_tight_ok:
-            if regime != MarketRegime.BULL:
-                return self._hold(symbol, "OFF in Bear Regime")
-            stop   = (range_high if cfg["stop_below_range"] else range_low) * 0.998
-            risk   = c_now - stop
-            if risk < atr_v * 0.2:
-                return self._hold(symbol, "stop too tight")
-            target = c_now + cfg["r_multiple"] * risk
+        # ── BUY ──
+        if (squeeze
+                and c_now > upper_now
+                and rsi_now >= cfg["rsi_entry_min"]
+                and vol_ratio >= cfg["vol_ratio_min"]):
+            stop   = lower_now
+            target = c_now + bw_now   # project one bandwidth above entry
             return PerplexitySignal(
                 symbol=symbol, strategy_name=self.name, direction="BUY",
                 entry_price=round(c_now, 2),
                 stop_price=round(stop, 2),
                 target_price=round(target, 2),
-                confidence=0.80,
-                reason=f"Breakout above {n}-bar base (range={range_size:.2f}, "
-                       f"vol={vol_ratio:.1f}×avg, RSI={rsi_now:.0f})",
+                confidence=0.78,
+                reason=f"BB squeeze ({n} bars) + close above upper BB, RSI={rsi_now:.0f}, vol={vol_ratio:.1f}×",
                 indicators={
-                    "range_high": round(range_high, 2),
-                    "range_low":  round(range_low, 2),
-                    "range_size": round(range_size, 2),
-                    "vol_ratio":  round(vol_ratio, 2),
-                    "sma50":      round(sma50, 2),
-                    "sma200":     round(sma200, 2),
-                    "rsi":        round(rsi_now, 1),
-                    "atr":        round(atr_v, 2),
+                    "bb_upper": round(upper_now, 2),
+                    "bb_lower": round(lower_now, 2),
+                    "bb_width": round(bw_now, 2),
+                    "rsi":      round(rsi_now, 1),
+                    "vol_ratio": round(vol_ratio, 2),
                 },
             )
 
-        # ── SELL ─────────────────────────────────────────────
-        recent_had_breakout = any(
-            float(df["Close"].iloc[i]) > range_high * (1 + cfg["breakout_buffer_pct"] / 100)
-            for i in range(-5, -1)
-        )
-        if recent_had_breakout and c_now < range_high:
+        # ── SELL ──
+        if rsi_now > cfg["rsi_overbought"]:
             return PerplexitySignal(
                 symbol=symbol, strategy_name=self.name, direction="SELL",
-                entry_price=c_now, confidence=0.80,
-                reason=f"Failed breakout — closed back below base high ({range_high:.2f})",
-                indicators={"range_high": round(range_high, 2), "rsi": round(rsi_now, 1)},
-            )
-        if rsi_now > cfg["rsi_exit"]:
-            return PerplexitySignal(
-                symbol=symbol, strategy_name=self.name, direction="SELL",
-                entry_price=c_now, confidence=0.72,
-                reason=f"RSI {rsi_now:.0f} > {cfg['rsi_exit']} — overbought",
-                indicators={"rsi": round(rsi_now, 1)},
+                entry_price=c_now, confidence=0.75,
+                reason=f"RSI={rsi_now:.0f} > {cfg['rsi_overbought']} — overbought after breakout",
+                indicators={"rsi": round(rsi_now, 1), "bb_upper": round(upper_now, 2)},
             )
 
         return self._hold(symbol)
 
 
 # ══════════════════════════════════════════════════════════════
-# STRATEGY 4 — Bollinger Band Mean Reversion in Uptrend
+# STRATEGY 4 — Pullback to Rising EMA(50) + Rejection Wick
 # ══════════════════════════════════════════════════════════════
 class BollingerMeanReversionUptrend(PerplexityStrategy):
     """
-    Buy short-term oversold extremes in a confirmed bull market.
+    Highest-frequency strategy: buy dips to the rising EMA(50) in BULL or mild BEAR.
+    Requires a bullish rejection wick and RSI in recovery zone.
 
-    BUY : Golden cross intact + price pushed below BB lower band + re-enters bands
-          + RSI recovering from oversold + not a falling-knife (RSI floor 38).
-    SELL: Price reaches BB upper band OR RSI overbought OR death cross.
-    Stop : 2×ATR below entry price.
-    Target: BB upper band (full mean reversion).
+    BUY : EMA(50) rising (slope > 0) + price within ema_proximity_pct of EMA(50)
+          + RSI in [rsi_min, rsi_max] + lower wick ≥ wick_ratio_min × bar range
+          + NOT in deep bear (SPY > 10% below SMA200 threshold).
+    SELL: RSI > exit_rsi OR close > entry × (1 + exit_extension_pct/100).
+    Stop : hard_stop_pct % below entry.
     """
     name = "BB_Mean_Reversion"
 
     config: dict = {
-        "bb_period":      20,
-        "bb_std":         2.0,
-        "reentry_bars":   5,      # bars to re-enter after touching lower band (5 = ~1 week of dip)
-        "atr_multiple":   2.0,    # stop = entry - atr_multiple × ATR
-        "rsi_re_entry":   38,     # RSI must be above this — below 38 = still in freefall, avoid
-        "use_rsi_filter": True,
-        "rsi_exit":       74,
+        "bb_period":      20,      # kept for UI compatibility
+        "bb_std":         2.0,     # kept for UI compatibility
+        "reentry_bars":   5,       # kept for UI compatibility
+        "atr_multiple":   2.0,     # kept for UI compatibility
+        "rsi_re_entry":   38,      # kept for UI compatibility
+        "use_rsi_filter": True,    # kept for UI compatibility
+        "rsi_exit":       74,      # kept for UI compatibility
         "min_data_bars":  220,
+        # ── New logic params ──
+        "ema_trend":                50,
+        "ema_slope_bars":           5,    # bars to measure EMA slope (must be positive)
+        "price_ema_proximity_pct":  1.0,  # price within ±1% of EMA50
+        "rsi_period":               14,
+        "rsi_min":                  35,
+        "rsi_max":                  55,
+        "wick_ratio_min":           0.4,  # lower wick ≥ 40% of bar range
+        "exit_rsi":                 65,
+        "exit_extension_pct":       3.0,  # sell if price > entry + 3%
+        "hard_stop_pct":            2.0,
+        "max_hold_bars":            20,
+        "bear_skip_threshold_pct":  10.0, # skip if price > 10% below SMA200
         # ── Calibration filters ──
         "filter_vol_min":      0.0,
         "filter_atr_pct_max":  0.0,
@@ -648,142 +495,103 @@ class BollingerMeanReversionUptrend(PerplexityStrategy):
             return self._hold(symbol, "not enough data")
 
         regime = regime or MarketRegime.BULL
-        if regime == MarketRegime.DEEP_BEAR and symbol not in _INDEX_ETFS:
-            return self._hold(symbol, "OFF in Deep Bear Regime")
-
-        in_uptrend, regime_reason = _market_regime_reversion(df)
-        if not in_uptrend:
-            return self._hold(symbol, regime_reason)
+        if regime == MarketRegime.DEEP_BEAR:
+            return self._hold(symbol, "OFF in Deep Bear")
 
         close = df["Close"]
-        bb    = compute_bollinger(close, cfg["bb_period"], cfg["bb_std"])
-        rsi   = _rsi(close, 14)
-        atr_v = _current_atr(df, 14)
+        c_now = float(close.iloc[-1])
 
-        bb_lower  = bb.lower.values
-        bb_middle = bb.middle.values
-        bb_upper  = bb.upper.values
+        # Deep bear guard: skip if price far below SMA200
+        sma200 = float(_sma(close, 200).iloc[-1])
+        if c_now < sma200 * (1 - cfg["bear_skip_threshold_pct"] / 100):
+            return self._hold(symbol, f"price >{cfg['bear_skip_threshold_pct']}% below SMA200")
 
-        c_now     = float(close.iloc[-1])
-        rsi_now   = float(rsi.iloc[-1])
-        lower_now = float(bb_lower.iloc[-1])
-        upper_now = float(bb_upper.iloc[-1])
-        mid_now   = float(bb_middle.iloc[-1])
+        ema50 = _ema(close, cfg["ema_trend"])
+        ema50_now  = float(ema50.iloc[-1])
+        ema50_prev = float(ema50.iloc[-cfg["ema_slope_bars"]])
 
-        # Must have meaningfully pierced the lower band (not just a 1-tick brush)
-        m = cfg["reentry_bars"]
-        was_below = any(
-            float(close.iloc[i]) < float(bb_lower.iloc[i]) - 0.1 * atr_v
-            for i in range(-m - 1, -1)
+        if ema50_now <= ema50_prev:
+            return self._hold(symbol, "EMA(50) not rising — no uptrend")
+
+        prox_pct = abs(c_now - ema50_now) / ema50_now * 100
+        if prox_pct > cfg["price_ema_proximity_pct"]:
+            return self._hold(symbol, f"price {prox_pct:.1f}% from EMA(50) — not a clean pullback")
+
+        rsi14   = _rsi(close, cfg["rsi_period"])
+        rsi_now = float(rsi14.iloc[-1])
+
+        if not (cfg["rsi_min"] <= rsi_now <= cfg["rsi_max"]):
+            return self._hold(symbol, f"RSI={rsi_now:.0f} outside [{cfg['rsi_min']},{cfg['rsi_max']}]")
+
+        o_now = float(df["Open"].iloc[-1])
+        h_now = float(df["High"].iloc[-1])
+        l_now = float(df["Low"].iloc[-1])
+        bar_range  = h_now - l_now
+        lower_wick = min(o_now, c_now) - l_now
+        wick_ratio = lower_wick / bar_range if bar_range > 0 else 0.0
+
+        if wick_ratio < cfg["wick_ratio_min"]:
+            return self._hold(symbol, f"wick ratio {wick_ratio:.2f} < {cfg['wick_ratio_min']} — no rejection")
+
+        # ── BUY ──
+        stop   = c_now * (1 - cfg["hard_stop_pct"] / 100)
+        target = c_now * (1 + cfg["exit_extension_pct"] / 100)
+        return PerplexitySignal(
+            symbol=symbol, strategy_name=self.name, direction="BUY",
+            entry_price=round(c_now, 2),
+            stop_price=round(stop, 2),
+            target_price=round(target, 2),
+            confidence=0.72,
+            reason=f"Pullback to rising EMA(50), RSI={rsi_now:.0f}, wick={wick_ratio:.0%}",
+            indicators={
+                "ema50":      round(ema50_now, 2),
+                "prox_pct":   round(prox_pct, 2),
+                "rsi":        round(rsi_now, 1),
+                "wick_ratio": round(wick_ratio, 2),
+                "sma200":     round(sma200, 2),
+            },
         )
-        re_entered = was_below and c_now > lower_now
-
-        rsi_prev       = float(rsi.iloc[-2]) if len(rsi) >= 2 else rsi_now
-        rsi_crossed_up = (rsi_prev < cfg["rsi_re_entry"]) and (rsi_now >= cfg["rsi_re_entry"])
-        rsi_ok         = (not cfg["use_rsi_filter"]) or rsi_crossed_up or rsi_now >= cfg["rsi_re_entry"]
-        if regime == MarketRegime.BEAR:
-            rsi_ok = rsi_ok and rsi_now <= 34
-
-        # ── Bear market emergency exit ────────────────────────
-        if _is_death_cross(df):
-            return PerplexitySignal(
-                symbol=symbol, strategy_name=self.name, direction="SELL",
-                entry_price=c_now, confidence=0.95,
-                reason="DEATH CROSS — SMA50 crossed below SMA200, exiting bull positions",
-                indicators={"bb_lower": round(lower_now, 2), "rsi": round(rsi_now, 1)},
-            )
-
-        # ── Per-symbol calibration filters ───────────────────
-        from app.services.backtest.symbol_profiles import get_filters_for_symbol
-        _sym_filters = get_filters_for_symbol(self.name, symbol)
-        _f_vol       = cfg["filter_vol_min"]      if cfg["filter_vol_min"]      > 0 else _sym_filters.get("vol_min", 0.0)
-        _f_atr_max   = cfg["filter_atr_pct_max"]  if cfg["filter_atr_pct_max"]  > 0 else _sym_filters.get("atr_pct_max", 0.0)
-        _f_depth_min = cfg["filter_bb_depth_min"] if cfg["filter_bb_depth_min"] > 0 else _sym_filters.get("bb_depth_min", 0.0)
-
-        vol_ratio = 1.0
-        if "Volume" in df.columns:
-            avg_vol   = float(df["Volume"].iloc[-21:-1].mean()) if len(df) > 21 else 1.0
-            cur_vol   = float(df["Volume"].iloc[-1])
-            vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 1.0
-        vol_ok = vol_ratio >= _f_vol if _f_vol > 0 else True
-
-        atr_pct = atr_v / c_now * 100 if c_now > 0 else 0.0
-        atr_ok  = atr_pct <= _f_atr_max if _f_atr_max > 0 else True
-
-        bb_width    = float(bb_upper.iloc[-1]) - float(bb_lower.iloc[-1])
-        depth_below = 0.0
-        for k in range(-m - 1, -1):
-            c_bar = float(close.iloc[k])
-            bl    = float(bb_lower.iloc[k])
-            if c_bar < bl and bb_width > 0:
-                depth_below = max(depth_below, (bl - c_bar) / bb_width)
-        depth_ok = depth_below >= _f_depth_min if _f_depth_min > 0 else True
-
-        # ── BUY ──────────────────────────────────────────────
-        # RSI 38–62: floor of 38 avoids capitulation, ceiling of 62 avoids buying after recovery
-        if re_entered and rsi_ok and 38 <= rsi_now <= 62 and vol_ok and atr_ok and depth_ok:
-            stop   = c_now - cfg["atr_multiple"] * atr_v
-            risk   = c_now - stop
-            if risk < atr_v * 0.2:
-                return self._hold(symbol, "stop too tight")
-            target = upper_now
-            return PerplexitySignal(
-                symbol=symbol, strategy_name=self.name, direction="BUY",
-                entry_price=round(c_now, 2),
-                stop_price=round(stop, 2),
-                target_price=round(target, 2),
-                confidence=0.76,
-                reason=f"Re-entered BB lower band in bull market — mean reversion, RSI={rsi_now:.0f}",
-                indicators={
-                    "bb_lower":  round(lower_now, 2),
-                    "bb_middle": round(mid_now, 2),
-                    "bb_upper":  round(upper_now, 2),
-                    "rsi":       round(rsi_now, 1),
-                    "atr":       round(atr_v, 2),
-                },
-            )
-
-        # ── SELL ─────────────────────────────────────────────
-        if c_now >= upper_now or rsi_now > cfg["rsi_exit"]:
-            return PerplexitySignal(
-                symbol=symbol, strategy_name=self.name, direction="SELL",
-                entry_price=c_now, confidence=0.80,
-                reason="Price at BB upper — full reversion complete"
-                       if c_now >= upper_now else f"RSI {rsi_now:.0f} > {cfg['rsi_exit']}",
-                indicators={
-                    "bb_upper":  round(upper_now, 2),
-                    "bb_middle": round(mid_now, 2),
-                    "rsi":       round(rsi_now, 1),
-                },
-            )
-
-        return self._hold(symbol)
 
 
 # ══════════════════════════════════════════════════════════════
-# STRATEGY 5 — Support / Fibonacci Pullback in Trend
+# STRATEGY 5 — ATR-Spike / Fear-Capitulation Reversal
 # ══════════════════════════════════════════════════════════════
 class FibPullbackSupport(PerplexityStrategy):
     """
-    Buy pullbacks to Fibonacci retracement levels (38.2%, 50%, 61.8%) of the
-    most recent impulse leg in a confirmed bull market.
+    Buy fear/capitulation spikes: ATR% proxy signals extreme intraday panic
+    followed by reversal signals. Works in BULL and mild BEAR.
 
-    BUY : Golden cross intact + above SMA200 + price at a Fib level
-          + bullish rejection candle OR RSI turning up from oversold zone.
-    SELL: Price reaches prior swing high OR RSI overbought OR death cross.
-    Stop : Fib level − 1.5×ATR (gives room for normal volatility).
-    Target: prior swing high.
+    BUY : ATR%_today > atr_spike_threshold + RSI(14) < rsi_entry_max
+          + BB%B < bb_pos_max + lower wick ≥ wick_ratio_min × bar range
+          + 3-bar prior decline ≥ prior_decline_pct.
+    SELL: RSI > rsi_exit OR ATR% < atr_exit_threshold (volatility normalized).
+    Stop : hard_stop_pct % below entry.
+    Target: take_profit_pct % above entry.
     """
     name = "Fib_Pullback_Support"
 
     config: dict = {
-        "swing_lookback":   60,    # bars to identify the impulse leg — 60 catches longer swings
-        "fib_levels":       [0.382, 0.50, 0.618],
-        "fib_zone_pct":     1.2,   # price within ±1.2% of fib level qualifies (slightly wider than 1%)
-        "rsi_oversold_low": 35,    # RSI floor — below 35 is falling knife territory, skip
-        "rsi_oversold_hi":  62,    # RSI ceiling — allows mid-term pullbacks that don't go deep
-        "atr_stop_mult":    1.5,
+        "swing_lookback":   60,       # kept for UI compatibility
+        "fib_levels":       [0.382, 0.50, 0.618],  # kept for UI compatibility
+        "fib_zone_pct":     1.2,      # kept for UI compatibility
+        "rsi_oversold_low": 35,       # kept for UI compatibility
+        "rsi_oversold_hi":  62,       # kept for UI compatibility
+        "atr_stop_mult":    1.5,      # kept for UI compatibility
         "min_data_bars":    220,
+        # ── New logic params ──
+        "atr_period":           14,
+        "atr_spike_threshold":  3.0,   # ATR% > 3% = fear spike
+        "atr_exit_threshold":   2.0,   # ATR% < 2% = volatility normalized → exit
+        "rsi_period":           14,
+        "rsi_entry_max":        30,    # RSI < 30 = oversold panic
+        "rsi_exit":             55,    # RSI recovers → exit
+        "bb_pos_max":           0.15,  # BB%B < 0.15 = near lower band
+        "wick_ratio_min":       0.5,   # strong lower rejection wick
+        "prior_decline_pct":    2.0,   # prior 3-bar decline ≥ 2%
+        "prior_decline_bars":   3,
+        "hard_stop_pct":        4.0,
+        "take_profit_pct":      6.0,
+        "max_hold_bars":        8,
         # ── Calibration filters ──
         "filter_lower_wick_min": 0.0,
         "filter_vol_min":        0.0,
@@ -795,154 +603,64 @@ class FibPullbackSupport(PerplexityStrategy):
             return self._hold(symbol, "not enough data")
 
         regime = regime or MarketRegime.BULL
-        if regime == MarketRegime.DEEP_BEAR and symbol not in _INDEX_ETFS:
-            return self._hold(symbol, "OFF in Deep Bear Regime")
+        if regime == MarketRegime.DEEP_BEAR:
+            return self._hold(symbol, "OFF in Deep Bear")
 
-        in_uptrend, regime_reason = _market_regime_reversion(df)
-        if not in_uptrend:
-            return self._hold(symbol, regime_reason)
+        close = df["Close"]
+        c_now = float(close.iloc[-1])
+        atr_v = _current_atr(df, cfg["atr_period"])
+        atr_pct = atr_v / c_now * 100 if c_now > 0 else 0.0
 
-        close  = df["Close"]
-        c_now  = float(close.iloc[-1])
-        sma50  = float(_sma(close, 50).iloc[-1])
-        sma200 = float(_sma(close, 200).iloc[-1])
-        rsi    = _rsi(close, 14)
-        atr_v  = _current_atr(df, 14)
-        rsi_now = float(rsi.iloc[-1])
+        # ATR% spike: today must be a fear day
+        if atr_pct <= cfg["atr_spike_threshold"]:
+            return self._hold(symbol, f"ATR%={atr_pct:.1f} — no fear spike (need >{cfg['atr_spike_threshold']}%)")
 
-        if regime == MarketRegime.BEAR and symbol not in _INDEX_ETFS and c_now <= sma200:
-            return self._hold(symbol, "bear regime: only large caps / ETFs above SMA200")
+        rsi14   = _rsi(close, cfg["rsi_period"])
+        rsi_now = float(rsi14.iloc[-1])
 
-        # Identify the most recent upward impulse leg
-        lb         = cfg["swing_lookback"]
-        window_h   = df["High"].iloc[-lb:]
-        window_l   = df["Low"].iloc[-lb:]
-        swing_low_idx  = int(window_l.values.argmin())
-        swing_high_idx = int(window_h.values.argmax())
-        swing_low  = float(window_l.iloc[swing_low_idx])
-        swing_high = float(window_h.iloc[swing_high_idx])
+        if rsi_now >= cfg["rsi_entry_max"]:
+            return self._hold(symbol, f"RSI={rsi_now:.0f} ≥ {cfg['rsi_entry_max']} — not oversold enough")
 
-        # Upward impulse: low must come before high
-        if swing_low_idx >= swing_high_idx:
-            return self._hold(symbol, "no valid upward impulse — swing low after swing high")
+        # BB%B position
+        bb_upper, bb_mid, bb_lower = _bb_bands(close, 20, 2.0)
+        bw = float(bb_upper.iloc[-1]) - float(bb_lower.iloc[-1])
+        bb_pos = (c_now - float(bb_lower.iloc[-1])) / bw if bw > 0 else 0.5
+        if bb_pos > cfg["bb_pos_max"]:
+            return self._hold(symbol, f"BB%B={bb_pos:.2f} — not near lower band")
 
-        # Swing high must be recent (within 40 bars = ~2 months)
-        bars_since_high = lb - 1 - swing_high_idx
-        if bars_since_high > 40:
-            return self._hold(symbol, f"impulse too old — swing high {bars_since_high} bars ago")
-
-        impulse = swing_high - swing_low
-        if impulse < atr_v * 3:
-            return self._hold(symbol, "impulse too small — need ≥ 3×ATR swing")
-
-        fib_zones = {
-            level: swing_high - level * impulse
-            for level in cfg["fib_levels"]
-        }
-
-        zone_pct  = cfg["fib_zone_pct"] / 100
-        if regime != MarketRegime.BULL:
-            zone_pct = min(zone_pct, 0.01)
-        hit_level = None
-        hit_price = None
-        for level, fib_price in fib_zones.items():
-            if abs(c_now - fib_price) / fib_price <= zone_pct:
-                hit_level = level
-                hit_price = fib_price
-                break
-
-        if hit_level is None:
-            return self._hold(symbol, "price not at a Fibonacci level")
-
-        o_now      = float(df["Open"].iloc[-1])
-        h_now      = float(df["High"].iloc[-1])
-        l_now      = float(df["Low"].iloc[-1])
-        body       = abs(c_now - o_now)
+        # Rejection wick
+        o_now = float(df["Open"].iloc[-1])
+        h_now = float(df["High"].iloc[-1])
+        l_now = float(df["Low"].iloc[-1])
         bar_range  = h_now - l_now
-        lower_wick = o_now - l_now if c_now >= o_now else c_now - l_now
-        lower_wick_pct   = lower_wick / bar_range * 100 if bar_range > 0 else 0.0
-        rejection_candle = lower_wick >= 1.5 * body if body > 0 else False
+        lower_wick = min(o_now, c_now) - l_now
+        wick_ratio = lower_wick / bar_range if bar_range > 0 else 0.0
+        if wick_ratio < cfg["wick_ratio_min"]:
+            return self._hold(symbol, f"wick ratio {wick_ratio:.2f} < {cfg['wick_ratio_min']} — no reversal candle")
 
-        rsi_prev      = float(rsi.iloc[-2]) if len(rsi) >= 2 else rsi_now
-        rsi_turning_up = (rsi_prev < rsi_now) and (cfg["rsi_oversold_low"] <= rsi_now <= cfg["rsi_oversold_hi"])
+        # Prior decline guard (must have sold off to create panic)
+        n_dec = cfg["prior_decline_bars"]
+        if len(close) > n_dec:
+            prior_close = float(close.iloc[-(n_dec + 1)])
+            decline_pct = (prior_close - c_now) / prior_close * 100
+            if decline_pct < cfg["prior_decline_pct"]:
+                return self._hold(symbol, f"prior {n_dec}-bar decline {decline_pct:.1f}% < {cfg['prior_decline_pct']}%")
 
-        entry_ok = rejection_candle or rsi_turning_up
-        if regime != MarketRegime.BULL:
-            entry_ok = rejection_candle and lower_wick_pct >= 20 or rsi_turning_up
-
-        # ── Bear market emergency exit ────────────────────────
-        if _is_death_cross(df):
-            return PerplexitySignal(
-                symbol=symbol, strategy_name=self.name, direction="SELL",
-                entry_price=c_now, confidence=0.95,
-                reason="DEATH CROSS — SMA50 crossed below SMA200, exiting bull positions",
-                indicators={"sma50": round(sma50, 2), "sma200": round(sma200, 2)},
-            )
-
-        # ── Per-symbol calibration filters ───────────────────
-        from app.services.backtest.symbol_profiles import get_filters_for_symbol
-        _sym_filters = get_filters_for_symbol(self.name, symbol)
-        _f_wick = cfg["filter_lower_wick_min"] if cfg["filter_lower_wick_min"] > 0 else _sym_filters.get("lower_wick_min", 0.0)
-        _f_vol  = cfg["filter_vol_min"]        if cfg["filter_vol_min"]        > 0 else _sym_filters.get("vol_min", 0.0)
-
-        wick_ok = lower_wick_pct >= _f_wick if _f_wick > 0 else True
-
-        vol_ratio = 1.0
-        if "Volume" in df.columns:
-            avg_vol   = float(df["Volume"].iloc[-21:-1].mean()) if len(df) > 21 else 1.0
-            cur_vol   = float(df["Volume"].iloc[-1])
-            vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 1.0
-        vol_ok = vol_ratio >= _f_vol if _f_vol > 0 else True
-
-        # ── BUY ──────────────────────────────────────────────
-        atr_stop_mult = cfg["atr_stop_mult"]
-        if regime == MarketRegime.BEAR:
-            atr_stop_mult = min(atr_stop_mult, 1.25)
-        if entry_ok and cfg["rsi_oversold_low"] < rsi_now < cfg["rsi_oversold_hi"] \
-                and wick_ok and vol_ok:
-            stop   = hit_price - atr_stop_mult * atr_v
-            stop   = min(stop, l_now - 0.1 * atr_v)
-            risk   = c_now - stop
-            if risk < atr_v * 0.2:
-                return self._hold(symbol, "stop too tight at Fib level")
-            target       = swing_high
-            reason_parts = []
-            if rejection_candle:
-                reason_parts.append("rejection candle")
-            if rsi_turning_up:
-                reason_parts.append(f"RSI turning up ({rsi_now:.0f})")
-            return PerplexitySignal(
-                symbol=symbol, strategy_name=self.name, direction="BUY",
-                entry_price=round(c_now, 2),
-                stop_price=round(stop, 2),
-                target_price=round(target, 2),
-                confidence=0.76,
-                reason=f"Bull pullback to {hit_level:.1%} Fib (${hit_price:.2f}) — "
-                       + ", ".join(reason_parts),
-                indicators={
-                    "swing_low":  round(swing_low, 2),
-                    "swing_high": round(swing_high, 2),
-                    "fib_382":    round(fib_zones[0.382], 2),
-                    "fib_500":    round(fib_zones[0.50], 2),
-                    "fib_618":    round(fib_zones[0.618], 2),
-                    "hit_level":  f"{hit_level:.1%}",
-                    "hit_price":  round(hit_price, 2),
-                    "rsi":        round(rsi_now, 1),
-                    "sma50":      round(sma50, 2),
-                    "sma200":     round(sma200, 2),
-                    "atr":        round(atr_v, 2),
-                },
-            )
-
-        # ── SELL ─────────────────────────────────────────────
-        near_swing_high = c_now >= swing_high * 0.97
-        if near_swing_high or rsi_now > 74:
-            return PerplexitySignal(
-                symbol=symbol, strategy_name=self.name, direction="SELL",
-                entry_price=c_now, confidence=0.76,
-                reason=f"Approaching swing high ({swing_high:.2f}) — take profit"
-                       if near_swing_high else f"RSI {rsi_now:.0f} > 74 — overbought",
-                indicators={"swing_high": round(swing_high, 2), "rsi": round(rsi_now, 1)},
-            )
-
-        return self._hold(symbol)
+        # ── BUY ──
+        stop   = c_now * (1 - cfg["hard_stop_pct"] / 100)
+        target = c_now * (1 + cfg["take_profit_pct"] / 100)
+        return PerplexitySignal(
+            symbol=symbol, strategy_name=self.name, direction="BUY",
+            entry_price=round(c_now, 2),
+            stop_price=round(stop, 2),
+            target_price=round(target, 2),
+            confidence=0.80,
+            reason=f"Fear spike: ATR%={atr_pct:.1f}%, RSI={rsi_now:.0f}, BB%B={bb_pos:.2f}, wick={wick_ratio:.0%}",
+            indicators={
+                "atr_pct":   round(atr_pct, 2),
+                "rsi":       round(rsi_now, 1),
+                "bb_pos":    round(bb_pos, 3),
+                "wick_ratio": round(wick_ratio, 2),
+                "bb_lower":  round(float(bb_lower.iloc[-1]), 2),
+            },
+        )
