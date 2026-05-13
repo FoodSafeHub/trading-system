@@ -1,212 +1,478 @@
 [
   {
-    "name": "SPY_Supertrend",
-    "symbol": "SPY",
-    "type": "supertrend",
-    "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 2.0 }
-  },
-  {
-    "name": "SPY_VWAP_RSI",
-    "symbol": "SPY",
-    "type": "vwap_rsi",
-    "enabled": true,
-    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
-  },
-  {
-    "name": "SPY_EMA_Ribbon",
-    "symbol": "SPY",
-    "type": "ema_ribbon",
-    "enabled": true,
-    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
-  },
-  {
-    "name": "QQQ_Supertrend",
-    "symbol": "QQQ",
-    "type": "supertrend",
-    "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 2.0 }
-  },
-  {
-    "name": "QQQ_VWAP_RSI",
-    "symbol": "QQQ",
-    "type": "vwap_rsi",
-    "enabled": true,
-    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
-  },
-  {
-    "name": "QQQ_EMA_Ribbon",
-    "symbol": "QQQ",
-    "type": "ema_ribbon",
-    "enabled": true,
-    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
-  },
-  {
-    "name": "AAPL_Supertrend",
+    "name": "Legacy_AAPL_BB_Mean_Reversion",
     "symbol": "AAPL",
-    "type": "supertrend",
+    "type": "bollinger",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 2.0 }
+    "params": {
+      "bb_period": 20,
+      "bb_std": 2.0,
+      "rsi_low": 35,
+      "rsi_high": 50
+    }
   },
   {
-    "name": "AAPL_VWAP_RSI",
+    "name": "Legacy_AAPL_Fib_Pullback",
     "symbol": "AAPL",
-    "type": "vwap_rsi",
+    "type": "fib_pullback",
     "enabled": true,
-    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
+    "params": {
+      "lookback": 60,
+      "rsi_low": 35,
+      "rsi_high": 50,
+      "fib_tolerance": 0.015
+    }
   },
   {
-    "name": "AAPL_EMA_Ribbon",
-    "symbol": "AAPL",
-    "type": "ema_ribbon",
-    "enabled": true,
-    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
-  },
-  {
-    "name": "TSLA_Supertrend",
-    "symbol": "TSLA",
-    "type": "supertrend",
-    "enabled": true,
-    "params": { "st_period": 7, "st_multiplier": 3.5 }
-  },
-  {
-    "name": "TSLA_VWAP_RSI",
-    "symbol": "TSLA",
-    "type": "vwap_rsi",
-    "enabled": true,
-    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 38, "rsi_overbought": 68 }
-  },
-  {
-    "name": "TSLA_EMA_Ribbon",
-    "symbol": "TSLA",
-    "type": "ema_ribbon",
-    "enabled": true,
-    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
-  },
-  {
-    "name": "NVDA_Supertrend",
-    "symbol": "NVDA",
-    "type": "supertrend",
-    "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 2.0 }
-  },
-  {
-    "name": "NVDA_VWAP_RSI",
-    "symbol": "NVDA",
-    "type": "vwap_rsi",
-    "enabled": true,
-    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
-  },
-  {
-    "name": "NVDA_EMA_Ribbon",
-    "symbol": "NVDA",
-    "type": "ema_ribbon",
-    "enabled": true,
-    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
-  },
-  {
-    "name": "MSFT_Supertrend",
-    "symbol": "MSFT",
-    "type": "supertrend",
-    "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 2.0 }
-  },
-  {
-    "name": "MSFT_VWAP_RSI",
-    "symbol": "MSFT",
-    "type": "vwap_rsi",
-    "enabled": true,
-    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
-  },
-  {
-    "name": "MSFT_EMA_Ribbon",
+    "name": "Legacy_MSFT_EMA_Trend_Continuation",
     "symbol": "MSFT",
     "type": "ema_ribbon",
     "enabled": true,
-    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
+    "params": {
+      "ema_fast": 8,
+      "ema_mid": 21,
+      "ema_slow": 50,
+      "rsi_period": 14,
+      "rsi_low": 55,
+      "rsi_high": 68
+    }
   },
   {
-    "name": "AMZN_Supertrend",
-    "symbol": "AMZN",
-    "type": "supertrend",
+    "name": "Legacy_MSFT_Fib_Pullback",
+    "symbol": "MSFT",
+    "type": "fib_pullback",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 2.0 }
+    "params": {
+      "lookback": 60,
+      "rsi_low": 45,
+      "rsi_high": 60,
+      "fib_tolerance": 0.015
+    }
   },
   {
-    "name": "AMZN_VWAP_RSI",
-    "symbol": "AMZN",
-    "type": "vwap_rsi",
-    "enabled": true,
-    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
-  },
-  {
-    "name": "AMZN_EMA_Ribbon",
-    "symbol": "AMZN",
+    "name": "Legacy_SPY_EMA_Swing",
+    "symbol": "SPY",
     "type": "ema_ribbon",
     "enabled": true,
-    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
+    "params": {
+      "ema_fast": 8,
+      "ema_mid": 21,
+      "ema_slow": 50,
+      "rsi_period": 14,
+      "rsi_low": 55,
+      "rsi_high": 65
+    }
   },
   {
-    "name": "META_Supertrend",
-    "symbol": "META",
-    "type": "supertrend",
+    "name": "Legacy_SPY_Fib_Pullback",
+    "symbol": "SPY",
+    "type": "fib_pullback",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 2.0 }
+    "params": {
+      "lookback": 60,
+      "rsi_low": 40,
+      "rsi_high": 55,
+      "fib_tolerance": 0.015
+    }
   },
   {
-    "name": "META_VWAP_RSI",
-    "symbol": "META",
-    "type": "vwap_rsi",
-    "enabled": true,
-    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
-  },
-  {
-    "name": "META_EMA_Ribbon",
-    "symbol": "META",
-    "type": "ema_ribbon",
-    "enabled": true,
-    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
-  },
-  {
-    "name": "GOOGL_Supertrend",
+    "name": "Legacy_GOOGL_Breakout",
     "symbol": "GOOGL",
-    "type": "supertrend",
+    "type": "breakout",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 2.0 }
+    "params": {
+      "range_period": 20,
+      "rsi_low": 55,
+      "rsi_high": 70,
+      "rsi_period": 14
+    }
   },
   {
-    "name": "GOOGL_VWAP_RSI",
+    "name": "Legacy_GOOGL_BB_Mean_Reversion",
     "symbol": "GOOGL",
-    "type": "vwap_rsi",
+    "type": "bollinger",
     "enabled": true,
-    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
+    "params": {
+      "bb_period": 20,
+      "bb_std": 2.0,
+      "rsi_low": 30,
+      "rsi_high": 45
+    }
   },
   {
-    "name": "GOOGL_EMA_Ribbon",
+    "name": "AAPL_RSI2_Mean_Reversion",
+    "symbol": "AAPL",
+    "type": "rsi2_mean_reversion",
+    "enabled": true,
+    "params": {
+      "rsi_period": 2,
+      "rsi_entry_threshold": 10,
+      "rsi_exit_threshold": 70,
+      "sma_trend": 200,
+      "exit_sma": 5,
+      "hard_stop_pct": 5.0,
+      "take_profit_pct": 8.0,
+      "max_hold_bars": 10,
+      "atr_skip_threshold": 5.0
+    }
+  },
+  {
+    "name": "AAPL_EMA_MACD_Crossover",
+    "symbol": "AAPL",
+    "type": "ema_macd_crossover",
+    "enabled": true,
+    "params": {
+      "ema_fast": 9,
+      "ema_slow": 21,
+      "macd_fast": 12,
+      "macd_slow": 26,
+      "macd_signal": 9,
+      "rsi_period": 14,
+      "rsi_min": 45,
+      "rsi_max": 65,
+      "vol_ratio_min": 1.1,
+      "atr_stop_multiplier": 1.5,
+      "atr_tp_multiplier": 2.0,
+      "max_hold_bars": 20
+    }
+  },
+  {
+    "name": "AAPL_BB_Squeeze_Breakout",
+    "symbol": "AAPL",
+    "type": "bb_squeeze_breakout",
+    "enabled": true,
+    "params": {
+      "bb_period": 20,
+      "bb_std": 2.0,
+      "squeeze_bars": 5,
+      "rsi_period": 14,
+      "rsi_entry_min": 50,
+      "rsi_overbought": 80,
+      "vol_ratio_min": 1.3,
+      "max_hold_bars": 15
+    }
+  },
+  {
+    "name": "AAPL_Pullback_EMA50",
+    "symbol": "AAPL",
+    "type": "pullback_ema50",
+    "enabled": true,
+    "params": {
+      "ema_trend": 50,
+      "ema_slope_bars": 5,
+      "price_ema_proximity_pct": 1.0,
+      "rsi_period": 14,
+      "rsi_min": 35,
+      "rsi_max": 55,
+      "wick_ratio_min": 0.4,
+      "exit_rsi": 65,
+      "exit_extension_pct": 3.0,
+      "hard_stop_pct": 2.0,
+      "max_hold_bars": 20,
+      "bear_skip_threshold_pct": 10.0
+    }
+  },
+  {
+    "name": "AAPL_VIX_Spike_Reversal",
+    "symbol": "AAPL",
+    "type": "vix_spike_reversal",
+    "enabled": true,
+    "params": {
+      "atr_period": 14,
+      "atr_spike_threshold": 3.0,
+      "atr_exit_threshold": 2.0,
+      "rsi_period": 14,
+      "rsi_entry_max": 30,
+      "rsi_exit": 55,
+      "bb_pos_max": 0.15,
+      "wick_ratio_min": 0.5,
+      "prior_decline_pct": 2.0,
+      "prior_decline_bars": 3,
+      "hard_stop_pct": 4.0,
+      "take_profit_pct": 6.0,
+      "max_hold_bars": 8
+    }
+  },
+  {
+    "name": "MSFT_RSI2_Mean_Reversion",
+    "symbol": "MSFT",
+    "type": "rsi2_mean_reversion",
+    "enabled": true,
+    "params": {
+      "rsi_period": 2,
+      "rsi_entry_threshold": 10,
+      "rsi_exit_threshold": 70,
+      "sma_trend": 200,
+      "exit_sma": 5,
+      "hard_stop_pct": 5.0,
+      "take_profit_pct": 8.0,
+      "max_hold_bars": 10,
+      "atr_skip_threshold": 5.0
+    }
+  },
+  {
+    "name": "MSFT_EMA_MACD_Crossover",
+    "symbol": "MSFT",
+    "type": "ema_macd_crossover",
+    "enabled": true,
+    "params": {
+      "ema_fast": 9,
+      "ema_slow": 21,
+      "macd_fast": 12,
+      "macd_slow": 26,
+      "macd_signal": 9,
+      "rsi_period": 14,
+      "rsi_min": 45,
+      "rsi_max": 65,
+      "vol_ratio_min": 1.1,
+      "atr_stop_multiplier": 1.5,
+      "atr_tp_multiplier": 2.0,
+      "max_hold_bars": 20
+    }
+  },
+  {
+    "name": "MSFT_BB_Squeeze_Breakout",
+    "symbol": "MSFT",
+    "type": "bb_squeeze_breakout",
+    "enabled": true,
+    "params": {
+      "bb_period": 20,
+      "bb_std": 2.0,
+      "squeeze_bars": 5,
+      "rsi_period": 14,
+      "rsi_entry_min": 50,
+      "rsi_overbought": 80,
+      "vol_ratio_min": 1.3,
+      "max_hold_bars": 15
+    }
+  },
+  {
+    "name": "MSFT_Pullback_EMA50",
+    "symbol": "MSFT",
+    "type": "pullback_ema50",
+    "enabled": true,
+    "params": {
+      "ema_trend": 50,
+      "ema_slope_bars": 5,
+      "price_ema_proximity_pct": 1.0,
+      "rsi_period": 14,
+      "rsi_min": 35,
+      "rsi_max": 55,
+      "wick_ratio_min": 0.4,
+      "exit_rsi": 65,
+      "exit_extension_pct": 3.0,
+      "hard_stop_pct": 2.0,
+      "max_hold_bars": 20,
+      "bear_skip_threshold_pct": 10.0
+    }
+  },
+  {
+    "name": "MSFT_VIX_Spike_Reversal",
+    "symbol": "MSFT",
+    "type": "vix_spike_reversal",
+    "enabled": true,
+    "params": {
+      "atr_period": 14,
+      "atr_spike_threshold": 3.0,
+      "atr_exit_threshold": 2.0,
+      "rsi_period": 14,
+      "rsi_entry_max": 30,
+      "rsi_exit": 55,
+      "bb_pos_max": 0.15,
+      "wick_ratio_min": 0.5,
+      "prior_decline_pct": 2.0,
+      "prior_decline_bars": 3,
+      "hard_stop_pct": 4.0,
+      "take_profit_pct": 6.0,
+      "max_hold_bars": 8
+    }
+  },
+  {
+    "name": "GOOGL_RSI2_Mean_Reversion",
     "symbol": "GOOGL",
-    "type": "ema_ribbon",
+    "type": "rsi2_mean_reversion",
     "enabled": true,
-    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
+    "params": {
+      "rsi_period": 2,
+      "rsi_entry_threshold": 10,
+      "rsi_exit_threshold": 70,
+      "sma_trend": 200,
+      "exit_sma": 5,
+      "hard_stop_pct": 5.0,
+      "take_profit_pct": 8.0,
+      "max_hold_bars": 10,
+      "atr_skip_threshold": 5.0
+    }
   },
   {
-    "name": "JPM_Supertrend",
-    "symbol": "JPM",
-    "type": "supertrend",
+    "name": "GOOGL_EMA_MACD_Crossover",
+    "symbol": "GOOGL",
+    "type": "ema_macd_crossover",
     "enabled": true,
-    "params": { "st_period": 10, "st_multiplier": 2.0 }
+    "params": {
+      "ema_fast": 9,
+      "ema_slow": 21,
+      "macd_fast": 12,
+      "macd_slow": 26,
+      "macd_signal": 9,
+      "rsi_period": 14,
+      "rsi_min": 45,
+      "rsi_max": 65,
+      "vol_ratio_min": 1.1,
+      "atr_stop_multiplier": 1.5,
+      "atr_tp_multiplier": 2.0,
+      "max_hold_bars": 20
+    }
   },
   {
-    "name": "JPM_VWAP_RSI",
-    "symbol": "JPM",
-    "type": "vwap_rsi",
+    "name": "GOOGL_BB_Squeeze_Breakout",
+    "symbol": "GOOGL",
+    "type": "bb_squeeze_breakout",
     "enabled": true,
-    "params": { "vwap_period": 20, "rsi_period": 14, "rsi_oversold": 40, "rsi_overbought": 65 }
+    "params": {
+      "bb_period": 20,
+      "bb_std": 2.0,
+      "squeeze_bars": 5,
+      "rsi_period": 14,
+      "rsi_entry_min": 50,
+      "rsi_overbought": 80,
+      "vol_ratio_min": 1.3,
+      "max_hold_bars": 15
+    }
   },
   {
-    "name": "JPM_EMA_Ribbon",
-    "symbol": "JPM",
-    "type": "ema_ribbon",
+    "name": "GOOGL_Pullback_EMA50",
+    "symbol": "GOOGL",
+    "type": "pullback_ema50",
     "enabled": true,
-    "params": { "ema_fast": 8, "ema_mid": 21, "ema_slow": 50, "rsi_period": 14 }
+    "params": {
+      "ema_trend": 50,
+      "ema_slope_bars": 5,
+      "price_ema_proximity_pct": 1.0,
+      "rsi_period": 14,
+      "rsi_min": 35,
+      "rsi_max": 55,
+      "wick_ratio_min": 0.4,
+      "exit_rsi": 65,
+      "exit_extension_pct": 3.0,
+      "hard_stop_pct": 2.0,
+      "max_hold_bars": 20,
+      "bear_skip_threshold_pct": 10.0
+    }
+  },
+  {
+    "name": "GOOGL_VIX_Spike_Reversal",
+    "symbol": "GOOGL",
+    "type": "vix_spike_reversal",
+    "enabled": true,
+    "params": {
+      "atr_period": 14,
+      "atr_spike_threshold": 3.0,
+      "atr_exit_threshold": 2.0,
+      "rsi_period": 14,
+      "rsi_entry_max": 30,
+      "rsi_exit": 55,
+      "bb_pos_max": 0.15,
+      "wick_ratio_min": 0.5,
+      "prior_decline_pct": 2.0,
+      "prior_decline_bars": 3,
+      "hard_stop_pct": 4.0,
+      "take_profit_pct": 6.0,
+      "max_hold_bars": 8
+    }
+  },
+  {
+    "name": "SPY_RSI2_Mean_Reversion",
+    "symbol": "SPY",
+    "type": "rsi2_mean_reversion",
+    "enabled": true,
+    "params": {
+      "rsi_period": 2,
+      "rsi_entry_threshold": 10,
+      "rsi_exit_threshold": 70,
+      "sma_trend": 200,
+      "exit_sma": 5,
+      "hard_stop_pct": 5.0,
+      "take_profit_pct": 8.0,
+      "max_hold_bars": 10,
+      "atr_skip_threshold": 5.0
+    }
+  },
+  {
+    "name": "SPY_EMA_MACD_Crossover",
+    "symbol": "SPY",
+    "type": "ema_macd_crossover",
+    "enabled": true,
+    "params": {
+      "ema_fast": 9,
+      "ema_slow": 21,
+      "macd_fast": 12,
+      "macd_slow": 26,
+      "macd_signal": 9,
+      "rsi_period": 14,
+      "rsi_min": 45,
+      "rsi_max": 65,
+      "vol_ratio_min": 1.1,
+      "atr_stop_multiplier": 1.5,
+      "atr_tp_multiplier": 2.0,
+      "max_hold_bars": 20
+    }
+  },
+  {
+    "name": "SPY_BB_Squeeze_Breakout",
+    "symbol": "SPY",
+    "type": "bb_squeeze_breakout",
+    "enabled": true,
+    "params": {
+      "bb_period": 20,
+      "bb_std": 2.0,
+      "squeeze_bars": 5,
+      "rsi_period": 14,
+      "rsi_entry_min": 50,
+      "rsi_overbought": 80,
+      "vol_ratio_min": 1.3,
+      "max_hold_bars": 15
+    }
+  },
+  {
+    "name": "SPY_Pullback_EMA50",
+    "symbol": "SPY",
+    "type": "pullback_ema50",
+    "enabled": true,
+    "params": {
+      "ema_trend": 50,
+      "ema_slope_bars": 5,
+      "price_ema_proximity_pct": 1.0,
+      "rsi_period": 14,
+      "rsi_min": 35,
+      "rsi_max": 55,
+      "wick_ratio_min": 0.4,
+      "exit_rsi": 65,
+      "exit_extension_pct": 3.0,
+      "hard_stop_pct": 2.0,
+      "max_hold_bars": 20,
+      "bear_skip_threshold_pct": 10.0
+    }
+  },
+  {
+    "name": "SPY_VIX_Spike_Reversal",
+    "symbol": "SPY",
+    "type": "vix_spike_reversal",
+    "enabled": true,
+    "params": {
+      "atr_period": 14,
+      "atr_spike_threshold": 3.0,
+      "atr_exit_threshold": 2.0,
+      "rsi_period": 14,
+      "rsi_entry_max": 30,
+      "rsi_exit": 55,
+      "bb_pos_max": 0.15,
+      "wick_ratio_min": 0.5,
+      "prior_decline_pct": 2.0,
+      "prior_decline_bars": 3,
+      "hard_stop_pct": 4.0,
+      "take_profit_pct": 6.0,
+      "max_hold_bars": 8
+    }
   }
 ]

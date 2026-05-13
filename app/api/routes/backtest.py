@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections import defaultdict
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 
 from app.services.backtest.engine import run_backtest
@@ -8,6 +11,18 @@ from app.services.strategy.engine import load_strategies_from_config
 
 router = APIRouter(prefix="/backtest", tags=["backtest"])
 
+# New strategy type names — used for consensus defaults
+_NEW_STRATEGY_TYPES = {
+    "rsi2_mean_reversion",
+    "ema_macd_crossover",
+    "bb_squeeze_breakout",
+    "pullback_ema50",
+    "vix_spike_reversal",
+}
+
+# Symbols that use the 5 new strategies by default in consensus mode
+_NEW_STRATEGY_SYMBOLS = {"AAPL", "MSFT", "GOOGL", "SPY"}
+
 
 @router.get("/run/{strategy_name}")
 def backtest_strategy(
@@ -15,20 +30,26 @@ def backtest_strategy(
     period: str = "1y",
     initial_capital: float = 100000.0,
     quantity: float = 0.0,
+    symbol: Optional[str] = None,
 ):
     """
     Run a backtest for a named strategy from strategies.json.
-    period: 1mo, 3mo, 6mo, 1y, 2y
+
+    symbol  : override the symbol configured in strategies.json (optional)
+    period  : 1mo, 3mo, 6mo, 1y, 2y
     """
     configs = load_strategies_from_config()
     config = next((c for c in configs if c.name == strategy_name), None)
     if not config:
         raise HTTPException(status_code=404, detail=f"Strategy '{strategy_name}' not found")
 
+    # Allow caller to override the symbol
+    effective_symbol = symbol.upper() if symbol else config.symbol
+
     try:
         result = run_backtest(
             strategy_name=config.name,
-            symbol=config.symbol,
+            symbol=effective_symbol,
             strategy_type=config.type,
             params=config.params,
             period=period,
@@ -68,18 +89,28 @@ def backtest_consensus(
     min_agreement: int = 2,
     period: str = "1y",
     initial_capital: float = 100000.0,
+    new_only: bool = True,
 ):
     """
-    Run a consensus backtest for a symbol using all its configured strategies.
-    Only trades when min_agreement strategies agree on the same direction.
+    Run a consensus backtest for a symbol.
+
+    new_only=True (default): uses only the 5 new strategies for AAPL/MSFT/GOOGL/SPY.
+    new_only=False          : uses all configured strategies for the symbol.
     """
+    sym = symbol.upper()
     configs = load_strategies_from_config()
-    symbol_configs = [c for c in configs if c.symbol == symbol.upper()]
+    symbol_configs = [c for c in configs if c.symbol == sym]
     if not symbol_configs:
         raise HTTPException(status_code=404, detail=f"No strategies configured for symbol '{symbol}'")
 
+    # For canonical symbols, filter to new strategies only by default
+    if new_only and sym in _NEW_STRATEGY_SYMBOLS:
+        new_configs = [c for c in symbol_configs if c.type in _NEW_STRATEGY_TYPES]
+        if new_configs:
+            symbol_configs = new_configs
+
     try:
-        result = run_consensus_backtest(symbol.upper(), symbol_configs, min_agreement, period, initial_capital)
+        result = run_consensus_backtest(sym, symbol_configs, min_agreement, period, initial_capital)
         return {
             "symbol": result.symbol,
             "period": result.period,
@@ -107,21 +138,33 @@ def backtest_consensus(
 
 
 @router.get("/consensus-symbols")
-def list_consensus_symbols():
-    """List symbols that have 2+ strategies configured (eligible for consensus backtest)."""
+def list_consensus_symbols(new_only: bool = False):
+    """
+    List symbols that have 2+ strategies configured.
+
+    new_only=True : only counts the 5 new strategy types.
+    """
     configs = load_strategies_from_config()
-    from collections import defaultdict
     by_symbol: dict = defaultdict(list)
     for c in configs:
+        if new_only and c.type not in _NEW_STRATEGY_TYPES:
+            continue
         by_symbol[c.symbol].append(c.name)
     return [
         {"symbol": sym, "strategy_count": len(names), "strategies": names}
         for sym, names in sorted(by_symbol.items())
+        if len(names) >= 2
     ]
 
 
 @router.get("/strategies")
-def list_backtest_strategies():
-    """List all strategies available for backtesting."""
+def list_backtest_strategies(new_only: bool = False):
+    """
+    List all strategies available for backtesting.
+
+    new_only=True : only the 5 new strategies.
+    """
     configs = load_strategies_from_config()
+    if new_only:
+        configs = [c for c in configs if c.type in _NEW_STRATEGY_TYPES]
     return [{"name": c.name, "symbol": c.symbol, "type": c.type} for c in configs]
