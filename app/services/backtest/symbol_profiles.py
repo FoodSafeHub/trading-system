@@ -37,9 +37,12 @@ class SymbolFilterProfile:
     # MA_Crossover_RSI
     ema_spread_min: float = 0.0   # min fast/slow EMA spread % (wider = stronger momentum)
 
-    # BB_Mean_Reversion
-    atr_pct_max: float = 0.0      # max ATR% of price (avoid entering during volatility spikes)
-    bb_depth_min: float = 0.0     # min depth below BB lower band as % of band width (deeper = stronger signal)
+    # BB_Mean_Reversion — use actual top discriminators (RSI, bb_pct, ema_dist, atr)
+    atr_pct_max: float = 0.0      # max ATR% of price (avoid volatility spikes)
+    bb_depth_min: float = 0.0     # min depth below BB lower band as % of band width
+    rsi_min: float = 0.0          # min RSI at entry (winners have higher RSI = recovery already starting)
+    bb_pct_min: float = 0.0       # min BB% position at entry (0=lower, 1=upper)
+    ema_dist_pct_min: float = 0.0 # min EMA20 dist% (positive = above EMA, less negative = less extended)
 
     # Breakout_Consolidation — reuses atr_pct_max field as range_atr_max (range/ATR ratio cap)
 
@@ -254,12 +257,15 @@ def calibrate_from_snapshots(
     vol_min = _calibrate_indicator("volume_ratio", higher_is_better=True)
 
     # ── Strategy-specific indicator calibration ────────────────
-    ema_dist_min   = 0.0
-    bb_pos_min     = 0.0
-    ema_spread_min = 0.0
-    atr_pct_max    = 0.0
-    bb_depth_min   = 0.0
-    lower_wick_min = 0.0
+    ema_dist_min     = 0.0
+    bb_pos_min       = 0.0
+    ema_spread_min   = 0.0
+    atr_pct_max      = 0.0
+    bb_depth_min     = 0.0
+    lower_wick_min   = 0.0
+    rsi_min          = 0.0
+    bb_pct_min       = 0.0
+    ema_dist_pct_min = 0.0
 
     if strategy == "EMA_Mean_Reversion":
         # Higher EMA distance and higher BB position both correlate with stronger pullback quality
@@ -277,9 +283,59 @@ def calibrate_from_snapshots(
         atr_pct_max = _calibrate_indicator("range_atr_ratio", higher_is_better=False)
 
     elif strategy == "BB_Mean_Reversion":
-        # Lower ATR% = calmer regime; deeper BB touch = stronger oversold signal
-        atr_pct_max  = _calibrate_indicator("atr_pct",      higher_is_better=False)
-        bb_depth_min = _calibrate_indicator("bb_depth_pct", higher_is_better=True)
+        # RSI is the top discriminator (d~1.4): winners enter with RSI already recovering (higher)
+        # bb_pct (BB position): winners are higher in the band = price already bouncing
+        # ema_dist_pct: winners are closer to / above EMA20 = not in a downtrend
+        # atr_pct: calmer regime = better mean reversion environment
+        atr_pct_max      = _calibrate_indicator("atr_pct",      higher_is_better=False)
+        bb_depth_min     = _calibrate_indicator("bb_depth_pct", higher_is_better=True)
+        rsi_min          = _calibrate_indicator("rsi",          higher_is_better=True)
+        bb_pct_min       = _calibrate_indicator("bb_pct",       higher_is_better=True)
+        ema_dist_pct_min = _calibrate_indicator("ema_dist_pct", higher_is_better=True)
+
+        # Combined survival check: if all filters together cut more than 60% of trades,
+        # progressively disable the weakest ones (ema_dist first, then bb_pct, then rsi)
+        # until survival >= 40% — keeps meaningful filters without over-pruning.
+        def _combined_survival(thresholds_dict):
+            surviving = snapshots
+            for key, (thresh, direction) in thresholds_dict.items():
+                if thresh == 0.0:
+                    continue
+                if direction == "min":
+                    surviving = [s for s in surviving if (_get(s, key) or 0) >= thresh]
+                else:
+                    surviving = [s for s in surviving if (_get(s, key) or 999) <= thresh]
+            return len(surviving) / len(snapshots) if snapshots else 1.0
+
+        filters_bb = {
+            "rsi":          (rsi_min,          "min"),
+            "bb_pct":       (bb_pct_min,        "min"),
+            "ema_dist_pct": (ema_dist_pct_min,  "min"),
+            "atr_pct":      (atr_pct_max,       "max"),
+        }
+        # Relax filters one at a time until combined survival >= 40%.
+        # Sort by individual impact (lowest individual survival = most restrictive = relax last).
+        def _individual_survival(key, thresh, direction):
+            if thresh == 0.0:
+                return 1.0
+            if direction == "min":
+                return sum(1 for s in snapshots if (_get(s, key) or 0) >= thresh) / len(snapshots)
+            return sum(1 for s in snapshots if (_get(s, key) or 999) <= thresh) / len(snapshots)
+
+        # Compute individual survival for each active filter; relax those with highest
+        # individual survival first (least impactful filters come off first)
+        active_filters = [(k, t, d) for k, (t, d) in filters_bb.items() if t != 0.0]
+        active_filters.sort(key=lambda x: _individual_survival(x[0], x[1], x[2]), reverse=True)
+
+        for relax_key, _, _ in active_filters:
+            if _combined_survival(filters_bb) >= 0.40:
+                break
+            filters_bb[relax_key] = (0.0, filters_bb[relax_key][1])
+
+        rsi_min          = filters_bb["rsi"][0]
+        bb_pct_min       = filters_bb["bb_pct"][0]
+        ema_dist_pct_min = filters_bb["ema_dist_pct"][0]
+        atr_pct_max      = filters_bb["atr_pct"][0]
 
     elif strategy == "Fib_Pullback_Support":
         # Larger lower wick = stronger rejection candle at Fib level
@@ -309,6 +365,9 @@ def calibrate_from_snapshots(
         atr_pct_max=atr_pct_max,
         bb_depth_min=bb_depth_min,
         lower_wick_min=lower_wick_min,
+        rsi_min=rsi_min,
+        bb_pct_min=bb_pct_min,
+        ema_dist_pct_min=ema_dist_pct_min,
         win_ema_dist_mean=round(_mean(w_ema), 3),
         loss_ema_dist_mean=round(_mean(l_ema), 3),
         win_vol_mean=round(_mean(w_vol), 3),
@@ -335,7 +394,14 @@ def get_filters_for_symbol(strategy: str, symbol: str) -> dict:
     if strategy == "Breakout_Consolidation":
         return {"vol_min": profile.vol_min, "atr_pct_max": profile.atr_pct_max}
     if strategy == "BB_Mean_Reversion":
-        return {"vol_min": profile.vol_min, "atr_pct_max": profile.atr_pct_max, "bb_depth_min": profile.bb_depth_min}
+        return {
+            "vol_min":          profile.vol_min,
+            "atr_pct_max":      profile.atr_pct_max,
+            "bb_depth_min":     profile.bb_depth_min,
+            "rsi_min":          profile.rsi_min,
+            "bb_pct_min":       profile.bb_pct_min,
+            "ema_dist_pct_min": profile.ema_dist_pct_min,
+        }
     if strategy == "Fib_Pullback_Support":
         return {"lower_wick_min": profile.lower_wick_min, "vol_min": profile.vol_min}
     return {}

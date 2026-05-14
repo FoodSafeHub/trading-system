@@ -498,9 +498,12 @@ class BollingerMeanReversionUptrend(PerplexityStrategy):
         "max_hold_bars":            20,
         "bear_skip_threshold_pct":  10.0, # skip if price > 10% below SMA200
         # ── Calibration filters ──
-        "filter_vol_min":      0.0,
-        "filter_atr_pct_max":  0.0,
-        "filter_bb_depth_min": 0.0,
+        "filter_vol_min":          0.0,
+        "filter_atr_pct_max":      0.0,
+        "filter_bb_depth_min":     0.0,
+        "filter_rsi_min":          0.0,   # calibrated: min RSI at entry
+        "filter_bb_pct_min":       0.0,   # calibrated: min BB% position (price in band)
+        "filter_ema_dist_pct_min": 0.0,   # calibrated: min EMA20 distance %
     }
 
     def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None, **kwargs) -> PerplexitySignal:
@@ -546,6 +549,25 @@ class BollingerMeanReversionUptrend(PerplexityStrategy):
 
         if wick_ratio < cfg["wick_ratio_min"]:
             return self._hold(symbol, f"wick ratio {wick_ratio:.2f} < {cfg['wick_ratio_min']} — no rejection")
+
+        # ── Calibrated filters (set by optimizer, 0.0 = disabled) ──
+        if cfg.get("filter_rsi_min", 0.0) > 0 and rsi_now < cfg["filter_rsi_min"]:
+            return self._hold(symbol, f"RSI={rsi_now:.1f} < calibrated min {cfg['filter_rsi_min']}")
+
+        bb_upper_now, bb_mid_now, bb_lower_now = _bb_bands(close, 20, 2.0)
+        bw_cal = float(bb_upper_now.iloc[-1]) - float(bb_lower_now.iloc[-1])
+        bb_pct_now = (c_now - float(bb_lower_now.iloc[-1])) / bw_cal if bw_cal > 0 else 0.5
+        if cfg.get("filter_bb_pct_min", 0.0) > 0 and bb_pct_now < cfg["filter_bb_pct_min"]:
+            return self._hold(symbol, f"BB%={bb_pct_now:.2f} < calibrated min {cfg['filter_bb_pct_min']}")
+
+        ema20_now = float(_ema(close, 20).iloc[-1])
+        ema_dist = (c_now - ema20_now) / ema20_now * 100 if ema20_now > 0 else 0.0
+        if cfg.get("filter_ema_dist_pct_min", 0.0) != 0.0 and ema_dist < cfg["filter_ema_dist_pct_min"]:
+            return self._hold(symbol, f"EMA dist={ema_dist:.1f}% < calibrated min {cfg['filter_ema_dist_pct_min']}")
+
+        atr_pct_now = _current_atr(df, 14) / c_now * 100 if c_now > 0 else 0.0
+        if cfg.get("filter_atr_pct_max", 0.0) > 0 and atr_pct_now > cfg["filter_atr_pct_max"]:
+            return self._hold(symbol, f"ATR%={atr_pct_now:.1f} > calibrated max {cfg['filter_atr_pct_max']}")
 
         # ── BUY ──
         stop   = c_now * (1 - cfg["hard_stop_pct"] / 100)

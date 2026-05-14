@@ -231,9 +231,8 @@ if st.button("▶ Run Now", type="primary"):
             if rows:
                 df = pd.DataFrame(rows)
                 def _dir(v):
-                    if str(v).upper() == "BUY":  return "🟢 BUY"
-                    if str(v).upper() == "SELL": return "🔴 SELL"
-                    return "⬜ HOLD"
+                    v = str(v).upper()
+                    return "🟢 BUY" if v == "BUY" else ("🔴 SELL" if v == "SELL" else "⬜ HOLD")
                 def _consensus(row):
                     if row.get("direction") == "HOLD": return "—"
                     met = row.get("consensus_met", False)
@@ -286,12 +285,10 @@ try:
     sigs = api.signals()
     if sigs:
         df = pd.DataFrame(sigs)
-        def _tag(v):
-            if str(v).upper() == "BUY":  return "🟢 BUY"
-            if str(v).upper() == "SELL": return "🔴 SELL"
-            return "⬜ HOLD"
         if "direction" in df.columns:
-            df["direction"] = df["direction"].apply(_tag)
+            df["direction"] = df["direction"].apply(
+                lambda v: "🟢 BUY" if str(v).upper() == "BUY" else ("🔴 SELL" if str(v).upper() == "SELL" else "⬜ HOLD")
+            )
         st.dataframe(df, use_container_width=True, hide_index=True)
     else:
         st.info("No signals yet. Run a strategy cycle or wait for the scheduler to fire during market hours.")

@@ -48,10 +48,125 @@ STRATEGY_DESCRIPTIONS = {
 
 SYMBOLS = ["SPY", "QQQ", "IWM", "AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "META", "GOOGL"]
 
+# ── Shared indicator label map ─────────────────────────────────
+INDICATOR_LABELS = {
+    "rsi":             "RSI at Entry",
+    "atr_pct":         "Volatility (ATR%)",
+    "ema_dist_pct":    "EMA20 Distance %",
+    "sma200_dist_pct": "SMA200 Distance %",
+    "bb_pct":          "BB Band Position (0=lower, 1=upper)",
+    "volume_ratio":    "Volume vs 20d Avg",
+    "body_pct":        "Candle Body Size (x ATR)",
+    "lower_wick_pct":  "Lower Wick % of Range (rejection)",
+    "upper_wick_pct":  "Upper Wick % of Range",
+    "hold_bars":       "Hold Duration (bars)",
+    "ema_spread_pct":  "EMA20/50 Spread % (MA Crossover momentum)",
+    "range_atr_ratio": "Base Range / ATR (Breakout tightness)",
+    "bb_depth_pct":    "BB Lower Band Depth % (BB oversold severity)",
+    "fib_level":       "Fibonacci Level Hit (0.382 / 0.50 / 0.618)",
+}
+
+
+def _timing_chart(data: dict, title: str, container):
+    """Bar chart of win rate by time bucket (month / quarter / weekday)."""
+    if not data:
+        return
+    labels = list(data.keys())
+    wr     = [data[k]["win_rate"] for k in labels]
+    trades = [data[k]["trades"]   for k in labels]
+    avg_p  = [data[k].get("avg_pnl_pct", 0) for k in labels]
+    colors = ["#00d4aa" if w >= 55 else ("#FFD700" if w >= 45 else "#ff4b4b") for w in wr]
+    fig = go.Figure(go.Bar(
+        x=labels, y=wr, marker_color=colors,
+        text=[f"{w:.0f}%<br>({t}t)" for w, t in zip(wr, trades)],
+        textposition="outside",
+        hovertext=[f"Win rate: {w:.0f}%<br>Trades: {t}<br>Avg P&L: {p:+.1f}%"
+                   for w, t, p in zip(wr, trades, avg_p)],
+        hoverinfo="text",
+    ))
+    fig.add_hline(y=50, line_dash="dash", line_color="rgba(255,255,255,0.3)", annotation_text="50%")
+    fig.update_layout(
+        title=title, height=250, template="plotly_dark",
+        margin=dict(l=0, r=0, t=40, b=0),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(range=[0, 110], title="Win Rate %"),
+    )
+    container.plotly_chart(fig, use_container_width=True)
+
+
+def _breakdown_tables(bd: dict):
+    """Render by-regime / by-volatility / by-R-bucket breakdown tables from a backtest result."""
+    def _bt_table(rows_data: dict, label_key: str, section_title: str):
+        if not rows_data:
+            return
+        rows = [{
+            label_key:   key.title(),
+            "Trades":    v["total_trades"],
+            "Win Rate":  f"{v['win_rate_pct']:.1f}%",
+            "PF":        v["profit_factor"] if v["profit_factor"] else "—",
+            "Expectancy":f"{v['expectancy_pct']:+.2f}%",
+            "Avg Hold":  f"{v['average_holding_days']:.1f}",
+        } for key, v in rows_data.items()]
+        st.write(f"**{section_title}**")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    _bt_table(bd.get("by_regime",     {}), "Regime",     "By regime")
+    _bt_table(bd.get("by_volatility", {}), "Volatility", "By volatility bucket")
+    if bd.get("by_r_bucket"):
+        rows = [{
+            "R bucket":  key,
+            "Trades":    v["total_trades"],
+            "Win Rate":  f"{v['win_rate_pct']:.1f}%",
+            "PF":        v["profit_factor"] if v["profit_factor"] else "—",
+            "Expectancy":f"{v['expectancy_pct']:+.2f}%",
+            "Avg Hold":  f"{v['average_holding_days']:.1f}",
+        } for key, v in bd["by_r_bucket"].items()]
+        st.write("**By R bucket**")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def _plot_equity_curve(result: dict, height: int = 380, show_markers: bool = True) -> None:
+    """Render a dark-themed equity curve from a backtest result dict."""
+    if not result.get("equity_curve"):
+        return
+    eq_df = pd.DataFrame(result["equity_curve"])
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=eq_df["date"], y=eq_df["equity"],
+        fill="tozeroy", fillcolor="rgba(0,212,170,0.08)",
+        line=dict(color="#00d4aa", width=2), name="Portfolio Value",
+    ))
+    if result.get("initial_capital"):
+        fig.add_hline(y=result["initial_capital"], line_dash="dash",
+                      line_color="rgba(255,255,255,0.3)", annotation_text="Starting Capital")
+    if show_markers and result.get("trades"):
+        buys  = [t for t in result["trades"] if t["side"] == "BUY"]
+        sells = [t for t in result["trades"] if "SELL" in t["side"]]
+        if buys:
+            bx = [t["date"] for t in buys]
+            by = [next((e["equity"] for e in result["equity_curve"] if e["date"] == d), None) for d in bx]
+            fig.add_trace(go.Scatter(x=bx, y=by, mode="markers",
+                marker=dict(symbol="triangle-up", size=10, color="#00d4aa"), name="BUY"))
+        if sells:
+            sx = [t["date"] for t in sells]
+            sy = [next((e["equity"] for e in result["equity_curve"] if e["date"] == d), None) for d in sx]
+            fig.add_trace(go.Scatter(x=sx, y=sy, mode="markers",
+                marker=dict(symbol="triangle-down", size=10, color="#ff4b4b"), name="SELL"))
+    fig.update_layout(
+        height=height, template="plotly_dark",
+        margin=dict(l=0, r=0, t=20, b=0),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        yaxis_tickprefix="$",
+    )
+    fig.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
+    fig.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
+    st.plotly_chart(fig, use_container_width=True)
+
+
 # ── Tab layout ────────────────────────────────────────────────
-tab_signals, tab_sizer, tab_backtest, tab_compare, tab_portfolio, tab_walkforward, tab_profiles, tab_config = st.tabs([
+tab_signals, tab_sizer, tab_backtest, tab_compare, tab_portfolio, tab_walkforward, tab_profiles, tab_analysis, tab_config = st.tabs([
     "📡 Live Signals", "📐 Position Sizer", "🔬 Backtest", "📊 Compare All",
-    "🗂 Portfolio", "🔀 Walk-Forward", "🎯 Symbol Profiles", "⚙️ Config"
+    "🗂 Portfolio", "🔀 Walk-Forward", "🎯 Symbol Profiles", "🔍 Analysis", "⚙️ Config"
 ])
 
 # ══════════════════════════════════════════════════════════════
@@ -438,38 +553,7 @@ with tab_backtest:
         c11.metric("Expectancy",  f"{r.get('expectancy_pct', 0):+.2f}%")
         c12.metric("Avg Hold",    f"{r.get('average_holding_days', 0):.1f} bars")
 
-        # Equity curve
-        if r.get("equity_curve"):
-            eq_df = pd.DataFrame(r["equity_curve"])
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=eq_df["date"], y=eq_df["equity"],
-                fill="tozeroy", fillcolor="rgba(0,212,170,0.1)",
-                line=dict(color="#00d4aa", width=2), name="Portfolio Value",
-            ))
-            fig.add_hline(y=r["initial_capital"], line_dash="dash",
-                          line_color="rgba(255,255,255,0.3)", annotation_text="Starting Capital")
-
-            buys  = [t for t in r["trades"] if t["side"] == "BUY"]
-            sells = [t for t in r["trades"] if "SELL" in t["side"]]
-            if buys:
-                bx = [t["date"] for t in buys]
-                by = [next((e["equity"] for e in r["equity_curve"] if e["date"] == d), None) for d in bx]
-                fig.add_trace(go.Scatter(x=bx, y=by, mode="markers",
-                    marker=dict(symbol="triangle-up", size=10, color="#00d4aa"), name="BUY"))
-            if sells:
-                sx = [t["date"] for t in sells]
-                sy = [next((e["equity"] for e in r["equity_curve"] if e["date"] == d), None) for d in sx]
-                fig.add_trace(go.Scatter(x=sx, y=sy, mode="markers",
-                    marker=dict(symbol="triangle-down", size=10, color="#ff4b4b"), name="SELL"))
-
-            fig.update_layout(height=380, template="plotly_dark",
-                              margin=dict(l=0, r=0, t=20, b=0),
-                              paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                              yaxis_tickprefix="$")
-            fig.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-            fig.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
-            st.plotly_chart(fig, use_container_width=True)
+        _plot_equity_curve(r)
 
         # Trade log
         if r.get("trades"):
@@ -500,318 +584,16 @@ with tab_backtest:
 
         if r.get("breakdown"):
             st.divider()
-            bd = r["breakdown"]
             with st.expander("📊 Performance Breakdown", expanded=False):
-                regimes = bd.get("by_regime", {})
-                if regimes:
-                    regime_rows = [
-                        {
-                            "Regime": key.title(),
-                            "Trades": v["total_trades"],
-                            "Win Rate": f"{v['win_rate_pct']:.1f}%",
-                            "PF": v["profit_factor"] if v["profit_factor"] else "—",
-                            "Expectancy": f"{v['expectancy_pct']:+.2f}%",
-                            "Avg Hold": f"{v['average_holding_days']:.1f}"
-                        }
-                        for key, v in regimes.items()
-                    ]
-                    st.write("**By regime**")
-                    st.dataframe(pd.DataFrame(regime_rows), use_container_width=True, hide_index=True)
+                _breakdown_tables(r["breakdown"])
 
-                volatility = bd.get("by_volatility", {})
-                if volatility:
-                    vol_rows = [
-                        {
-                            "Volatility": key.title(),
-                            "Trades": v["total_trades"],
-                            "Win Rate": f"{v['win_rate_pct']:.1f}%",
-                            "PF": v["profit_factor"] if v["profit_factor"] else "—",
-                            "Expectancy": f"{v['expectancy_pct']:+.2f}%",
-                            "Avg Hold": f"{v['average_holding_days']:.1f}"
-                        }
-                        for key, v in volatility.items()
-                    ]
-                    st.write("**By volatility bucket**")
-                    st.dataframe(pd.DataFrame(vol_rows), use_container_width=True, hide_index=True)
-
-                r_buckets = bd.get("by_r_bucket", {})
-                if r_buckets:
-                    r_rows = [
-                        {
-                            "R bucket": key,
-                            "Trades": v["total_trades"],
-                            "Win Rate": f"{v['win_rate_pct']:.1f}%",
-                            "PF": v["profit_factor"] if v["profit_factor"] else "—",
-                            "Expectancy": f"{v['expectancy_pct']:+.2f}%",
-                            "Avg Hold": f"{v['average_holding_days']:.1f}"
-                        }
-                        for key, v in r_buckets.items()
-                    ]
-                    st.write("**By R bucket**")
-                    st.dataframe(pd.DataFrame(r_rows), use_container_width=True, hide_index=True)
-
-        # ── Trade Analyzer ────────────────────────────────────
         st.divider()
-        with st.expander("🔬 Trade Pattern Analyzer — what conditions produce wins vs losses?", expanded=False):
-            st.caption(
-                "Snapshots every indicator at the entry bar of each trade, then compares "
-                "winning vs losing distributions to find what conditions actually predict success."
-            )
-            an_col1, an_col2 = st.columns([2, 1])
-            with an_col1:
-                st.write(f"Strategy: **{chosen_strat}** | Symbol: **{bt_symbol}** | Period: **{bt_period}**")
-            with an_col2:
-                run_analyze = st.button("🔍 Analyze Trade Patterns", key="px_analyze",
-                                        use_container_width=True)
-
-            if run_analyze:
-                with st.spinner("Analyzing trade patterns..."):
-                    try:
-                        analysis = api.perplexity_analyze(chosen_strat, bt_symbol,
-                                                          period=bt_period,
-                                                          initial_capital=bt_capital,
-                                                          position_pct=bt_pos_pct)
-                        st.session_state["px_analysis"] = analysis
-                    except Exception as e:
-                        st.error(f"Analysis failed: {e}")
-
-            an = st.session_state.get("px_analysis")
-            if an and an.get("strategy_name") == chosen_strat and an.get("symbol") == bt_symbol:
-                snapshots = an.get("snapshots", [])
-                patterns  = an.get("patterns", [])
-                timing    = an.get("timing", {})
-                msg       = an.get("message", "")
-
-                wins   = [s for s in snapshots if s["outcome"] == "win"]
-                losses = [s for s in snapshots if s["outcome"] == "loss"]
-
-                if not snapshots:
-                    if msg:
-                        st.warning(msg)
-                    else:
-                        st.warning("Not enough trades to analyze (need at least 6 completed trades). "
-                                   "Try a longer period or a different symbol.")
-                else:
-                    # ── Summary header ────────────────────────
-                    avg_win  = sum(s["pnl_pct"] for s in wins)  / len(wins)  if wins  else 0
-                    avg_loss = sum(s["pnl_pct"] for s in losses) / len(losses) if losses else 0
-                    avg_hold = sum(s["hold_bars"] for s in snapshots) / len(snapshots)
-                    sm1, sm2, sm3, sm4 = st.columns(4)
-                    sm1.metric("Trades analyzed", len(snapshots))
-                    sm2.metric("Win rate", f"{len(wins)/len(snapshots)*100:.0f}%",
-                               delta=f"{len(wins)}W / {len(losses)}L", delta_color="off")
-                    sm3.metric("Avg win", f"{avg_win:+.1f}%",
-                               delta=f"loss avg {avg_loss:+.1f}%", delta_color="off")
-                    sm4.metric("Avg hold", f"{avg_hold:.0f} bars")
-                    st.divider()
-
-                    # ── P&L distribution (most important trader view) ──
-                    pnl_w = [s["pnl_pct"] for s in wins]
-                    pnl_l = [s["pnl_pct"] for s in losses]
-                    if pnl_w or pnl_l:
-                        fig_pnl = go.Figure()
-                        if pnl_w:
-                            fig_pnl.add_trace(go.Histogram(
-                                x=pnl_w, name="Wins", nbinsx=12,
-                                marker_color="rgba(0,212,170,0.75)", opacity=0.8))
-                        if pnl_l:
-                            fig_pnl.add_trace(go.Histogram(
-                                x=pnl_l, name="Losses", nbinsx=12,
-                                marker_color="rgba(255,75,75,0.75)", opacity=0.8))
-                        fig_pnl.add_vline(x=0, line_color="rgba(255,255,255,0.4)", line_dash="dash")
-                        fig_pnl.update_layout(
-                            barmode="overlay",
-                            title="P&L % Distribution — Wins vs Losses",
-                            height=260, template="plotly_dark",
-                            margin=dict(l=0, r=0, t=40, b=0),
-                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                            xaxis_title="P&L %", yaxis_title="# Trades",
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                        )
-                        fig_pnl.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
-                        fig_pnl.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-                        st.plotly_chart(fig_pnl, use_container_width=True)
-
-                    # ── Top discriminating indicators ─────────
-                    LABEL_MAP = {
-                        "rsi":             "RSI at Entry",
-                        "atr_pct":         "Volatility (ATR%)",
-                        "ema_dist_pct":    "EMA20 Distance %",
-                        "sma200_dist_pct": "SMA200 Distance %",
-                        "bb_pct":          "BB Band Position (0=lower, 1=upper)",
-                        "volume_ratio":    "Volume vs 20d Avg",
-                        "body_pct":        "Candle Body Size (x ATR)",
-                        "lower_wick_pct":  "Lower Wick % of Range (rejection)",
-                        "upper_wick_pct":  "Upper Wick % of Range",
-                        "hold_bars":       "Hold Duration (bars)",
-                        # Strategy-specific
-                        "ema_spread_pct":  "EMA20/50 Spread % (MA Crossover momentum)",
-                        "range_atr_ratio": "Base Range / ATR (Breakout tightness)",
-                        "bb_depth_pct":    "BB Lower Band Depth % (BB oversold severity)",
-                        "fib_level":       "Fibonacci Level Hit (0.382 / 0.50 / 0.618)",
-                    }
-
-                    if patterns:
-                        st.subheader("📊 What Separates Wins from Losses")
-                        st.caption(
-                            "Each row shows how strongly an indicator at entry bar predicted outcome. "
-                            "**Separation > 0.5** = reliable filter worth applying. "
-                            "Suggestion is derived from the win distribution's 20th–80th percentile."
-                        )
-
-                        for p in patterns[:8]:
-                            label = LABEL_MAP.get(p["indicator"], p["indicator"])
-                            sep   = p["separation"]
-                            strength = ("🔴 **Strong**" if sep > 0.6
-                                        else ("🟡 Moderate" if sep > 0.3 else "⚪ Weak"))
-                            with st.container():
-                                c1, c2, c3, c4 = st.columns([2.5, 1, 1, 1])
-                                c1.markdown(f"**{label}**")
-                                c2.metric("Win avg",  f"{p['win_mean']:.2f}")
-                                c3.metric("Loss avg", f"{p['loss_mean']:.2f}",
-                                          delta=f"{p['win_mean'] - p['loss_mean']:+.2f}",
-                                          delta_color="normal" if p["direction"] == "higher_is_better" else "inverse")
-                                c4.metric("Separation", f"{sep:.2f}", delta=strength, delta_color="off")
-                                st.caption(f"   💡 {p['recommendation']}")
-                                st.write("")
-
-                        # Distribution of top indicator
-                        top       = patterns[0]
-                        top_label = LABEL_MAP.get(top["indicator"], top["indicator"])
-                        w_vals    = [s[top["indicator"]] for s in wins   if s.get(top["indicator"]) is not None]
-                        l_vals    = [s[top["indicator"]] for s in losses if s.get(top["indicator"]) is not None]
-                        if w_vals and l_vals:
-                            fig_dist = go.Figure()
-                            fig_dist.add_trace(go.Histogram(
-                                x=w_vals, name="Wins", nbinsx=15,
-                                marker_color="rgba(0,212,170,0.7)", opacity=0.75))
-                            fig_dist.add_trace(go.Histogram(
-                                x=l_vals, name="Losses", nbinsx=15,
-                                marker_color="rgba(255,75,75,0.7)", opacity=0.75))
-                            if top.get("suggested_min") is not None:
-                                fig_dist.add_vline(x=top["suggested_min"], line_dash="dash",
-                                                   line_color="#FFD700",
-                                                   annotation_text=f"Min: {top['suggested_min']:.2f}")
-                            if top.get("suggested_max") is not None:
-                                fig_dist.add_vline(x=top["suggested_max"], line_dash="dash",
-                                                   line_color="#FFD700",
-                                                   annotation_text=f"Max: {top['suggested_max']:.2f}")
-                            fig_dist.update_layout(
-                                barmode="overlay",
-                                title=f"Top Signal: {top_label} distribution",
-                                height=260, template="plotly_dark",
-                                margin=dict(l=0, r=0, t=40, b=0),
-                                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                                xaxis_title=top_label, yaxis_title="# Trades",
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                            )
-                            fig_dist.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
-                            fig_dist.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-                            st.plotly_chart(fig_dist, use_container_width=True)
-
-                        # Strategy-aware scatter: top 2 discriminating indicators
-                        _scatter_x_key = patterns[0]["indicator"] if patterns else "rsi"
-                        _scatter_y_key = patterns[1]["indicator"] if len(patterns) > 1 else "ema_dist_pct"
-                        _sx_label = LABEL_MAP.get(_scatter_x_key, _scatter_x_key)
-                        _sy_label = LABEL_MAP.get(_scatter_y_key, _scatter_y_key)
-                        sc_x = [s.get(_scatter_x_key) for s in snapshots]
-                        sc_y = [s.get(_scatter_y_key) for s in snapshots]
-                        sc_c = ["#00d4aa" if s["outcome"] == "win" else "#ff4b4b" for s in snapshots]
-                        if any(v is not None for v in sc_x) and any(v is not None for v in sc_y):
-                            fig_sc = go.Figure(go.Scatter(
-                                x=sc_x, y=sc_y, mode="markers",
-                                marker=dict(color=sc_c, size=9, opacity=0.8),
-                                text=[f"{s['date']}<br>P&L: {s['pnl_pct']:+.1f}%" for s in snapshots],
-                                hovertemplate="%{text}<extra></extra>",
-                            ))
-                            fig_sc.update_layout(
-                                title=f"Top 2 signals: {_sx_label} vs {_sy_label}  (green=win, red=loss)",
-                                height=300, template="plotly_dark",
-                                margin=dict(l=0, r=0, t=40, b=0),
-                                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                                xaxis_title=_sx_label, yaxis_title=_sy_label,
-                            )
-                            fig_sc.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
-                            fig_sc.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-                            st.plotly_chart(fig_sc, use_container_width=True)
-
-                    else:
-                        st.info(
-                            "No strong discriminating patterns found — wins and losses look similar "
-                            "across all indicators. This usually means either the strategy entry "
-                            "conditions are already well-filtered, or there aren't enough trades "
-                            "yet. Try a longer period (5y–10y) to get more samples."
-                        )
-
-                    # ── Timing breakdown ──────────────────────
-                    st.divider()
-                    st.subheader("📅 Win Rate by Time Period")
-                    st.caption("Find seasonal edges — avoid months/quarters with consistently low win rates.")
-
-                    t1, t2, t3 = st.columns(3)
-
-                    def _timing_chart(data: dict, title: str, container):
-                        if not data:
-                            return
-                        labels = list(data.keys())
-                        wr     = [data[k]["win_rate"] for k in labels]
-                        trades = [data[k]["trades"] for k in labels]
-                        avg_p  = [data[k].get("avg_pnl_pct", 0) for k in labels]
-                        colors = ["#00d4aa" if w >= 55 else ("#FFD700" if w >= 45 else "#ff4b4b") for w in wr]
-                        fig = go.Figure(go.Bar(
-                            x=labels, y=wr, marker_color=colors,
-                            text=[f"{w:.0f}%<br>({t}t)" for w, t in zip(wr, trades)],
-                            textposition="outside",
-                            hovertext=[f"Win rate: {w:.0f}%<br>Trades: {t}<br>Avg P&L: {p:+.1f}%"
-                                       for w, t, p in zip(wr, trades, avg_p)],
-                            hoverinfo="text",
-                        ))
-                        fig.add_hline(y=50, line_dash="dash", line_color="rgba(255,255,255,0.3)",
-                                      annotation_text="50%")
-                        fig.update_layout(
-                            title=title, height=250, template="plotly_dark",
-                            margin=dict(l=0, r=0, t=40, b=0),
-                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                            yaxis=dict(range=[0, 110], title="Win Rate %"),
-                        )
-                        container.plotly_chart(fig, use_container_width=True)
-
-                    _timing_chart(timing.get("by_month", {}),   "By Month",   t1)
-                    _timing_chart(timing.get("by_quarter", {}), "By Quarter", t2)
-                    _timing_chart(timing.get("by_day", {}),     "By Weekday", t3)
-
-                    # ── Full snapshot table ───────────────────
-                    st.divider()
-                    with st.expander("📋 Full trade snapshot table", expanded=False):
-                        snap_rows = []
-                        for s in snapshots:
-                            row = {
-                                "Date":         s["date"],
-                                "Outcome":      "🟢 Win" if s["outcome"] == "win" else "🔴 Loss",
-                                "P&L %":        f"{s['pnl_pct']:+.2f}%",
-                                "Hold (bars)":  s["hold_bars"],
-                                "RSI":          s["rsi"],
-                                "ATR%":         s["atr_pct"],
-                                "EMA dist%":    s["ema_dist_pct"],
-                                "SMA200 dist%": s["sma200_dist_pct"],
-                                "BB pos":       s["bb_pct"],
-                                "Vol ratio":    s["volume_ratio"],
-                                "Low wick%":    s["lower_wick_pct"],
-                                "Quarter":      f"Q{s['quarter']}",
-                                "Prior won":    ("Yes" if s["prior_trade_won"] else "No")
-                                                if s["prior_trade_won"] is not None else "—",
-                            }
-                            # Add strategy-specific columns if populated
-                            if s.get("ema_spread_pct") is not None:
-                                row["EMA spread%"] = s["ema_spread_pct"]
-                            if s.get("range_atr_ratio") is not None:
-                                row["Range/ATR"]   = s["range_atr_ratio"]
-                            if s.get("bb_depth_pct") is not None:
-                                row["BB depth%"]   = s["bb_depth_pct"]
-                            if s.get("fib_level") is not None:
-                                row["Fib level"]   = s["fib_level"]
-                            snap_rows.append(row)
-                        st.dataframe(pd.DataFrame(snap_rows), use_container_width=True, hide_index=True)
+        st.info(
+            f"**Want to understand why trades win or lose?**  "
+            f"Go to the **🔍 Analysis** tab — enter **{bt_symbol}** and **{chosen_strat}**, "
+            f"run a full winner/loser breakdown, then hit **Optimize Filters → Save Profile** "
+            f"to automatically tighten entry conditions."
+        )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1147,20 +929,7 @@ with tab_portfolio:
         pp8.metric("Capital Util.", f"{pr.get('capital_utilisation_pct', 0):.1f}%",
                    help="Average % of capital deployed across all days")
 
-        # Equity curve
-        if pr.get("equity_curve"):
-            df_eq = pd.DataFrame(pr["equity_curve"])
-            fig = go.Figure(go.Scatter(
-                x=df_eq["date"], y=df_eq["equity"],
-                mode="lines", line=dict(color="#00d4aa", width=2), fill="tozeroy",
-                fillcolor="rgba(0,212,170,0.08)",
-            ))
-            fig.update_layout(title="Portfolio Equity Curve", height=300, template="plotly_dark",
-                              margin=dict(l=0, r=0, t=40, b=0),
-                              paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-            fig.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
-            fig.update_yaxes(gridcolor="rgba(255,255,255,0.05)", tickprefix="$")
-            st.plotly_chart(fig, use_container_width=True)
+        _plot_equity_curve(pr, height=300, show_markers=False)
 
         # Trades table
         if pr.get("trades"):
@@ -1886,7 +1655,275 @@ with tab_profiles:
 
 
 # ══════════════════════════════════════════════════════════════
-# TAB 7 — CONFIG
+# TAB 8 — TRADE ANALYSIS
+# ══════════════════════════════════════════════════════════════
+with tab_analysis:
+    st.subheader("Trade Analysis — Winner vs Loser Breakdown")
+    st.caption(
+        "Runs a backtest then compares entry-bar indicators between winning and losing trades. "
+        "High Cohen's d features are the strongest filters — use them to tighten entry conditions "
+        "and improve win rate. Run **Optimize Filters** to auto-apply the best thresholds as a profile."
+    )
+
+    # ── Step 1: Symbol + period controls ────────────────────────
+    s1c1, s1c2, s1c3 = st.columns([2, 1, 1])
+    with s1c1:
+        an_symbol = st.text_input("Symbol", value="NVDA", key="an_sym").upper().strip()
+    with s1c2:
+        an_period = st.selectbox("Period", ["3y", "5y", "8y", "10y"], index=1, key="an_period")
+    with s1c3:
+        an_pos_pct = st.number_input("Position %", min_value=5, max_value=50, value=20, step=5, key="an_pos") / 100
+
+    compare_btn = st.button("📊 Compare All Strategies", key="compare_strats")
+
+    if compare_btn and an_symbol:
+        with st.spinner(f"Running all 5 strategies on {an_symbol} ({an_period})…"):
+            compare_rows = []
+            for sname in STRATEGY_DESCRIPTIONS.keys():
+                try:
+                    r = api.perplexity_analyze(sname, an_symbol, period=an_period, position_pct=an_pos_pct)
+                    snaps_c = r.get("snapshots", [])
+                    wins_c  = [s for s in snaps_c if s["outcome"] == "win"]
+                    losses_c= [s for s in snaps_c if s["outcome"] == "loss"]
+                    wr_c    = r.get("win_rate_pct", 0)
+                    n_c     = r.get("total_trades", 0)
+                    avg_w   = round(sum(s["pnl_pct"] for s in wins_c)   / len(wins_c),   2) if wins_c   else 0
+                    avg_l   = round(sum(s["pnl_pct"] for s in losses_c) / len(losses_c), 2) if losses_c else 0
+                    exp     = round(wr_c / 100 * avg_w + (1 - wr_c / 100) * avg_l, 3)
+                    top_feat= r.get("patterns", [{}])[0].get("indicator", "—") if r.get("patterns") else "—"
+                    top_d   = r.get("patterns", [{}])[0].get("separation", 0)   if r.get("patterns") else 0
+                    score   = round(wr_c * (n_c ** 0.5) / 10, 1)  # composite: WR × sqrt(trades)
+                    compare_rows.append({
+                        "Strategy":      sname,
+                        "Trades":        n_c,
+                        "Win Rate %":    f"{wr_c:.1f}",
+                        "Avg Win %":     f"+{avg_w:.2f}",
+                        "Avg Loss %":    f"{avg_l:.2f}",
+                        "Expectancy %":  f"{exp:+.3f}",
+                        "Top Indicator": f"{top_feat} (d={top_d:.2f})" if top_feat != "—" else "—",
+                        "Score":         score,
+                    })
+                except Exception as e:
+                    compare_rows.append({"Strategy": sname, "Trades": 0, "Win Rate %": "ERR",
+                                         "Avg Win %": "—", "Avg Loss %": "—", "Expectancy %": "—",
+                                         "Top Indicator": str(e)[:40], "Score": 0})
+
+        if compare_rows:
+            st.markdown(f"#### Strategy Comparison — {an_symbol} / {an_period}")
+            st.caption("Score = Win Rate × √Trades ÷ 10. Higher is better. Pick the top scorer for detailed analysis below.")
+            cdf = pd.DataFrame(compare_rows).sort_values("Score", ascending=False)
+            st.dataframe(cdf, use_container_width=True, hide_index=True)
+            best = cdf.iloc[0]["Strategy"]
+            st.info(f"**Recommended:** {best} has the highest composite score on {an_symbol}. Select it below to run a full analysis.")
+            st.session_state["an_best_strategy"] = best
+
+    st.divider()
+
+    # ── Step 2: Detailed analysis for chosen strategy ─────────
+    st.markdown("#### Detailed Analysis")
+    default_strat = st.session_state.get("an_best_strategy", list(STRATEGY_DESCRIPTIONS.keys())[0])
+    default_idx   = list(STRATEGY_DESCRIPTIONS.keys()).index(default_strat) if default_strat in STRATEGY_DESCRIPTIONS else 0
+    an_strategy   = st.selectbox("Strategy", list(STRATEGY_DESCRIPTIONS.keys()), index=default_idx, key="an_strat")
+
+    btn_col1, btn_col2 = st.columns([1, 2])
+    with btn_col1:
+        run_analysis_btn = st.button("🔍 Run Analysis", type="primary", key="run_analysis")
+    with btn_col2:
+        run_optimize_btn = st.button("⚡ Optimize Filters → Save Profile", key="run_optimize")
+
+    if run_analysis_btn or run_optimize_btn:
+        with st.spinner(f"Running backtest + analysis for {an_strategy}/{an_symbol}..."):
+            try:
+                result = api.perplexity_analyze(
+                    an_strategy, an_symbol,
+                    period=an_period,
+                    position_pct=an_pos_pct,
+                )
+            except Exception as e:
+                st.error(f"Analysis failed: {e}")
+                result = None
+
+        if result:
+            n       = result.get("total_trades", 0)
+            wr      = result.get("win_rate_pct", 0)
+            patterns = result.get("patterns", [])
+            timing   = result.get("timing", {})
+            snaps    = result.get("snapshots", [])
+            msg      = result.get("message")
+
+            if msg:
+                st.warning(msg)
+            elif n == 0:
+                st.warning("No trades generated — try a different period or symbol.")
+            else:
+                # ── Summary metrics ──────────────────────────────────
+                wins   = [s for s in snaps if s["outcome"] == "win"]
+                losses = [s for s in snaps if s["outcome"] == "loss"]
+                avg_win  = round(sum(s["pnl_pct"] for s in wins)   / len(wins),   2) if wins   else 0
+                avg_loss = round(sum(s["pnl_pct"] for s in losses) / len(losses), 2) if losses else 0
+                expectancy = round(wr / 100 * avg_win + (1 - wr / 100) * avg_loss, 3)
+
+                mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+                mc1.metric("Trades", n)
+                mc2.metric("Win Rate", f"{wr:.1f}%")
+                mc3.metric("Avg Win", f"+{avg_win:.2f}%")
+                mc4.metric("Avg Loss", f"{avg_loss:.2f}%")
+                mc5.metric("Expectancy", f"{expectancy:+.3f}%",
+                           delta="positive" if expectancy > 0 else "negative",
+                           delta_color="normal" if expectancy > 0 else "inverse")
+
+                st.divider()
+
+                # ── Pattern insights table ────────────────────────────
+                if patterns:
+                    st.markdown("#### Feature Separation — Entry Conditions")
+                    st.caption(
+                        "Cohen's d measures how well each indicator separates winners from losers. "
+                        "**Strong** (|d|≥0.5) features are the best candidates for entry filters."
+                    )
+                    pat_rows = []
+                    for p in patterns:
+                        strength = "🔴 Strong" if abs(p["separation"]) >= 0.5 else (
+                                   "🟡 Moderate" if abs(p["separation"]) >= 0.2 else "⬜ Weak")
+                        direction = "↑ Higher→Win" if p["direction"] == "higher_is_better" else "↓ Lower→Win"
+                        pat_rows.append({
+                            "Indicator":     p["indicator"],
+                            "Description":   p["description"],
+                            "Win avg":       p["win_mean"],
+                            "Loss avg":      p["loss_mean"],
+                            "Cohen's d":     p["separation"],
+                            "Strength":      strength,
+                            "Signal":        direction,
+                            "Suggested filter": (
+                                f"≥ {p['suggested_min']}" if p.get("suggested_min") else
+                                f"≤ {p['suggested_max']}" if p.get("suggested_max") else "—"
+                            ),
+                        })
+                    st.dataframe(pd.DataFrame(pat_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No meaningful feature separation found — not enough trades or all conditions perform similarly.")
+
+                st.divider()
+
+                # ── Timing charts ─────────────────────────────────────
+                tc1, tc2, tc3 = st.columns(3)
+                _timing_chart(timing.get("by_month",   {}), "By Month",   tc1)
+                _timing_chart(timing.get("by_quarter", {}), "By Quarter", tc2)
+                _timing_chart(timing.get("by_day",     {}), "By Weekday", tc3)
+
+                if snaps:
+                    fig_pnl = go.Figure()
+                    fig_pnl.add_trace(go.Histogram(
+                        x=[s["pnl_pct"] for s in wins],
+                        name="Wins", marker_color="rgba(0,212,170,0.75)", opacity=0.8, nbinsx=20,
+                    ))
+                    fig_pnl.add_trace(go.Histogram(
+                        x=[s["pnl_pct"] for s in losses],
+                        name="Losses", marker_color="rgba(255,75,75,0.75)", opacity=0.8, nbinsx=20,
+                    ))
+                    fig_pnl.add_vline(x=0, line_color="rgba(255,255,255,0.4)", line_dash="dash")
+                    fig_pnl.update_layout(
+                        barmode="overlay", height=280,
+                        title="P&L % Distribution — Wins vs Losses",
+                        template="plotly_dark",
+                        margin=dict(l=0, r=0, t=40, b=0),
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        xaxis_title="P&L %", yaxis_title="# Trades",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    )
+                    fig_pnl.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
+                    fig_pnl.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
+                    st.plotly_chart(fig_pnl, use_container_width=True)
+
+                st.divider()
+
+                # ── Scatter: top feature vs P&L ───────────────────────
+                if patterns and snaps:
+                    top_feat = patterns[0]["indicator"]
+                    top_feat_label = INDICATOR_LABELS.get(top_feat, top_feat)
+                    st.markdown(f"#### {top_feat_label} vs Trade P&L (top discriminating feature)")
+                    feat_vals = [s.get(top_feat) for s in snaps]
+                    pnl_vals2 = [s["pnl_pct"] for s in snaps]
+                    colors    = ["#00cc88" if s["outcome"] == "win" else "#ff4444" for s in snaps]
+                    dates     = [s.get("date", "") for s in snaps]
+                    valid = [(f, p, c, d) for f, p, c, d in zip(feat_vals, pnl_vals2, colors, dates)
+                             if f is not None]
+                    if valid:
+                        fx, py, cx, dx = zip(*valid)
+                        fig_sc = go.Figure(go.Scatter(
+                            x=fx, y=py, mode="markers",
+                            marker=dict(color=cx, size=8, opacity=0.75),
+                            text=[f"{d}<br>P&L: {p:+.2f}%" for d, p in zip(dx, py)],
+                            hovertemplate="%{text}<extra></extra>",
+                        ))
+                        smin = patterns[0].get("suggested_min")
+                        smax = patterns[0].get("suggested_max")
+                        if smin:
+                            fig_sc.add_vline(x=smin, line_dash="dash", line_color="yellow",
+                                             annotation_text=f"filter ≥{smin}")
+                        if smax:
+                            fig_sc.add_vline(x=smax, line_dash="dash", line_color="yellow",
+                                             annotation_text=f"filter ≤{smax}")
+                        fig_sc.update_layout(
+                            height=320,
+                            xaxis_title=top_feat, yaxis_title="P&L %",
+                            margin=dict(t=20, b=30, l=40, r=10),
+                        )
+                        st.plotly_chart(fig_sc, use_container_width=True)
+
+                # ── Raw trade log ─────────────────────────────────────
+                with st.expander("View all trade snapshots", expanded=False):
+                    if snaps:
+                        snap_df = pd.DataFrame(snaps)
+                        outcome_icon = snap_df["outcome"].map({"win": "✅ Win", "loss": "❌ Loss"})
+                        snap_df["outcome"] = outcome_icon
+                        st.dataframe(snap_df, use_container_width=True, hide_index=True)
+
+        # ── Optimize & save profile ───────────────────────────────
+        if run_optimize_btn:
+            with st.spinner(f"Optimizing filters and saving profile for {an_strategy}/{an_symbol}..."):
+                try:
+                    cal = api.perplexity_calibrate(
+                        an_strategy, an_symbol,
+                        period=an_period,
+                        position_pct=an_pos_pct,
+                        verify_wf=True,
+                    )
+                    if cal.get("saved"):
+                        thr = cal.get("thresholds", {})
+                        ver = cal.get("verification", {})
+                        base_wr    = cal.get("win_rate_pct", 0)
+                        filt_wr    = cal.get("filtered_win_rate_pct", base_wr)
+                        filt_trades= cal.get("filtered_trades", cal.get("n_trades", 0))
+                        survival   = cal.get("survival_rate_pct", 100)
+                        st.success(
+                            f"✅ Profile saved for **{an_strategy}/{an_symbol}** — "
+                            f"Win rate: **{base_wr:.1f}% → {filt_wr:.1f}%** (+{filt_wr-base_wr:.1f}pp)  |  "
+                            f"Trades kept: {filt_trades} ({survival:.0f}% survival)  |  "
+                            f"OOS verified: {'✅' if ver.get('verified') else '—'}"
+                        )
+                        if thr:
+                            st.markdown("**Applied entry filters:**")
+                            st.json(thr)
+                        if ver.get("wfe_before") is not None:
+                            vc1, vc2, vc3 = st.columns(3)
+                            vc1.metric("WFE Before", f"{ver['wfe_before']:.3f}" if ver.get("wfe_before") else "—")
+                            vc2.metric("WFE After",  f"{ver['wfe_after']:.3f}"  if ver.get("wfe_after")  else "—",
+                                       delta="improved" if ver.get("verified") else "informational only")
+                            vc3.metric("OOS CAGR After", f"{ver.get('oos_cagr_after', 0):.1f}%")
+                    else:
+                        st.warning(
+                            cal.get("skip_reason") or
+                            "Calibration ran but filters did not improve win rate by ≥3pp with ≥40% trade survival. "
+                            "The strategy already performs well on this symbol — no filtering needed. "
+                            "Try a longer period (8y/10y) for more historical trades."
+                        )
+                except Exception as e:
+                    st.error(f"Optimization failed: {e}")
+
+
+# ══════════════════════════════════════════════════════════════
+# TAB 9 — CONFIG
 # ══════════════════════════════════════════════════════════════
 with tab_config:
     st.subheader("Strategy Configuration")

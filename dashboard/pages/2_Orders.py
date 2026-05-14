@@ -55,7 +55,7 @@ try:
             if v == "filled":    return "✅ filled"
             if v == "rejected":  return "❌ rejected"
             if v == "cancelled": return "🚫 cancelled"
-            if v == "pending":   return "⏳ pending"
+            if v in ("pending", "working"): return "⏳ " + v
             return v
 
         if "status" in df.columns:
@@ -120,17 +120,8 @@ if broker_ords is not None:
     else:
         bdf = pd.DataFrame(broker_ords)
 
-        def _btag(v):
-            v = str(v)
-            if v == "filled":    return "✅ filled"
-            if v == "rejected":  return "❌ rejected"
-            if v == "cancelled": return "🚫 cancelled"
-            if v == "pending":   return "⏳ pending"
-            if v == "working":   return "⏳ working"
-            return v
-
         if "status" in bdf.columns:
-            bdf["status"] = bdf["status"].apply(_btag)
+            bdf["status"] = bdf["status"].apply(_status_tag)
 
         st.dataframe(bdf, use_container_width=True, hide_index=True)
         st.caption(f"{len(broker_ords)} order(s) on broker record.")

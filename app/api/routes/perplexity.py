@@ -445,9 +445,12 @@ def _apply_profile_to_config(strategy_name: str, config: dict, profile) -> None:
         config["filter_vol_min"]       = profile.vol_min
         config["filter_range_atr_max"] = profile.atr_pct_max   # stored in atr_pct_max field
     elif strategy_name == "BB_Mean_Reversion":
-        config["filter_vol_min"]      = profile.vol_min
-        config["filter_atr_pct_max"]  = profile.atr_pct_max
-        config["filter_bb_depth_min"] = profile.bb_depth_min
+        config["filter_vol_min"]          = profile.vol_min
+        config["filter_atr_pct_max"]      = profile.atr_pct_max
+        config["filter_bb_depth_min"]     = profile.bb_depth_min
+        config["filter_rsi_min"]          = profile.rsi_min
+        config["filter_bb_pct_min"]       = profile.bb_pct_min
+        config["filter_ema_dist_pct_min"] = profile.ema_dist_pct_min
     elif strategy_name == "Fib_Pullback_Support":
         config["filter_lower_wick_min"] = profile.lower_wick_min
         config["filter_vol_min"]        = profile.vol_min
@@ -462,7 +465,14 @@ def _profile_thresholds_dict(strategy_name: str, profile) -> dict:
     if strategy_name == "Breakout_Consolidation":
         return {"vol_min": profile.vol_min, "range_atr_max": profile.atr_pct_max}
     if strategy_name == "BB_Mean_Reversion":
-        return {"vol_min": profile.vol_min, "atr_pct_max": profile.atr_pct_max, "bb_depth_min": profile.bb_depth_min}
+        return {
+            "vol_min":          profile.vol_min,
+            "atr_pct_max":      profile.atr_pct_max,
+            "bb_depth_min":     profile.bb_depth_min,
+            "rsi_min":          profile.rsi_min,
+            "bb_pct_min":       profile.bb_pct_min,
+            "ema_dist_pct_min": profile.ema_dist_pct_min,
+        }
     if strategy_name == "Fib_Pullback_Support":
         return {"lower_wick_min": profile.lower_wick_min, "vol_min": profile.vol_min}
     return {}
@@ -529,7 +539,24 @@ def auto_calibrate(
                                              "bb_depth_pct":   s.bb_depth_pct}
                                             for s in snapshots])
 
-        # Optional walk-forward verification — again using isolated copies
+        # ── IS verification: check filters actually improve win rate on the same data ──
+        # Run a filtered backtest and compare win rate + survival rate vs baseline.
+        # Criteria to save: filtered_win_rate >= baseline_win_rate + 3pp AND survival >= 40%
+        baseline_wr  = result.win_rate_pct
+        baseline_trades = result.total_trades
+        s_filtered = copy.deepcopy(strategy)
+        for k in filter_keys:
+            s_filtered.config[k] = 0.0
+        _apply_profile_to_config(strategy_name, s_filtered.config, profile)
+        r_filtered = run_perplexity_backtest(
+            s_filtered, symbol.upper(), period, initial_capital, position_pct=position_pct
+        )
+        filtered_wr      = r_filtered.win_rate_pct
+        filtered_trades  = r_filtered.total_trades
+        survival_rate    = filtered_trades / baseline_trades if baseline_trades > 0 else 0.0
+        is_improvement   = (filtered_wr >= baseline_wr + 3.0) and (survival_rate >= 0.40)
+
+        # ── Optional walk-forward verification (informational — does NOT block saving) ──
         if verify_wf and len(df) >= 500:
             try:
                 wf_period = "5y" if len(df) < 1500 else "10y"
@@ -561,12 +588,16 @@ def auto_calibrate(
             except Exception:
                 pass
 
-        # Only persist the profile when calibration genuinely helps.
-        # If WFE verification ran and filters made things worse, don't save —
-        # the existing strategy (or no profile) is already performing better.
-        wf_was_run = verify_wf and (profile.wfe_before is not None)
-        should_save = (not wf_was_run) or profile.verified
-        if not should_save:
+        # ── Save if IS improvement criterion met ──────────────────────────────────────
+        # WFE is informational — it tells you if the filter also works OOS,
+        # but low OOS trade counts make WFE unreliable as a gate.
+        if not is_improvement:
+            reason = (
+                f"Filters did not improve win rate enough on this data "
+                f"(filtered WR={filtered_wr:.1f}% vs baseline {baseline_wr:.1f}%, "
+                f"need +3pp; survival={survival_rate:.0%}, need ≥40%). "
+                f"The strategy already performs well on this symbol — no filtering needed."
+            )
             return {
                 "symbol": profile.symbol,
                 "strategy": profile.strategy,
@@ -574,17 +605,21 @@ def auto_calibrate(
                 "n_trades": profile.n_trades,
                 "n_wins": profile.n_wins,
                 "win_rate_pct": profile.win_rate_pct,
+                "filtered_win_rate_pct": filtered_wr,
+                "filtered_trades": filtered_trades,
+                "survival_rate_pct": round(survival_rate * 100, 1),
                 "thresholds": _profile_thresholds_dict(strategy_name, profile),
                 "verification": {
                     "wfe_before":      profile.wfe_before,
                     "wfe_after":       profile.wfe_after,
                     "oos_cagr_before": profile.oos_cagr_before,
                     "oos_cagr_after":  profile.oos_cagr_after,
-                    "verified":        False,
+                    "verified":        profile.verified,
                 },
                 "saved": False,
-                "skip_reason": "Calibrated filters did not improve walk-forward efficiency — existing strategy left unchanged",
+                "skip_reason": reason,
             }
+
         save_profile(profile)
 
         # Build strategy-specific thresholds response

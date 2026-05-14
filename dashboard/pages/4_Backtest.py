@@ -324,6 +324,20 @@ def _pnl_tag(v) -> str:
     return f"🟢 +${v:,.2f}" if v >= 0 else f"🔴 -${abs(v):,.2f}"
 
 
+def _render_backtest_metrics(r: dict) -> None:
+    pnl = r["total_pnl"]
+    ret = r["total_return_pct"]
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Starting Capital", f"${r['initial_capital']:,.0f}")
+    c2.metric("Final Capital",    f"${r['final_capital']:,.0f}")
+    c3.metric("Total P&L",        f"${pnl:,.2f}", delta=f"{ret:+.2f}%",
+              delta_color="normal" if pnl >= 0 else "inverse")
+    c4.metric("Win Rate",         f"{r['win_rate_pct']:.1f}%",
+              delta=f"{r['winning_trades']}W / {r['losing_trades']}L")
+    c5.metric("Max Drawdown",     f"{r['max_drawdown_pct']:.1f}%", delta_color="inverse")
+    c6.metric("Sharpe Ratio",     r["sharpe_ratio"] if r["sharpe_ratio"] else "—")
+
+
 def _single_trades_table(trades: list) -> None:
     st.divider()
     st.subheader(f"All Trades ({len(trades)} total)")
@@ -507,17 +521,7 @@ if mode == "Single Strategy":
 
     st.subheader(f"Results — {r['strategy_name']} ({r['start_date']} → {r['end_date']})")
 
-    pnl = r["total_pnl"]
-    ret = r["total_return_pct"]
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Starting Capital", f"${r['initial_capital']:,.0f}")
-    c2.metric("Final Capital",    f"${r['final_capital']:,.0f}")
-    c3.metric("Total P&L",        f"${pnl:,.2f}", delta=f"{ret:+.2f}%",
-              delta_color="normal" if pnl >= 0 else "inverse")
-    c4.metric("Win Rate",         f"{r['win_rate_pct']:.1f}%",
-              delta=f"{r['winning_trades']}W / {r['losing_trades']}L")
-    c5.metric("Max Drawdown",     f"{r['max_drawdown_pct']:.1f}%", delta_color="inverse")
-    c6.metric("Sharpe Ratio",     r["sharpe_ratio"] if r["sharpe_ratio"] else "—")
+    _render_backtest_metrics(r)
 
     if not r.get("trades"):
         _render_zero_trade_debug_single(chosen_sym, chosen, period)
@@ -621,17 +625,7 @@ else:
     )
     st.caption(f"Strategies used: {', '.join(r['strategies_used'])}")
 
-    pnl = r["total_pnl"]
-    ret = r["total_return_pct"]
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Starting Capital", f"${r['initial_capital']:,.0f}")
-    c2.metric("Final Capital",    f"${r['final_capital']:,.0f}")
-    c3.metric("Total P&L",        f"${pnl:,.2f}", delta=f"{ret:+.2f}%",
-              delta_color="normal" if pnl >= 0 else "inverse")
-    c4.metric("Win Rate",         f"{r['win_rate_pct']:.1f}%",
-              delta=f"{r['winning_trades']}W / {r['losing_trades']}L")
-    c5.metric("Max Drawdown",     f"{r['max_drawdown_pct']:.1f}%", delta_color="inverse")
-    c6.metric("Sharpe Ratio",     r["sharpe_ratio"] if r["sharpe_ratio"] else "—")
+    _render_backtest_metrics(r)
 
     if r["total_trades"] == 0:
         _render_zero_trade_debug_consensus(chosen_sym, r.get("min_agreement", 0))
