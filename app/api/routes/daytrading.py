@@ -9,6 +9,7 @@ from app.services.strategy.daytrading.market_open import (
     market_status,
 )
 from app.services.strategy.daytrading.runner import (
+    get_session_symbols,
     run_backtest,
     run_backtest_all,
     run_scan,
@@ -87,6 +88,31 @@ def get_market_status() -> dict[str, Any]:
         "spy_gap_pct": gap_pct,
         "spy_gap_type": gap_type,
     }
+
+
+@router.get("/scanner/watchlist")
+def scanner_watchlist(
+    max_symbols: int = Query(20, description="Max symbols to return"),
+    universe: str = Query("", description="Comma-separated override universe; empty = default"),
+    market_state: str = Query("", description="Force a market state (TREND_UP etc.); empty = auto"),
+) -> list[dict[str, Any]]:
+    """Pre-market scanner: ranked watchlist with scores, tags, and strategy buckets."""
+    from app.services.strategy.daytrading.scanners import DayTradingScanner, DayTradingScannerConfig
+    sym_list = [s.strip().upper() for s in universe.split(",") if s.strip()] or None
+    scanner = DayTradingScanner(config=DayTradingScannerConfig(), universe=sym_list)
+    state = market_state.strip() or None
+    results = scanner.get_intraday_watchlist(max_symbols=max_symbols, market_state=state)
+    return [r.to_dict() for r in results]
+
+
+@router.get("/scanner/metrics/{symbol}")
+def scanner_symbol_metrics(symbol: str) -> dict[str, Any]:
+    """Fetch raw scan metrics for a single symbol."""
+    from app.services.strategy.daytrading.scanners import DayTradingScanner, DayTradingScannerConfig
+    scanner = DayTradingScanner(config=DayTradingScannerConfig())
+    metrics = scanner.fetch_metrics(symbol.upper())
+    result = scanner.score_symbol(metrics)
+    return result.to_dict()
 
 
 @router.get("/backtest/walkforward/{strategy}/{symbol}")

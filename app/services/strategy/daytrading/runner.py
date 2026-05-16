@@ -8,6 +8,8 @@ from typing import Any
 import pandas as pd
 import yfinance as yf
 
+import logging
+
 from app.services.strategy.daytrading.brain import DayTradingBrain
 from app.services.strategy.daytrading.brain.config_adjuster import ConfigAdjuster
 from app.services.strategy.daytrading.brain.strategy_selector import StrategySelector
@@ -24,25 +26,64 @@ from app.services.strategy.daytrading.market_open import (
     regime_allows_strategy,
 )
 from app.services.strategy.daytrading.models import DayTradeSignal
+from app.services.strategy.daytrading.pipeline_diagnostics import (
+    PipelineDiagnostics, _categorise_rejection,
+)
 from app.services.strategy.daytrading.strategies import ALL_STRATEGIES, STRATEGY_MAP
+
+logger = logging.getLogger(__name__)
 
 # Module-level brain singleton
 _brain = DayTradingBrain()
 
 
-def fetch_intraday(symbol: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
-    """Download intraday bars from yfinance, convert to ET timezone."""
+def fetch_intraday(
+    symbol: str,
+    interval: str = "5m",
+    period: str = "5d",
+    diag: PipelineDiagnostics | None = None,
+) -> pd.DataFrame:
+    """Download intraday bars from yfinance, convert to ET timezone.
+
+    Optionally populates a PipelineDiagnostics object with data-quality info.
+    """
     df = yf.download(symbol, period=period, interval=interval, progress=False)
     if df.empty:
+        if diag is not None:
+            diag.data_warning = f"yfinance returned 0 bars for {symbol} {interval} {period}"
+        logger.warning("fetch_intraday: 0 bars for %s %s %s", symbol, interval, period)
         return df
+
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+
     idx = pd.to_datetime(df.index)
     if idx.tzinfo is None:
         idx = idx.tz_localize("UTC").tz_convert(ET)
     else:
         idx = idx.tz_convert(ET)
     df.index = idx
+
+    if diag is not None and interval == "5m":
+        mh = df.between_time("09:30", "16:00")
+        diag.bars_loaded_5m = len(df)
+        diag.bars_in_market_hours = len(mh)
+        diag.earliest_bar = str(df.index[0]) if not df.empty else ""
+        diag.latest_bar = str(df.index[-1]) if not df.empty else ""
+        diag.timezone = str(df.index.tzinfo)
+        logger.info(
+            "fetch_intraday: %s %s %s → %d bars (%d mkt-hrs) [%s .. %s]",
+            symbol, interval, period, len(df), len(mh),
+            diag.earliest_bar[:16], diag.latest_bar[:16],
+        )
+        if len(df) < 10:
+            diag.data_warning = (
+                f"Only {len(df)} bars loaded for {symbol} {period} — "
+                "likely insufficient intraday data from yfinance"
+            )
+    elif diag is not None and interval == "15m":
+        diag.bars_loaded_15m = len(df)
+
     return df
 
 
@@ -70,32 +111,64 @@ def run_signals(
     """
     Fetch latest intraday data, detect regime, run all enabled strategies.
     If apply_brain=True, signals are filtered through the brain pipeline.
-    Returns a dict with regime info, brain status, and list of signal dicts.
+    Returns a dict with regime info, brain status, signal dicts, and diagnostics.
     """
+    diag = PipelineDiagnostics(symbol=symbol, period="5d")
+
     status = market_status()
-    df_5m = fetch_intraday(symbol, interval="5m", period="5d")
-    df_15m = fetch_intraday(symbol, interval="15m", period="60d")
+    df_5m  = fetch_intraday(symbol, interval="5m",  period="5d",  diag=diag)
+    df_15m = fetch_intraday(symbol, interval="15m", period="60d", diag=diag)
 
     spy_df = fetch_intraday("SPY", interval="5m", period="2d") if symbol != "SPY" else df_5m
     regime, spy_vs_vwap, gap_pct, gap_type = get_spy_regime(spy_df)
 
     raw_signals: list[dict] = []
+    strategies_run: list[str] = []
+    strategies_skipped: list[str] = []
 
     for strategy in ALL_STRATEGIES:
         if enabled_strategies and strategy.name not in enabled_strategies:
             continue
         if not regime_allows_strategy(regime, strategy.name):
+            strategies_skipped.append(strategy.name)
+            logger.debug(
+                "run_signals: %s SKIPPED strategy=%s (regime=%s not allowed)",
+                symbol, strategy.name, regime,
+            )
             continue
 
+        strategies_run.append(strategy.name)
         cfg = (custom_configs or {}).get(strategy.name)
+        before = len(raw_signals)
         try:
             sigs = strategy.generate_signals(df_5m, df_15m, symbol, cfg, regime)
-        except Exception:
+        except Exception as e:
+            logger.warning("run_signals: strategy %s raised %s for %s", strategy.name, e, symbol)
             sigs = []
 
         for sig in sigs:
             sig.confidence = apply_choppy_penalty(sig.confidence, regime)
             raw_signals.append(asdict(sig))
+
+        generated = len(raw_signals) - before
+        logger.debug(
+            "run_signals: %s strategy=%s regime=%s → %d raw signals",
+            symbol, strategy.name, regime, generated,
+        )
+
+    diag.strategies_run = strategies_run
+    diag.strategies_skipped_by_regime = strategies_skipped
+    diag.raw_signals_generated = len(raw_signals)
+    diag.raw_buy_signals  = sum(1 for s in raw_signals if s.get("direction") == "BUY")
+    diag.raw_sell_signals = sum(1 for s in raw_signals if s.get("direction") in ("SELL", "SELL_SHORT"))
+    diag.raw_hold_signals = sum(1 for s in raw_signals if s.get("direction") == "HOLD")
+
+    logger.info(
+        "run_signals: %s regime=%s raw=%d (buy=%d sell=%d) strategies=%s skipped=%s",
+        symbol, regime,
+        diag.raw_signals_generated, diag.raw_buy_signals, diag.raw_sell_signals,
+        strategies_run, strategies_skipped,
+    )
 
     brain_status_dict: dict = {}
     accepted_signals: list[dict] = []
@@ -123,6 +196,12 @@ def run_signals(
             "routing_summary": brain_status.routing_summary,
         }
 
+        if brain_status.kill_switch:
+            logger.warning(
+                "run_signals: %s KILL SWITCH active — %s",
+                symbol, brain_status.kill_switch_reason,
+            )
+
         decisions = _brain.filter_signals(
             raw_signals,
             account_state={
@@ -131,6 +210,8 @@ def run_signals(
                 "open_positions": open_positions,
             },
         )
+
+        rejection_sample: list[str] = []
         for dec in decisions:
             sig_out = dict(dec.signal or {})
             sig_out["brain_accepted"] = dec.accepted
@@ -141,8 +222,42 @@ def run_signals(
                 accepted_signals.append(sig_out)
             else:
                 rejected_signals.append(sig_out)
+                reason_str = dec.rejection_reason or dec.explanation or ""
+                cat = _categorise_rejection(reason_str)
+                if cat == "regime":      diag.rejected_by_regime      += 1
+                elif cat == "volume":    diag.rejected_by_volume       += 1
+                elif cat == "rr":        diag.rejected_by_rr           += 1
+                elif cat == "time":      diag.rejected_by_time         += 1
+                elif cat == "extension": diag.rejected_by_extension    += 1
+                elif cat == "kill_switch": diag.rejected_by_kill_switch += 1
+                else:                    diag.rejected_other           += 1
+                if len(rejection_sample) < 5:
+                    rejection_sample.append(f"[{cat}] {reason_str[:80]}")
+
+        diag.rejected_by_brain_total = len(rejected_signals)
+        diag.accepted_signals = len(accepted_signals)
+        diag.rejection_reasons = rejection_sample
+
+        logger.info(
+            "run_signals: %s brain accepted=%d rejected=%d "
+            "(regime=%d vol=%d rr=%d time=%d ext=%d kill=%d other=%d)",
+            symbol,
+            diag.accepted_signals, diag.rejected_by_brain_total,
+            diag.rejected_by_regime, diag.rejected_by_volume, diag.rejected_by_rr,
+            diag.rejected_by_time, diag.rejected_by_extension,
+            diag.rejected_by_kill_switch, diag.rejected_other,
+        )
+
+    elif apply_brain and not raw_signals:
+        # Brain not even invoked — no raw signals to filter
+        logger.info("run_signals: %s brain skipped (0 raw signals)", symbol)
+        diag.accepted_signals = 0
     else:
+        # apply_brain=False: pass everything through
         accepted_signals = raw_signals
+        diag.accepted_signals = len(raw_signals)
+
+    diag.finalise()
 
     return {
         "symbol": symbol,
@@ -154,6 +269,7 @@ def run_signals(
         "rejected_signals": rejected_signals,
         "raw_signal_count": len(raw_signals),
         "brain": brain_status_dict,
+        "diagnostics": diag.to_dict(),
     }
 
 
@@ -178,11 +294,15 @@ def run_backtest(
     if strategy is None:
         return {"error": f"Unknown strategy: {strategy_name}"}
 
-    df_5m = fetch_intraday(symbol, interval="5m", period=period)
-    df_15m = fetch_intraday(symbol, interval="15m", period="730d" if interval == "15m" else period)
+    diag = PipelineDiagnostics(symbol=symbol, period=period)
+
+    df_5m  = fetch_intraday(symbol, interval="5m",  period=period,  diag=diag)
+    df_15m = fetch_intraday(symbol, interval="15m", period="730d" if interval == "15m" else period, diag=diag)
 
     if df_5m.empty:
-        return {"error": "No data available"}
+        diag.data_warning = f"No 5m data returned for {symbol} {period}"
+        diag.finalise()
+        return {"error": f"Insufficient intraday data for {symbol} {period}", "diagnostics": diag.to_dict()}
 
     # ── Symbol profile + auto-config ─────────────────────────────────────────
     profile = SymbolAnalyzer.analyze(df_5m, symbol)
@@ -190,8 +310,8 @@ def run_backtest(
     effective_config = adjustment.adjusted if (use_auto_config and not custom_config) else (custom_config or {})
 
     # ── Strategy selection check ──────────────────────────────────────────────
-    # We'll compute the dominant regime first to pass to the selector
     dates_all = sorted(set(df_5m.index.date))
+    diag.trading_days_found = len(dates_all)
     regime_counts: dict[str, int] = {"BULL_OPEN": 0, "BEAR_OPEN": 0, "CHOPPY": 0}
 
     fill_sim = FillSimulator(FillConfig(
@@ -203,11 +323,18 @@ def run_backtest(
     total_commission = 0.0
     total_slippage = 0.0
 
+    logger.info(
+        "run_backtest: %s strategy=%s period=%s initial_days=%d bars_5m=%d",
+        symbol, strategy_name, period, len(dates_all), len(df_5m),
+    )
+
     for date in dates_all:
         day_5m = df_5m[df_5m.index.date == date]
         day_15m = df_15m[df_15m.index.date == date] if not df_15m.empty else pd.DataFrame()
 
         if len(day_5m) < 4:
+            diag.trading_days_skipped_short += 1
+            logger.debug("run_backtest: %s %s only %d bars — skipping", symbol, date, len(day_5m))
             continue
 
         # simplified regime: compare open vs prior close
@@ -230,12 +357,30 @@ def run_backtest(
         regime_counts[regime] = regime_counts.get(regime, 0) + 1
 
         if not regime_allows_strategy(regime, strategy_name):
+            diag.days_skipped_by_regime += 1
+            logger.debug(
+                "run_backtest: %s %s strategy=%s not allowed in regime=%s",
+                symbol, date, strategy_name, regime,
+            )
             continue
 
         try:
             signals = strategy.generate_signals(day_5m, day_15m, symbol, effective_config, regime)
-        except Exception:
+        except Exception as e:
+            logger.warning("run_backtest: strategy %s raised %s on %s %s", strategy_name, e, symbol, date)
             continue
+
+        day_raw = [s for s in signals if s.direction != "HOLD"]
+        diag.raw_signals_generated += len(day_raw)
+        diag.raw_buy_signals  += sum(1 for s in day_raw if s.direction == "BUY")
+        diag.raw_sell_signals += sum(1 for s in day_raw if s.direction in ("SELL", "SELL_SHORT"))
+        diag.raw_hold_signals += sum(1 for s in signals if s.direction == "HOLD")
+
+        if day_raw:
+            logger.debug(
+                "run_backtest: %s %s regime=%s → %d raw signals",
+                symbol, date, regime, len(day_raw),
+            )
 
         for sig in signals:
             if sig.direction == "HOLD":
@@ -245,11 +390,19 @@ def run_backtest(
             stop = sig.stop_price
             target = sig.target_price
             position_size = (equity * position_pct) / entry
-            risk_per_share = abs(entry - stop)
 
-            # simulate outcome using remaining bars on the same day
             sig_time = pd.Timestamp(sig.signal_time)
             future_bars = day_5m[day_5m.index > sig_time]
+
+            if future_bars.empty:
+                diag.trades_skipped_no_future_bars += 1
+                logger.debug(
+                    "run_backtest: %s %s no future bars after signal at %s — skipping",
+                    symbol, strategy_name, sig_time,
+                )
+                continue
+
+            diag.trades_opened += 1
 
             outcome = "OPEN"
             exit_price = entry
@@ -295,6 +448,8 @@ def run_backtest(
                 exit_time = future_bars.index[-1] if not future_bars.empty else sig_time
                 outcome = "EOD_EXIT"
 
+            diag.trades_closed += 1
+
             # Fill-simulator: apply commission + slippage to both legs
             vol_pct = profile.volatility_pct if profile else 1.0
             entry_fill = fill_sim.fill_entry(sig.direction, entry, position_size, vol_pct)
@@ -332,8 +487,22 @@ def run_backtest(
                 "confidence": sig.confidence,
             })
 
+    diag.regime_distribution = regime_counts
+    diag.strategies_run = [strategy_name]
+    diag.accepted_signals = diag.raw_signals_generated   # backtest has no brain filter
+    logger.info(
+        "run_backtest: %s %s → days=%d skip_short=%d skip_regime=%d "
+        "raw=%d trades_opened=%d trades_closed=%d skip_no_bars=%d",
+        symbol, strategy_name,
+        diag.trading_days_found, diag.trading_days_skipped_short, diag.days_skipped_by_regime,
+        diag.raw_signals_generated, diag.trades_opened, diag.trades_closed,
+        diag.trades_skipped_no_future_bars,
+    )
+
+    diag.finalise()
     result = _compute_metrics(trades, initial_capital, equity, symbol, strategy_name,
                               total_commission=total_commission, total_slippage=total_slippage)
+    result["diagnostics"] = diag.to_dict()
 
     # ── Attach profile + config adjustment to every result ────────────────────
     result["symbol_profile"] = profile.to_dict()
@@ -904,3 +1073,35 @@ def run_scan(
             continue
     all_signals.sort(key=lambda x: x.get("confidence", 0), reverse=True)
     return all_signals
+
+
+# Static fallback used when the scanner cannot run (import error, no data, etc.)
+_FALLBACK_SYMBOLS: list[str] = ["SPY", "QQQ", "AAPL", "TSLA", "NVDA"]
+
+
+def get_session_symbols(max_symbols: int = 20) -> list[str]:
+    """
+    Use the DayTradingScanner to choose today's watchlist.
+
+    The scanner ranks symbols by liquidity, volatility, and pre-market activity,
+    then the brain adjusts scores based on the current market state.
+
+    Falls back gracefully to _FALLBACK_SYMBOLS if the scanner is unavailable
+    for any reason (import error, no data, pre-market before data is ready).
+    This keeps all existing callers working unchanged.
+    """
+    try:
+        from app.services.strategy.daytrading.scanners import DayTradingScanner, DayTradingScannerConfig
+        scanner = DayTradingScanner(
+            config=DayTradingScannerConfig(),
+            brain=_brain,
+        )
+        watchlist = scanner.get_intraday_watchlist(max_symbols=max_symbols)
+        symbols = [r.symbol for r in watchlist]
+        if symbols:
+            return symbols
+    except Exception as e:
+        import logging as _log
+        _log.getLogger(__name__).warning("Scanner unavailable, using fallback symbols: %s", e)
+
+    return list(_FALLBACK_SYMBOLS)

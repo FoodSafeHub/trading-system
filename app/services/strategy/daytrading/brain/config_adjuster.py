@@ -40,6 +40,8 @@ class ConfigAdjuster:
             "EMAMomentum":         ConfigAdjuster._adjust_ema,
             "VolumeSpikeReversal": ConfigAdjuster._adjust_vsr,
             "OpeningGapFade":      ConfigAdjuster._adjust_gap,
+            "BollingerMomentum":   ConfigAdjuster._adjust_bb,
+            "SupertrendTrend":     ConfigAdjuster._adjust_st,
         }.get(strategy_name)
 
         if fn is None:
@@ -81,17 +83,36 @@ class ConfigAdjuster:
             summary = f"Auto-tuned for low-volatility symbol ({p.volatility_pct:.1f}% ATR): tighter range and targets."
 
         elif p.is_high_volatility:
-            # Standard or wider config — let winners run
+            # Wider config — high-vol names have wide ORB ranges by definition
             if adj["tp_multiplier"] != 2.5:
-                changes.append(f"Profit target multiplier: {adj['tp_multiplier']}× → 2.5× (high-vol names have follow-through)")
+                changes.append(f"Profit target multiplier: {adj['tp_multiplier']}x -> 2.5x (high-vol names have follow-through)")
                 adj["tp_multiplier"] = 2.5
             if adj["vol_multiple"] != 1.5:
-                changes.append(f"Volume threshold: {adj['vol_multiple']}× → 1.5× (confirm real breakout vs noise)")
+                changes.append(f"Volume threshold: {adj['vol_multiple']}x -> 1.5x (confirm real breakout vs noise)")
                 adj["vol_multiple"] = 1.5
             if adj["rsi_min"] != 48:
-                changes.append(f"RSI filter: {adj['rsi_min']}+ → 48+ (momentum confirmation on volatile name)")
+                changes.append(f"RSI filter: {adj['rsi_min']}+ -> 48+ (momentum confirmation on volatile name)")
                 adj["rsi_min"] = 48
-            summary = f"Auto-tuned for high-volatility symbol ({p.volatility_pct:.1f}% ATR): wider targets, tighter volume filter."
+            # Key fix: max_orb_atr_ratio=2.5 was calibrated for SPY-like vol.
+            # NVDA/TSLA at 2-4% ATR will almost always exceed 2.5x — widen it.
+            new_orb_ratio = round(min(4.5, 2.5 + p.volatility_pct * 0.4), 1)
+            if adj["max_orb_atr_ratio"] != new_orb_ratio:
+                changes.append(
+                    f"Max ORB/ATR ratio: {adj['max_orb_atr_ratio']} -> {new_orb_ratio} "
+                    f"(wide ORB expected on {p.volatility_pct:.1f}% ATR symbol)"
+                )
+                adj["max_orb_atr_ratio"] = new_orb_ratio
+            # Widen stop so it isn't immediately hit on volatile bars
+            if p.volatility_pct >= 2.0 and adj.get("atr_stop_mult", 1.0) < 1.5:
+                changes.append(
+                    f"ATR stop mult: {adj.get('atr_stop_mult', 1.0)} -> 1.5 "
+                    f"(wider stop needed on {p.volatility_pct:.1f}% ATR symbol)"
+                )
+                adj["atr_stop_mult"] = 1.5
+            summary = (
+                f"Auto-tuned for high-volatility symbol ({p.volatility_pct:.1f}% ATR): "
+                f"wider ORB tolerance ({new_orb_ratio}x), wider stops, bigger targets."
+            )
 
         else:
             summary = f"Standard parameters used ({p.volatility_pct:.1f}% ATR — mid-range volatility)."
@@ -228,6 +249,88 @@ class ConfigAdjuster:
 
         return ConfigAdjustment(
             strategy="OpeningGapFade", symbol=p.symbol,
+            original=orig, adjusted=adj, changes=changes,
+            reason_summary=summary,
+        )
+
+    # ── Bollinger Momentum ────────────────────────────────────────────────────
+    @staticmethod
+    def _adjust_bb(p: SymbolProfile) -> ConfigAdjustment:
+        from app.services.strategy.daytrading.strategies.bollinger_momentum import BollingerMomentum
+        orig = dict(BollingerMomentum.default_config)
+        adj = dict(orig)
+        changes: list[str] = []
+
+        if p.is_low_volatility:
+            if adj.get("contraction_percentile", 0.20) != 0.30:
+                changes.append(f"Contraction percentile: {adj.get('contraction_percentile', 0.20)} -> 0.30 (wider squeeze window for stable name)")
+                adj["contraction_percentile"] = 0.30
+            if adj.get("vol_rel_min", 1.2) != 1.0:
+                changes.append(f"Volume minimum: {adj.get('vol_rel_min', 1.2)}x -> 1.0x (lower vol expected on stable names)")
+                adj["vol_rel_min"] = 1.0
+            if adj.get("r_multiple_target", 2.0) != 1.5:
+                changes.append(f"R target: {adj.get('r_multiple_target', 2.0)}R -> 1.5R (tighter range for stable name)")
+                adj["r_multiple_target"] = 1.5
+            summary = f"Auto-tuned for low-volatility: wider squeeze window, lower vol bar, smaller target."
+
+        elif p.is_high_volatility:
+            if adj.get("contraction_percentile", 0.20) != 0.15:
+                changes.append(f"Contraction percentile: {adj.get('contraction_percentile', 0.20)} -> 0.15 (strict squeeze required on volatile name)")
+                adj["contraction_percentile"] = 0.15
+            if adj.get("r_multiple_target", 2.0) != 2.5:
+                changes.append(f"R target: {adj.get('r_multiple_target', 2.0)}R -> 2.5R (larger moves possible on {p.volatility_pct:.1f}% ATR)")
+                adj["r_multiple_target"] = 2.5
+            if adj.get("atr_stop_mult", 1.0) != 1.3:
+                changes.append(f"ATR stop mult: {adj.get('atr_stop_mult', 1.0)} -> 1.3 (wider stop needed on volatile name)")
+                adj["atr_stop_mult"] = 1.3
+            summary = f"Auto-tuned for high-volatility ({p.volatility_pct:.1f}% ATR): stricter squeeze, wider stops and targets."
+
+        else:
+            summary = f"Standard BB parameters ({p.volatility_pct:.1f}% ATR)."
+
+        return ConfigAdjustment(
+            strategy="BollingerMomentum", symbol=p.symbol,
+            original=orig, adjusted=adj, changes=changes,
+            reason_summary=summary,
+        )
+
+    # ── Supertrend Trend ──────────────────────────────────────────────────────
+    @staticmethod
+    def _adjust_st(p: SymbolProfile) -> ConfigAdjustment:
+        from app.services.strategy.daytrading.strategies.supertrend_trend import SupertrendTrend
+        orig = dict(SupertrendTrend.default_config)
+        adj = dict(orig)
+        changes: list[str] = []
+
+        if p.is_low_volatility:
+            if adj.get("st_multiplier", 3.0) != 2.0:
+                changes.append(f"ST multiplier: {adj.get('st_multiplier', 3.0)} -> 2.0 (tighter bands on stable name)")
+                adj["st_multiplier"] = 2.0
+            if adj.get("pullback_atr_dist", 0.5) != 0.3:
+                changes.append(f"Pullback distance: {adj.get('pullback_atr_dist', 0.5)}x ATR -> 0.3x (closer pullbacks needed on low-vol)")
+                adj["pullback_atr_dist"] = 0.3
+            if adj.get("atr_stop_mult", 1.5) != 1.2:
+                changes.append(f"ATR stop mult: {adj.get('atr_stop_mult', 1.5)} -> 1.2 (tighter stop on stable name)")
+                adj["atr_stop_mult"] = 1.2
+            summary = f"Auto-tuned for low-volatility: tighter ST bands, closer pullback window, tighter stop."
+
+        elif p.is_high_volatility:
+            if adj.get("st_multiplier", 3.0) != 3.5:
+                changes.append(f"ST multiplier: {adj.get('st_multiplier', 3.0)} -> 3.5 (wider bands needed on {p.volatility_pct:.1f}% ATR)")
+                adj["st_multiplier"] = 3.5
+            if adj.get("pullback_atr_dist", 0.5) != 0.8:
+                changes.append(f"Pullback distance: {adj.get('pullback_atr_dist', 0.5)}x ATR -> 0.8x (wider pullbacks on volatile name)")
+                adj["pullback_atr_dist"] = 0.8
+            if adj.get("r_multiple_target", 2.0) != 2.5:
+                changes.append(f"R target: {adj.get('r_multiple_target', 2.0)}R -> 2.5R (larger moves on high-vol)")
+                adj["r_multiple_target"] = 2.5
+            summary = f"Auto-tuned for high-volatility ({p.volatility_pct:.1f}% ATR): wider bands, bigger pullback window, larger target."
+
+        else:
+            summary = f"Standard Supertrend parameters ({p.volatility_pct:.1f}% ATR)."
+
+        return ConfigAdjustment(
+            strategy="SupertrendTrend", symbol=p.symbol,
             original=orig, adjusted=adj, changes=changes,
             reason_summary=summary,
         )

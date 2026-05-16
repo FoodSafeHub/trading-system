@@ -38,7 +38,7 @@ from app.services.strategy.daytrading.strategies import ALL_STRATEGIES, STRATEGY
 st.set_page_config(page_title="Day Trading", page_icon="⚡", layout="wide")
 st.title("⚡ Day Trading Signals")
 st.caption(
-    "5 intraday strategies on 5m and 15m bars. "
+    "7 intraday strategies on 5m and 15m bars. "
     "All signals expire at market close. No overnight holds."
 )
 
@@ -63,17 +63,26 @@ STRATEGY_DESCRIPTIONS = {
         "Volume Spike Reversal — catches capitulation moves driven by 3× volume spikes "
         "at RSI extremes. Works in all regimes."
     ),
+    "BollingerMomentum": (
+        "Bollinger Momentum Breakout — BB squeeze (band width in lowest 20%) "
+        "followed by close above/below the band with EMA + RSI + volume confirmation."
+    ),
+    "SupertrendTrend": (
+        "Supertrend Trend-Following — 15m Supertrend sets macro bias; 5m pullback "
+        "to ST/EMA20 with reclaim candle. Stop trails the 5m ST line."
+    ),
 }
 
 DEFAULT_SYMBOLS = "SPY,QQQ,AAPL,TSLA,NVDA,MSFT,AMZN,META"
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────
-tab_signals, tab_backtest, tab_sizer, tab_compare, tab_scanner, tab_config = st.tabs([
+tab_signals, tab_backtest, tab_sizer, tab_compare, tab_scanner, tab_autotrader, tab_config = st.tabs([
     "📡 Live Signals",
     "🔬 Backtest",
     "📐 Position Sizer",
     "📊 Compare All",
     "🔍 Scanner",
+    "🎯 Auto Trader",
     "⚙️ Config",
 ])
 
@@ -185,6 +194,101 @@ def _equity_chart(equity_curve: list, trades: list) -> go.Figure:
     return fig
 
 
+def _render_pipeline_diagnostics(diag: dict, expanded: bool = False) -> None:
+    """Render a structured pipeline diagnostics panel."""
+    if not diag:
+        return
+
+    data    = diag.get("data", {})
+    regime  = diag.get("regime", {})
+    signals = diag.get("signals", {})
+    brain   = diag.get("brain_filter", {})
+    exec_   = diag.get("execution", {})
+    dx      = diag.get("diagnosis", {})
+
+    root_cause = dx.get("root_cause", "")
+    steps      = dx.get("steps", [])
+
+    raw   = signals.get("raw_signals_generated", 0)
+    acc   = brain.get("accepted_signals", raw)  # backtest has no brain filter
+    rej   = brain.get("rejected_by_brain_total", 0)
+    execs = exec_.get("trades_opened", 0)
+
+    # ── Top-level funnel row ──────────────────────────────────────────────────
+    st.markdown("#### Pipeline Funnel")
+    f1, f2, f3, f4 = st.columns(4)
+    f1.metric("Raw Signals Found",  raw,
+              delta=f"Buy:{signals.get('raw_buy_signals',0)} Sell:{signals.get('raw_sell_signals',0)}",
+              delta_color="off")
+    f2.metric("Brain Accepted",     acc,
+              delta=f"-{rej} rejected" if rej else "no brain filter",
+              delta_color="inverse" if rej > 0 else "off")
+    f3.metric("Trades Executed",    execs,
+              delta=f"{exec_.get('trades_skipped_no_future_bars',0)} skip (no future bars)" if exec_.get('trades_skipped_no_future_bars',0) else None,
+              delta_color="off")
+    f4.metric("Days Skipped (Regime)", regime.get("days_skipped_by_regime", 0),
+              delta=f"/{data.get('trading_days_found', 0)} days total",
+              delta_color="off")
+
+    # ── Root cause ────────────────────────────────────────────────────────────
+    if root_cause:
+        if execs == 0 and raw == 0:
+            st.error(f"**Root cause:** {root_cause}")
+        elif execs == 0 and acc == 0 and raw > 0:
+            st.warning(f"**Root cause:** {root_cause}")
+        elif execs == 0 and acc > 0:
+            st.warning(f"**Root cause:** {root_cause}")
+        else:
+            st.success(f"**Status:** {root_cause}")
+
+    # ── Regime distribution ───────────────────────────────────────────────────
+    regime_dist = regime.get("distribution", {})
+    if regime_dist:
+        dist_str = " | ".join(f"{k}: {v}d" for k, v in sorted(regime_dist.items()))
+        st.caption(f"Regime distribution: {dist_str}")
+
+    skipped_strats = regime.get("strategies_skipped_by_regime", [])
+    if skipped_strats:
+        st.caption(f"Strategies blocked by regime: {', '.join(skipped_strats)}")
+
+    # ── Brain rejection breakdown ─────────────────────────────────────────────
+    if rej > 0:
+        with st.expander(f"Brain rejection breakdown ({rej} rejected)", expanded=False):
+            rb1, rb2, rb3, rb4, rb5, rb6 = st.columns(6)
+            rb1.metric("Regime",    brain.get("rejected_by_regime", 0))
+            rb2.metric("Volume",    brain.get("rejected_by_volume", 0))
+            rb3.metric("R:R",       brain.get("rejected_by_rr", 0))
+            rb4.metric("Time",      brain.get("rejected_by_time", 0))
+            rb5.metric("Extension", brain.get("rejected_by_extension", 0))
+            rb6.metric("Kill sw.",  brain.get("rejected_by_kill_switch", 0))
+            reasons = brain.get("rejection_reasons", [])
+            if reasons:
+                st.markdown("**Sample rejection reasons:**")
+                for r in reasons:
+                    st.caption(f"• {r}")
+
+    # ── Data info ─────────────────────────────────────────────────────────────
+    with st.expander("Data quality", expanded=False):
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("5m bars loaded",   data.get("bars_loaded_5m", 0))
+        d2.metric("Mkt-hours bars",   data.get("bars_in_market_hours", 0))
+        d3.metric("Trading days",     data.get("trading_days_found", 0))
+        d4.metric("Days skipped<4bars", data.get("trading_days_skipped_short", 0))
+        st.caption(
+            f"Range: {data.get('earliest_bar','?')[:16]} → "
+            f"{data.get('latest_bar','?')[:16]}  |  tz: {data.get('timezone','')}"
+        )
+        warn = data.get("data_warning", "")
+        if warn:
+            st.warning(warn)
+
+    # ── Full pipeline trace ───────────────────────────────────────────────────
+    if steps:
+        with st.expander("Full pipeline trace", expanded=expanded):
+            for step in steps:
+                st.code(step, language=None)
+
+
 def _metrics_row(m: dict) -> None:
     cols = st.columns(8)
     cols[0].metric("Net P&L", f"${m.get('net_pnl', m.get('total_pnl', 0)):,.0f}")
@@ -291,22 +395,40 @@ with tab_signals:
             st.caption(brain.get("routing_summary", ""))
             st.markdown("---")
 
-        # ── Signal metrics ────────────────────────────────────────────────────
-        buys = [s for s in signals if s["direction"] == "BUY"]
-        sells = [s for s in signals if s["direction"] == "SELL"]
-        holds = [s for s in signals if s["direction"] == "HOLD"]
+        # ── Signal counts (raw AND post-brain) ───────────────────────────────
+        raw_count = result.get("raw_signal_count", 0)
+        buys  = [s for s in signals if s.get("direction") == "BUY"]
+        sells = [s for s in signals if s.get("direction") in ("SELL", "SELL_SHORT")]
+        holds = [s for s in signals if s.get("direction") == "HOLD"]
 
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("BUY Signals", len(buys))
-        m2.metric("SELL Signals", len(sells))
-        m3.metric("HOLD", len(holds))
-        m4.metric("Regime", _regime_badge(regime))
-        m5.metric("Rejected by Brain", len(rejected))
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Raw Signals",        raw_count)
+        m2.metric("Brain Accepted",     len(signals))
+        m3.metric("Brain Rejected",     len(rejected))
+        m4.metric("Raw BUY",            result.get("diagnostics", {}).get("signals", {}).get("raw_buy_signals", 0))
+        m5.metric("Raw SELL",           result.get("diagnostics", {}).get("signals", {}).get("raw_sell_signals", 0))
+        m6.metric("Regime",             _regime_badge(regime))
 
-        if not signals:
-            st.info("No signals passed brain filters for current bars.")
+        # ── Pipeline diagnostics panel ────────────────────────────────────────
+        diag_data = result.get("diagnostics", {})
+        if diag_data:
+            st.markdown("---")
+            _render_pipeline_diagnostics(diag_data)
+            st.markdown("---")
+
+        if not signals and raw_count == 0:
+            st.info(
+                "**No raw candidate setups found in current bars.** "
+                "The strategies found no qualifying conditions. "
+                "See pipeline diagnostics above for details."
+            )
+        elif not signals and raw_count > 0:
+            st.warning(
+                f"**{raw_count} raw signals found but all rejected by brain filters.** "
+                "See pipeline diagnostics above for the breakdown."
+            )
         else:
-            st.markdown("### ✅ Accepted Signals")
+            st.markdown("### Accepted Signals")
             for i, sig in enumerate(signals):
                 _render_signal_card(sig, i)
                 brain_reason = sig.get("brain_reason", "")
@@ -315,7 +437,7 @@ with tab_signals:
                     st.caption(f"Brain: {brain_reason}  |  Size: {brain_size:.0%}")
 
         if rejected:
-            with st.expander(f"❌ {len(rejected)} signal(s) rejected by brain"):
+            with st.expander(f"{len(rejected)} signal(s) rejected by brain"):
                 for sig in rejected:
                     st.markdown(
                         f"**{sig.get('strategy')}** — {sig.get('direction')} @ "
@@ -474,6 +596,11 @@ with tab_backtest:
                 for change in adj.get("changes", []):
                     st.markdown(f"• {change}")
 
+        # ── Pipeline diagnostics (always shown) ──────────────────────────────
+        diag_data = bt_result.get("diagnostics", {})
+        if diag_data:
+            _render_pipeline_diagnostics(diag_data, expanded=bt_result.get("metrics", {}).get("total_trades", 0) == 0)
+
         # ── Zero-trades: rich explanation ─────────────────────────────────────
         if bt_result.get("metrics", {}).get("total_trades", 0) == 0:
             exp = bt_result.get("explanation", {})
@@ -488,7 +615,7 @@ with tab_backtest:
                     f"Fit score: {exp.get('fit_score', 0):.0%}"
                 )
 
-                with st.expander("🔍 Why no trades fired? (click to diagnose)", expanded=True):
+                with st.expander("Why no trades fired? (click to diagnose)", expanded=True):
                     st.markdown(exp.get("why_no_trades", ""))
 
                     st.markdown("#### Recommendations")
@@ -496,10 +623,10 @@ with tab_backtest:
                         st.markdown(f"• {rec}")
 
                     if alt:
-                        st.markdown(f"#### 🔄 Recommended alternative: **{alt}**")
+                        st.markdown(f"#### Recommended alternative: **{alt}**")
                         alt_period = exp.get("alternative_period", "90d")
                         if st.button(
-                            f"▶ Try {alt} on {bt_symbol} ({alt_period})",
+                            f"Try {alt} on {bt_symbol} ({alt_period})",
                             key=f"try_alt_{alt}",
                         ):
                             with st.spinner(f"Running {alt}…"):
@@ -870,3 +997,214 @@ with tab_config:
                 [{"Parameter": k, "Default Value": v} for k, v in cfg.items()]
             )
             st.dataframe(cfg_df, use_container_width=True, hide_index=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB — 🎯 Single Stock Auto Trader
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_autotrader:
+    st.markdown("### 🎯 Single Stock Auto Trader")
+    st.caption(
+        "Pick one symbol, configure risk, and let the bot manage the full intraday trade "
+        "from entry to exit — stops, trailing, partial TP, and EOD flatten included."
+    )
+
+    # ── Session-state init ────────────────────────────────────────────────────
+    if "at_trader" not in st.session_state:
+        st.session_state["at_trader"] = None
+    if "at_status" not in st.session_state:
+        st.session_state["at_status"] = {}
+
+    # ── Config panel ──────────────────────────────────────────────────────────
+    with st.expander("⚙️ Trader Configuration", expanded=True):
+        ac1, ac2, ac3 = st.columns(3)
+        at_symbol = ac1.text_input("Symbol", value="AAPL", key="at_symbol").strip().upper()
+        at_mode   = ac2.radio("Trade Mode", ["Paper", "Live-ready"], horizontal=True, key="at_mode")
+        at_dir    = ac3.radio(
+            "Direction", ["Long only", "Short only", "Both"],
+            horizontal=True, key="at_dir"
+        )
+
+        bc1, bc2, bc3, bc4 = st.columns(4)
+        at_risk_pct    = bc1.number_input("Risk per trade %", min_value=0.1, max_value=5.0, value=1.0, step=0.1, key="at_risk")
+        at_max_loss    = bc2.number_input("Max daily loss %", min_value=0.5, max_value=10.0, value=2.0, step=0.5, key="at_maxloss")
+        at_capital     = bc3.number_input("Capital ($)", min_value=1000, value=10000, step=1000, key="at_capital")
+        at_max_trades  = bc4.number_input("Max trades/day", min_value=1, max_value=20, value=6, step=1, key="at_maxtrades")
+
+        cc1, cc2 = st.columns(2)
+        at_partial_tp   = cc1.toggle("Partial take-profit at +1R", value=True, key="at_partial")
+        at_trail_mode   = cc2.selectbox(
+            "Trailing stop mode",
+            ["atr", "ema", "candle"],
+            key="at_trail",
+        )
+
+    # ── Control buttons ───────────────────────────────────────────────────────
+    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
+
+    start_pressed    = btn_col1.button("▶ Start Bot", use_container_width=True, type="primary", key="at_start")
+    stop_pressed     = btn_col2.button("⏹ Stop Bot", use_container_width=True, key="at_stop")
+    flatten_pressed  = btn_col3.button("🚨 Force Flatten", use_container_width=True, key="at_flatten")
+
+    if start_pressed:
+        try:
+            from app.services.strategy.daytrading.autotrader import SingleStockTrader
+            dir_map = {"Long only": "long_only", "Short only": "short_only", "Both": "both"}
+            trader = SingleStockTrader(
+                symbol=at_symbol,
+                broker=None,   # paper mode — no real broker needed
+                direction_mode=dir_map[at_dir],
+                trail_mode=at_trail_mode,
+                partial_tp=at_partial_tp,
+                risk_per_trade_pct=at_risk_pct / 100,
+                max_daily_loss_pct=at_max_loss,
+                max_trades_per_day=int(at_max_trades),
+                initial_capital=float(at_capital),
+                on_trade_update=lambda s: st.session_state.update({"at_status": s}),
+            )
+            old = st.session_state.get("at_trader")
+            if old is not None:
+                try:
+                    old.stop()
+                except Exception:
+                    pass
+            st.session_state["at_trader"] = trader
+            trader.start()
+            st.success(f"Auto Trader started for {at_symbol} ({at_mode} mode)")
+        except Exception as e:
+            st.error(f"Failed to start trader: {e}")
+
+    if stop_pressed:
+        trader_obj = st.session_state.get("at_trader")
+        if trader_obj:
+            trader_obj.stop()
+            st.info("Auto Trader stopped.")
+        else:
+            st.warning("No active trader to stop.")
+
+    if flatten_pressed:
+        trader_obj = st.session_state.get("at_trader")
+        if trader_obj:
+            trader_obj.force_flatten("Manual force flatten from UI")
+            st.warning("Force flatten executed.")
+        else:
+            st.warning("No active trader.")
+
+    # ── Refresh status ────────────────────────────────────────────────────────
+    trader_obj = st.session_state.get("at_trader")
+    if trader_obj is not None:
+        try:
+            st.session_state["at_status"] = trader_obj.get_status()
+        except Exception:
+            pass
+
+    status = st.session_state.get("at_status", {})
+    st.divider()
+
+    # ── Status panels ─────────────────────────────────────────────────────────
+    if not status:
+        st.info("Start the bot to see live status.")
+    else:
+        # ── Summary row ────────────────────────────────────────────────────────
+        s1, s2, s3, s4, s5 = st.columns(5)
+        _state_emoji = {
+            "FLAT": "⬜", "LONG": "🟢", "SHORT": "🔴",
+            "PARTIAL_EXIT_TAKEN": "🟡", "TRAILING": "🔵",
+            "EXITED": "✅", "BLOCKED": "🚫", "PENDING_ENTRY": "⏳",
+        }
+        state_val = status.get("state", "UNKNOWN")
+        s1.metric("Status", f"{_state_emoji.get(state_val, '❓')} {state_val}")
+        s2.metric("Symbol", status.get("symbol", "—"))
+        s3.metric("Market Regime", status.get("market_state", "—"))
+        s4.metric("Unrealized P&L", f"${status.get('unrealized_pnl', 0):+,.2f}")
+        s5.metric("Realized P&L", f"${status.get('realized_pnl', 0):+,.2f}")
+
+        # ── Management profile (always visible) ───────────────────────────────
+        mgmt_profile = status.get("management_profile", "")
+        if mgmt_profile:
+            st.caption(f"**Management profile:** {mgmt_profile}")
+
+        # ── Active trade panel ─────────────────────────────────────────────────
+        if state_val in ("LONG", "SHORT", "PARTIAL_EXIT_TAKEN", "TRAILING"):
+            st.markdown("#### Active Position")
+            tp1, tp2, tp3, tp4, tp5, tp6, tp7 = st.columns(7)
+            tp1.metric("Side",         status.get("side", "—"))
+            tp2.metric("Entry",        f"${status.get('entry_price', 0):.2f}")
+            tp3.metric("Stop",         f"${status.get('current_stop', 0):.2f}")
+            tp4.metric("Target",       f"${status.get('first_target', 0):.2f}")
+            r_val = status.get("r_multiple")
+            tp5.metric("R Multiple",   f"{r_val:+.2f}R" if r_val is not None else "—")
+            tp6.metric("Trail Mode",   status.get("active_trail_mode", "—"))
+            tp7.metric("Strategy",     status.get("strategy", "—"))
+
+        elif state_val == "FLAT":
+            cooldown_left = status.get("cooldown_bars_remaining", 0)
+            if cooldown_left > 0:
+                st.info(f"**Cooldown:** {cooldown_left} bar(s) remaining before next entry")
+            else:
+                no_trade_reason = status.get("last_no_trade_reason", "")
+                if no_trade_reason:
+                    st.info(f"**Why no trade?** {no_trade_reason}")
+
+        elif state_val == "BLOCKED":
+            st.error(f"**Trading BLOCKED:** {status.get('block_reason', 'Risk limit hit')}")
+
+        # ── Session stats ──────────────────────────────────────────────────────
+        st.markdown("#### Session Summary")
+        ss1, ss2, ss3, ss4 = st.columns(4)
+        ss1.metric("Trades today",     status.get("trades_today", 0))
+        ss2.metric("Consec. losses",   status.get("consecutive_losses", 0))
+        hb_age = status.get("heartbeat_age_s", 0)
+        hb_label = f"{hb_age:.0f}s ago" if hb_age < 120 else f"⚠️ {hb_age:.0f}s ago"
+        ss3.metric("Last heartbeat",   hb_label)
+        ss4.metric("Running",          "✅ Yes" if status.get("running") else "⏸ No")
+
+        # ── Closed trades table ────────────────────────────────────────────────
+        session_trades = status.get("session_trades", [])
+        if session_trades:
+            st.markdown("#### Today's Closed Trades")
+            rows = []
+            for t in session_trades:
+                rows.append({
+                    "Time": t.get("entry_time", "")[:19],
+                    "Side": t.get("side", ""),
+                    "Entry": t.get("entry_price", 0),
+                    "Exit": t.get("exit_price", 0),
+                    "Qty": t.get("qty", 0),
+                    "P&L ($)": t.get("pnl", 0),
+                    "P&L %": t.get("pnl_pct", 0),
+                    "Exit Reason": t.get("exit_reason", ""),
+                    "Strategy": t.get("strategy", ""),
+                })
+            trades_df = pd.DataFrame(rows)
+            st.dataframe(
+                trades_df.style.applymap(
+                    lambda v: "color: green" if isinstance(v, (int, float)) and v > 0 else
+                              "color: red"   if isinstance(v, (int, float)) and v < 0 else "",
+                    subset=["P&L ($)", "P&L %"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # ── Decision log ──────────────────────────────────────────────────────
+        log = status.get("decision_log", [])
+        if log:
+            with st.expander(f"📋 Decision Log ({len(log)} entries)"):
+                for entry in reversed(log[-30:]):
+                    icon = {
+                        "ENTRY LONG": "🟢", "ENTRY SHORT": "🔴",
+                        "EXIT": "✅", "EXIT LONG": "✅", "EXIT SHORT": "✅",
+                        "MOVE_STOP": "🔧", "PARTIAL_EXIT": "📤",
+                        "NO_TRADE": "⬜", "BLOCKED": "🚫",
+                        "TRAIL_ACTIVATED": "🔵", "RESET": "🔄",
+                    }.get(entry.get("event", ""), "ℹ️")
+                    st.markdown(
+                        f"`{entry['time']}` {icon} **{entry['event']}** — {entry['reason']}"
+                    )
+
+    # ── Auto-refresh while bot is running ─────────────────────────────────────
+    if status.get("running"):
+        import time as _t
+        _t.sleep(0.1)
+        st.rerun()

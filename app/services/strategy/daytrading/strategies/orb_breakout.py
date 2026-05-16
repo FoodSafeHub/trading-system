@@ -112,8 +112,11 @@ class ORBBreakout:
             if atr_val <= 0:
                 continue
 
-            # Skip untradeable wide ranges
-            if orb_height > cfg["max_orb_atr_ratio"] * atr_val:
+            # Skip untradeable wide ranges.
+            # Compare ORB height against multi-bar expected range (orb_bars * ATR),
+            # not a single 5m bar ATR. A 3-bar ORB covering 3x ATR is normal.
+            expected_orb_range = orb_bars * atr_val
+            if expected_orb_range > 0 and orb_height > cfg["max_orb_atr_ratio"] * expected_orb_range:
                 break
 
             # Entry buffer: close must be meaningfully above ORB high, not just touching it
