@@ -263,8 +263,19 @@ def get_premarket_gap(symbol: str, open_price: float | None = None) -> dict:
 
 
 def regime_allows_strategy(regime: str, strategy_name: str) -> bool:
-    """BEAR_OPEN only allows defensive strategies 3, 4, 5."""
-    bear_open_allowed = {"EMAMomentum", "OpeningGapFade", "VolumeSpikeReversal"}
+    """
+    BEAR_OPEN: only strategies that explicitly support shorting are allowed.
+    BollingerMomentum and SupertrendTrend have built-in short logic and
+    self-filter to shorts-only when BEAR_OPEN; pass them through.
+    See docs/strategies_spec.md for the full regime × strategy matrix.
+    """
+    bear_open_allowed = {
+        "EMAMomentum",
+        "OpeningGapFade",
+        "VolumeSpikeReversal",
+        "BollingerMomentum",   # shorts allowed; strategy returns [] for BULL_OPEN longs
+        "SupertrendTrend",     # shorts allowed; strategy uses 15m ST for direction
+    }
     if regime == "BEAR_OPEN" and strategy_name not in bear_open_allowed:
         return False
     return True

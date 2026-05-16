@@ -1,5 +1,6 @@
 """
 Supertrend Trend-Following — Strategy 7
+Canonical spec: docs/strategies_spec.md § "Strategy 7 — SupertrendTrend"
 
 Concept:
     The 15m Supertrend establishes the macro bias for the session. A 5m

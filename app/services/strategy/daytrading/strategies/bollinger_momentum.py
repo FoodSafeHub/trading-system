@@ -1,5 +1,6 @@
 """
 Bollinger Momentum Breakout — Strategy 6
+Canonical spec: docs/strategies_spec.md § "Strategy 6 — BollingerMomentum"
 
 Concept:
     Volatility contraction (BB squeeze) followed by a decisive close above
