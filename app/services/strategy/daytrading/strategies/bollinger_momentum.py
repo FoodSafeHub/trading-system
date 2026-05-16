@@ -72,7 +72,7 @@ class BollingerMomentum:
         "bb_std": 2.0,
         # ── Squeeze / contraction detection ─────────────────────────────────
         "contraction_lookback": 20,      # bars of history for squeeze percentile
-        "contraction_percentile": 0.25,  # band width must be in lowest 25%
+        "contraction_percentile": 0.40,  # band width must be in lowest 40%
         # ── RSI momentum filters ─────────────────────────────────────────────
         "rsi_period": 14,
         "rsi_long_min": 55,              # RSI must be at least this to confirm upside momentum
@@ -91,7 +91,7 @@ class BollingerMomentum:
         "breakout_close_pct": 0.60,      # close must be in top 60% of bar range
         "breakout_min_atr_frac": 0.10,   # close must exceed band by at least 0.10×ATR
         # ── Prior bar compression ─────────────────────────────────────────────
-        "require_prior_compression": True,  # prior bar range < 0.8 × avg range
+        "require_prior_compression": False,  # prior bar range < 0.8 × avg range
         "compression_atr_frac": 0.80,
         # ── Stop / target ─────────────────────────────────────────────────────
         # Stop is placed at breakout bar structural low/high buffered by ATR fraction.
@@ -115,33 +115,46 @@ class BollingerMomentum:
         cfg = {**self.default_config, **(config or {})}
         signals: list[DayTradeSignal] = []
 
-        # Need enough bars for BB warmup + contraction lookback
-        today_bars = _today_bars(df_5m)
-        if today_bars.empty or len(today_bars) < cfg["bb_length"] + 4:
+        # Compute all indicators on the full multi-day 5m history so that BB,
+        # RSI, EMA, and ATR are warmed up from prior-day bars.  This allows
+        # signals in the first hour without needing 20+ today-only bars.
+        # No lookahead: the runner passes only history up to the current date.
+        all_5m = _localize(df_5m)
+        min_bars = cfg["bb_length"] + cfg["contraction_lookback"] + 4
+        if all_5m.empty or len(all_5m) < min_bars:
             return signals
 
-        df = today_bars.copy()
+        today_date = all_5m.index[-1].date()
 
-        # ── Indicators ──────────────────────────────────────────────────────────
-        bb = tav.BollingerBands(df["Close"], window=cfg["bb_length"], window_dev=cfg["bb_std"])
-        df["bb_upper"] = bb.bollinger_hband()
-        df["bb_lower"] = bb.bollinger_lband()
-        df["bb_mid"]   = bb.bollinger_mavg()
-        df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_mid"].replace(0, float("nan"))
+        all_df = all_5m.copy()
 
-        df["ema_fast"] = tat.EMAIndicator(df["Close"], window=cfg["ema_fast"]).ema_indicator()
-        df["rsi"]      = tam.RSIIndicator(df["Close"], window=cfg["rsi_period"]).rsi()
-        df["atr"]      = tav.AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range()
-        df["bar_range"] = df["High"] - df["Low"]
-        df["range_avg"] = df["bar_range"].rolling(cfg["vol_rolling_bars"]).mean()
+        # ── Indicators on full history ───────────────────────────────────────────
+        bb = tav.BollingerBands(all_df["Close"], window=cfg["bb_length"], window_dev=cfg["bb_std"])
+        all_df["bb_upper"] = bb.bollinger_hband()
+        all_df["bb_lower"] = bb.bollinger_lband()
+        all_df["bb_mid"]   = bb.bollinger_mavg()
+        all_df["bb_width"] = (all_df["bb_upper"] - all_df["bb_lower"]) / all_df["bb_mid"].replace(0, float("nan"))
 
-        vol_avg    = df["Volume"].rolling(cfg["vol_rolling_bars"]).mean()
-        vwap_ser   = compute_vwap(df)
-        df["vwap"] = vwap_ser
+        all_df["ema_fast"]  = tat.EMAIndicator(all_df["Close"], window=cfg["ema_fast"]).ema_indicator()
+        all_df["rsi"]       = tam.RSIIndicator(all_df["Close"], window=cfg["rsi_period"]).rsi()
+        all_df["atr"]       = tav.AverageTrueRange(all_df["High"], all_df["Low"], all_df["Close"], window=14).average_true_range()
+        all_df["bar_range"] = all_df["High"] - all_df["Low"]
+        all_df["range_avg"] = all_df["bar_range"].rolling(cfg["vol_rolling_bars"]).mean()
+        all_df["vol_avg"]   = all_df["Volume"].rolling(cfg["vol_rolling_bars"]).mean()
+
+        # ── Slice to today for signal generation (VWAP resets daily) ────────────
+        today_mask = all_df.index.date == today_date
+        df = all_df[today_mask].copy()
+        if df.empty:
+            return signals
+
+        # VWAP computed on today's bars only (correct — resets at open)
+        df["vwap"] = compute_vwap(df)
 
         signal_seen = False
 
-        for i in range(cfg["contraction_lookback"], len(df)):
+        # Start from first today-bar that has a valid bb_width (warmup complete)
+        for i in range(len(df)):
             if signal_seen:
                 break
 
@@ -150,10 +163,8 @@ class BollingerMomentum:
             if bar_time and bar_time >= BB_LAST_ENTRY:
                 break
 
-            req_cols = ["bb_upper", "bb_lower", "bb_width", "ema_fast", "rsi", "atr", "bar_range", "range_avg"]
+            req_cols = ["bb_upper", "bb_lower", "bb_width", "ema_fast", "rsi", "atr", "bar_range", "range_avg", "vol_avg"]
             if any(pd.isna(bar[c]) for c in req_cols):
-                continue
-            if pd.isna(vol_avg.iloc[i]):
                 continue
 
             close      = float(bar["Close"])
@@ -170,13 +181,17 @@ class BollingerMomentum:
             range_avg  = float(bar["range_avg"])
             vwap_val   = float(bar["vwap"]) if not pd.isna(bar["vwap"]) else 0.0
             volume     = float(bar["Volume"])
-            avg_vol    = float(vol_avg.iloc[i])
+            avg_vol    = float(bar["vol_avg"])
 
             if atr_val <= 0 or avg_vol <= 0 or bar_range <= 0:
                 continue
 
-            # ── Squeeze detection ────────────────────────────────────────────────
-            lookback_widths = df["bb_width"].iloc[i - cfg["contraction_lookback"]: i].dropna()
+            # ── Squeeze detection using multi-day BB width history ───────────────
+            # Look back in all_df (not df) so the percentile window spans prior
+            # days.  This gives a meaningful squeeze threshold even in bar 1 of today.
+            bar_loc   = all_df.index.get_loc(bar.name)
+            lb_start  = max(0, bar_loc - cfg["contraction_lookback"])
+            lookback_widths = all_df["bb_width"].iloc[lb_start:bar_loc].dropna()
             if len(lookback_widths) < 10:
                 continue
             squeeze_threshold = lookback_widths.quantile(cfg["contraction_percentile"])
@@ -187,14 +202,18 @@ class BollingerMomentum:
 
             # ── RSI slope over last N bars ────────────────────────────────────────
             slope_lb = max(1, cfg["rsi_slope_lookback"])
-            rsi_prev = float(df["rsi"].iloc[i - slope_lb]) if not pd.isna(df["rsi"].iloc[i - slope_lb]) else rsi_val
+            rsi_prev_idx = max(0, bar_loc - slope_lb)
+            rsi_prev_val = all_df["rsi"].iloc[rsi_prev_idx]
+            rsi_prev = float(rsi_prev_val) if not pd.isna(rsi_prev_val) else rsi_val
             rsi_slope = rsi_val - rsi_prev   # positive = rising, negative = falling
 
             # ── EMA slope ────────────────────────────────────────────────────────
-            ema_prev = float(df["ema_fast"].iloc[i - 1]) if i >= 1 else ema_val
+            ema_prev_val = all_df["ema_fast"].iloc[max(0, bar_loc - 1)]
+            ema_prev = float(ema_prev_val) if not pd.isna(ema_prev_val) else ema_val
 
             # ── Prior bar compression ─────────────────────────────────────────────
-            prior_range = float(df["bar_range"].iloc[i - 1]) if i >= 1 else bar_range
+            prior_range_val = all_df["bar_range"].iloc[max(0, bar_loc - 1)]
+            prior_range = float(prior_range_val) if not pd.isna(prior_range_val) else bar_range
             prior_compressed = prior_range < cfg["compression_atr_frac"] * range_avg
 
             # ── LONG: BB squeeze + decisive breakout above upper band ─────────────
@@ -410,7 +429,8 @@ class BollingerMomentum:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
+def _localize(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure the DataFrame index is timezone-aware ET."""
     if df.empty:
         return df
     idx = pd.to_datetime(df.index)
@@ -420,8 +440,15 @@ def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
         idx = idx.tz_convert(ET)
     df = df.copy()
     df.index = idx
-    today = idx[-1].date()
-    return df[idx.date == today]
+    return df
+
+
+def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
+    df = _localize(df)
+    if df.empty:
+        return df
+    today = df.index[-1].date()
+    return df[df.index.date == today]
 
 
 def _momentum_quality_score(

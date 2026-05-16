@@ -398,7 +398,11 @@ def run_backtest(
             continue
 
         try:
-            signals = strategy.generate_signals(day_5m, day_15m, symbol, effective_config, regime)
+            # Pass full history up to (and including) the current date so
+            # strategies can warm up multi-day indicators (BB, RSI, EMA, ATR)
+            # without lookahead.  Strategies must slice to today internally.
+            hist_5m = df_5m[df_5m.index.date <= date]
+            signals = strategy.generate_signals(hist_5m, day_15m, symbol, effective_config, regime)
         except Exception as e:
             logger.warning("run_backtest: strategy %s raised %s on %s %s", strategy_name, e, symbol, date)
             continue
