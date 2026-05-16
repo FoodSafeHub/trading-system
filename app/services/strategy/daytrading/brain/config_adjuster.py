@@ -295,15 +295,31 @@ class ConfigAdjuster:
             if adj.get("rsi_short_max", 45) != 40:
                 changes.append("rsi_short_max: 45 -> 40 (require weaker RSI on volatile short)")
                 adj["rsi_short_max"] = 40
-            # Wider stop buffer — high-vol bars have large wicks
-            if adj.get("stop_atr_buffer", 0.25) != 0.4:
-                changes.append(f"Stop ATR buffer: {adj['stop_atr_buffer']} -> 0.4 (wider buffer for volatile name)")
-                adj["stop_atr_buffer"] = 0.4
+            # Wider normal stop buffer — average bars on high-vol symbols are wider
+            if adj.get("stop_atr_buffer", 0.25) != 0.35:
+                changes.append(f"Stop ATR buffer: {adj['stop_atr_buffer']} -> 0.35 (wider base buffer for volatile name)")
+                adj["stop_atr_buffer"] = 0.35
+            # Scale the wide-bar stop buffer further for extreme-vol names (TSLA >= 3% ATR)
+            wide_buf = round(min(0.80, 0.50 + max(0.0, p.volatility_pct - 2.0) * 0.10), 2)
+            if adj.get("stop_atr_buffer_high_vol", 0.50) != wide_buf:
+                changes.append(
+                    f"Wide-bar stop buffer: {adj.get('stop_atr_buffer_high_vol', 0.50)} -> {wide_buf} "
+                    f"(scaled for {p.volatility_pct:.1f}% ATR symbol)"
+                )
+                adj["stop_atr_buffer_high_vol"] = wide_buf
+            # Lower wide-bar trigger so more bars on volatile names get the wider stop
+            if adj.get("high_vol_bar_ratio", 1.8) != 1.5:
+                changes.append("high_vol_bar_ratio: 1.8 -> 1.5 (activate wide stop sooner on volatile name)")
+                adj["high_vol_bar_ratio"] = 1.5
             # Larger target — volatile names make bigger moves after squeeze
             if adj.get("r_multiple_target", 2.0) != 2.5:
                 changes.append(f"R target: {adj['r_multiple_target']}R -> 2.5R (larger moves on {p.volatility_pct:.1f}% ATR)")
                 adj["r_multiple_target"] = 2.5
-            summary = f"Auto-tuned for high-volatility ({p.volatility_pct:.1f}% ATR): stricter squeeze, stronger RSI required, wider stop buffer, larger target."
+            summary = (
+                f"Auto-tuned for high-volatility ({p.volatility_pct:.1f}% ATR): stricter squeeze, "
+                f"stronger RSI required, wider base stop ({adj['stop_atr_buffer']}×ATR), "
+                f"wide-bar stop ({wide_buf}×ATR at {adj['high_vol_bar_ratio']}× avg range), larger target."
+            )
 
         else:
             summary = f"Standard BB momentum parameters ({p.volatility_pct:.1f}% ATR)."

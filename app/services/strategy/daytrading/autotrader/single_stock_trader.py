@@ -35,10 +35,15 @@ from app.services.strategy.daytrading.brain.market_state import (
 )
 from app.services.strategy.daytrading.brain.risk_governor import RiskGovernor
 from app.services.strategy.daytrading.market_open import ET, is_market_open, now_et
+from app.services.strategy.daytrading.brain.symbol_policy import allows_live, get_policy
 
 logger = logging.getLogger(__name__)
 
-_POLL_INTERVAL_SEC   = 30     # how often to check for new bars
+_POLL_INTERVAL_SEC   = 30
+
+
+class PolicyError(RuntimeError):
+    """Raised when a symbol's deployment policy blocks live auto-trading."""     # how often to check for new bars
 _COOLDOWN_AFTER_LOSS = 2      # bars to wait before re-entering after a loss
 _REENTRY_BAR_LOCKOUT = 1      # bars to skip after any exit (win or loss)
 
@@ -135,10 +140,17 @@ class SingleStockTrader:
             self._df_15m = None
             logger.info("Symbol set to %s", self.symbol)
 
-    def start(self) -> None:
-        """Start the background polling thread."""
+    def start(self, regime: str | None = None) -> None:
+        """
+        Start the background polling thread.
+        Raises PolicyError if the symbol's deployment policy blocks live trading.
+        Pass regime= if already known (e.g. from a prior spy-regime check).
+        """
         if self._running:
             return
+        ok, reason = allows_live(self.symbol, regime)
+        if not ok:
+            raise PolicyError(reason)
         self._running = True
         self._thread = threading.Thread(
             target=self._run_loop,

@@ -98,6 +98,11 @@ class BollingerMomentum:
         # For momentum, this is WIDER than the old ATR-only stop on purpose —
         # we want to stay in through normal retests of the breakout level.
         "stop_atr_buffer": 0.25,        # buffer below bar low (long) or above bar high (short)
+        # Volatility-aware stop: when the breakout bar's range exceeds this multiple
+        # of the rolling average range, use the wider buffer instead.
+        # Handles TSLA/NVDA wide-wick bars without widening stops for SPY/AAPL.
+        "stop_atr_buffer_high_vol": 0.50,   # wider buffer on volatile bars
+        "high_vol_bar_ratio": 1.8,           # bar_range / range_avg threshold to activate
         "r_multiple_target": 2.0,
         "min_rr": 1.5,
         # ── Choppy-regime overrides (applied by ConfigAdjuster) ───────────────
@@ -273,8 +278,14 @@ class BollingerMomentum:
                     rejection_reason = f"Over-extended: {(close-ema_val)/atr_val:.1f}×ATR above EMA9 (max 3×)"
                 else:
                     # All checks pass
+                    # Volatility-aware stop: wide-wick bars get a wider buffer so
+                    # normal post-breakout retests don't immediately stop out.
+                    # Only activates when this bar is significantly wider than avg
+                    # (threshold controlled by high_vol_bar_ratio).
+                    is_wide_bar = (range_avg > 0) and (bar_range / range_avg >= cfg["high_vol_bar_ratio"])
+                    stop_buf = cfg["stop_atr_buffer_high_vol"] if is_wide_bar else cfg["stop_atr_buffer"]
                     entry  = close
-                    stop   = low_ - cfg["stop_atr_buffer"] * atr_val
+                    stop   = low_ - stop_buf * atr_val
                     risk   = entry - stop
                     if risk <= 0:
                         continue
@@ -329,6 +340,8 @@ class BollingerMomentum:
                             "prior_compressed":    prior_compressed,
                             "momentum_quality":    round(momentum_quality, 3),
                             "r_r":                 round(rr, 2),
+                            "stop_buffer_used":    round(stop_buf, 3),
+                            "wide_bar":            is_wide_bar,
                         },
                         signal_time=bar.name.isoformat(),
                     ))
@@ -363,8 +376,10 @@ class BollingerMomentum:
                         and compression_ok and vol_ok and vwap_ok and not_extended):
                     continue
 
+                is_wide_bar = (range_avg > 0) and (bar_range / range_avg >= cfg["high_vol_bar_ratio"])
+                stop_buf = cfg["stop_atr_buffer_high_vol"] if is_wide_bar else cfg["stop_atr_buffer"]
                 entry  = close
-                stop   = high_ + cfg["stop_atr_buffer"] * atr_val
+                stop   = high_ + stop_buf * atr_val
                 risk   = stop - entry
                 if risk <= 0:
                     continue
@@ -419,6 +434,8 @@ class BollingerMomentum:
                         "prior_compressed":    prior_compressed,
                         "momentum_quality":    round(momentum_quality, 3),
                         "r_r":                 round(rr, 2),
+                        "stop_buffer_used":    round(stop_buf, 3),
+                        "wide_bar":            is_wide_bar,
                     },
                     signal_time=bar.name.isoformat(),
                 ))

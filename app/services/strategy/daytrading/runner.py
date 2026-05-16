@@ -30,6 +30,7 @@ from app.services.strategy.daytrading.pipeline_diagnostics import (
     PipelineDiagnostics, _categorise_rejection,
 )
 from app.services.strategy.daytrading.strategies import ALL_STRATEGIES, STRATEGY_MAP
+from app.services.strategy.daytrading.brain.symbol_policy import allows_live, allows_scan
 
 from datetime import time as _time
 
@@ -125,6 +126,20 @@ def run_signals(
 
     spy_df = fetch_intraday("SPY", interval="5m", period="2d") if symbol != "SPY" else df_5m
     regime, spy_vs_vwap, gap_pct, gap_type = get_spy_regime(spy_df)
+
+    # ── Deployment policy gate ────────────────────────────────────────────────
+    live_ok, live_reason = allows_live(symbol, regime)
+    if not live_ok:
+        diag.data_warning = f"Policy blocked: {live_reason}"
+        diag.finalise()
+        return {
+            "signals": [],
+            "regime": regime,
+            "policy_blocked": True,
+            "policy_reason": live_reason,
+            "diagnostics": diag.to_dict(),
+            "market_status": status,
+        }
 
     raw_signals: list[dict] = []
     strategies_run: list[str] = []
@@ -881,6 +896,10 @@ def run_backtest_all(
     period: str = "60d",
     initial_capital: float = 10_000.0,
 ) -> list[dict[str, Any]]:
+    scan_ok, scan_reason = allows_scan(symbol)
+    if not scan_ok:
+        logger.info("run_backtest_all: %s excluded by policy — %s", symbol, scan_reason)
+        return []
     results = []
     for strategy in ALL_STRATEGIES:
         result = run_backtest(symbol, strategy.name, period, initial_capital)

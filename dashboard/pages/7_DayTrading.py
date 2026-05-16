@@ -76,7 +76,7 @@ STRATEGY_DESCRIPTIONS = {
 DEFAULT_SYMBOLS = "SPY,QQQ,AAPL,TSLA,NVDA,MSFT,AMZN,META"
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────
-tab_signals, tab_backtest, tab_sizer, tab_compare, tab_scanner, tab_autotrader, tab_config = st.tabs([
+tab_signals, tab_backtest, tab_sizer, tab_compare, tab_scanner, tab_autotrader, tab_config, tab_policy = st.tabs([
     "📡 Live Signals",
     "🔬 Backtest",
     "📐 Position Sizer",
@@ -84,6 +84,7 @@ tab_signals, tab_backtest, tab_sizer, tab_compare, tab_scanner, tab_autotrader, 
     "🔍 Scanner",
     "🎯 Auto Trader",
     "⚙️ Config",
+    "🛡 Symbol Policy",
 ])
 
 
@@ -1107,6 +1108,8 @@ with tab_autotrader:
     if start_pressed:
         try:
             from app.services.strategy.daytrading.autotrader import SingleStockTrader
+            from app.services.strategy.daytrading.autotrader.single_stock_trader import PolicyError
+            from app.services.strategy.daytrading.brain.symbol_policy import get_policy
             dir_map = {"Long only": "long_only", "Short only": "short_only", "Both": "both"}
             trader = SingleStockTrader(
                 symbol=at_symbol,
@@ -1129,6 +1132,15 @@ with tab_autotrader:
             st.session_state["at_trader"] = trader
             trader.start()
             st.success(f"Auto Trader started for {at_symbol} ({at_mode} mode)")
+        except PolicyError as e:
+            pol = get_policy(at_symbol)
+            st.error(f"🚫 **Deployment policy blocked auto-trade for {at_symbol}**")
+            st.warning(
+                f"**Status:** {pol.badge()}  \n"
+                f"**Reason:** {pol.reason}  \n"
+                f"**Walk-forward verdict:** {pol.wf_verdict} (score {pol.wf_score:.0f}/100)  \n\n"
+                f"To override: enable *Manual Override* in the Symbol Policy panel below."
+            )
         except Exception as e:
             st.error(f"Failed to start trader: {e}")
 
@@ -1266,3 +1278,126 @@ with tab_autotrader:
         import time as _t
         _t.sleep(0.1)
         st.rerun()
+
+
+# ── Symbol Policy tab ─────────────────────────────────────────────────────────
+with tab_policy:
+    from app.services.strategy.daytrading.brain.symbol_policy import (
+        all_policies, get_policy, set_override,
+        ENABLED, MONITOR_ONLY, REGIME_DEPENDENT, DISABLED,
+        SymbolPolicy, set_policy,
+    )
+
+    st.markdown("### Symbol Deployment Policy")
+    st.caption(
+        "Controls which symbols are cleared for live auto-trading. "
+        "Policies are derived from walk-forward validation results. "
+        "Changes here take effect immediately but reset on server restart."
+    )
+
+    # ── Summary table ──────────────────────────────────────────────────────────
+    policies = all_policies()
+    if policies:
+        rows = []
+        for p in policies:
+            rows.append({
+                "Symbol":    p["symbol"],
+                "Status":    p["badge"],
+                "WF Verdict": p["wf_verdict"].title(),
+                "WF Score":  f"{p['wf_score']:.0f}/100",
+                "Override":  "YES" if p["override_live"] else "—",
+                "Scan":      "✅" if p["allows_scan"] else "🚫",
+                "Reason":    p["reason"],
+            })
+        policy_df = pd.DataFrame(rows)
+        st.dataframe(
+            policy_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Reason": st.column_config.TextColumn(width="large"),
+                "Status": st.column_config.TextColumn(width="small"),
+            },
+        )
+
+    st.divider()
+
+    # ── Per-symbol detail + override ──────────────────────────────────────────
+    st.markdown("#### Adjust a Symbol")
+    pol_col1, pol_col2 = st.columns([1, 2])
+
+    with pol_col1:
+        known_syms = [p["symbol"] for p in policies]
+        extra_sym  = st.text_input("Symbol (add or edit)", value="", key="pol_sym_input").upper().strip()
+        edit_sym   = extra_sym if extra_sym else (known_syms[0] if known_syms else "AAPL")
+
+    pol = get_policy(edit_sym)
+
+    with pol_col2:
+        st.markdown(f"**Current policy for {edit_sym}:** {pol.badge()}")
+        st.caption(pol.reason)
+        if pol.wf_verdict:
+            st.caption(f"Walk-forward: **{pol.wf_verdict}** · score {pol.wf_score:.0f}/100")
+
+    st.markdown("")
+    ov_col, st_col = st.columns(2)
+    with ov_col:
+        new_override = st.checkbox(
+            "Manual live override (bypasses policy for this symbol)",
+            value=pol.override_live,
+            key=f"pol_override_{edit_sym}",
+            help="When checked, this symbol is allowed to auto-trade regardless of its status.",
+        )
+
+    with st_col:
+        status_options = [ENABLED, MONITOR_ONLY, REGIME_DEPENDENT, DISABLED]
+        status_labels  = {
+            ENABLED:          "✅ Enabled — live auto-trade allowed",
+            MONITOR_ONLY:     "👁 Monitor only — scans yes, auto-trade no",
+            REGIME_DEPENDENT: "🔀 Regime dependent — live only in allowed regimes",
+            DISABLED:         "🚫 Disabled — excluded from all live flows",
+        }
+        new_status = st.selectbox(
+            "Deployment status",
+            options=status_options,
+            index=status_options.index(pol.status) if pol.status in status_options else 1,
+            format_func=lambda s: status_labels[s],
+            key=f"pol_status_{edit_sym}",
+        )
+
+    new_reason = st.text_area(
+        "Reason / notes",
+        value=pol.reason,
+        height=80,
+        key=f"pol_reason_{edit_sym}",
+    )
+
+    if st.button("💾 Save policy change", key="pol_save"):
+        updated = SymbolPolicy(
+            symbol=edit_sym,
+            status=new_status,
+            reason=new_reason,
+            wf_verdict=pol.wf_verdict,
+            wf_score=pol.wf_score,
+            override_live=new_override,
+            allowed_regimes=pol.allowed_regimes,
+        )
+        set_policy(edit_sym, updated)
+        st.success(f"Policy for {edit_sym} updated to: {updated.badge()}")
+        st.rerun()
+
+    # ── Live signals policy note ───────────────────────────────────────────────
+    st.divider()
+    st.markdown("#### How policies are enforced")
+    st.markdown("""
+| Flow | Gate | Effect when blocked |
+|------|------|---------------------|
+| **Live Signals** (`run_signals`) | `allows_live(symbol, regime)` | Returns empty signal list with `policy_blocked=True` and reason |
+| **Compare All** (`run_backtest_all`) | `allows_scan(symbol)` | Returns empty results list |
+| **Auto Trader** (`SingleStockTrader.start`) | `allows_live(symbol)` | Raises `PolicyError` — UI shows reason and walk-forward verdict |
+| **Backtest** (single strategy) | Not gated — research always allowed | Backtest runs regardless of live policy |
+""")
+    st.caption(
+        "Policy changes are in-memory only and reset on server restart. "
+        "To make permanent changes, edit `brain/symbol_policy.py` directly."
+    )
