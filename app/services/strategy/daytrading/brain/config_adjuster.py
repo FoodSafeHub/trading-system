@@ -262,31 +262,51 @@ class ConfigAdjuster:
         changes: list[str] = []
 
         if p.is_low_volatility:
-            if adj.get("contraction_percentile", 0.20) != 0.30:
-                changes.append(f"Contraction percentile: {adj.get('contraction_percentile', 0.20)} -> 0.30 (wider squeeze window for stable name)")
-                adj["contraction_percentile"] = 0.30
+            # Wider squeeze window — low-vol names don't compress as sharply
+            if adj.get("contraction_percentile", 0.25) != 0.35:
+                changes.append(f"Contraction percentile: {adj['contraction_percentile']} -> 0.35 (wider squeeze window for stable name)")
+                adj["contraction_percentile"] = 0.35
+            # Lower vol bar — stable names never spike 1.2× on breakouts
             if adj.get("vol_rel_min", 1.2) != 1.0:
-                changes.append(f"Volume minimum: {adj.get('vol_rel_min', 1.2)}x -> 1.0x (lower vol expected on stable names)")
+                changes.append(f"Volume minimum: {adj['vol_rel_min']}x -> 1.0x (low vol name)")
                 adj["vol_rel_min"] = 1.0
+            # RSI thresholds widen — low-vol names show weaker momentum readings
+            if adj.get("rsi_long_min", 55) != 50:
+                changes.append("rsi_long_min: 55 -> 50 (weaker RSI signals on low-vol name)")
+                adj["rsi_long_min"] = 50
+            if adj.get("rsi_short_max", 45) != 50:
+                changes.append("rsi_short_max: 45 -> 50 (weaker RSI on low-vol short)")
+                adj["rsi_short_max"] = 50
+            # Smaller target — low-vol names move less
             if adj.get("r_multiple_target", 2.0) != 1.5:
-                changes.append(f"R target: {adj.get('r_multiple_target', 2.0)}R -> 1.5R (tighter range for stable name)")
+                changes.append(f"R target: {adj['r_multiple_target']}R -> 1.5R (tighter range for stable name)")
                 adj["r_multiple_target"] = 1.5
-            summary = f"Auto-tuned for low-volatility: wider squeeze window, lower vol bar, smaller target."
+            summary = "Auto-tuned for low-volatility: wider squeeze window, lower vol bar, relaxed RSI, smaller target."
 
         elif p.is_high_volatility:
-            if adj.get("contraction_percentile", 0.20) != 0.15:
-                changes.append(f"Contraction percentile: {adj.get('contraction_percentile', 0.20)} -> 0.15 (strict squeeze required on volatile name)")
+            # Stricter squeeze — volatile names are always "wide", need deeper contraction
+            if adj.get("contraction_percentile", 0.25) != 0.15:
+                changes.append(f"Contraction percentile: {adj['contraction_percentile']} -> 0.15 (stricter squeeze on volatile name)")
                 adj["contraction_percentile"] = 0.15
+            # Higher RSI floor — volatile names show stronger momentum on real breakouts
+            if adj.get("rsi_long_min", 55) != 60:
+                changes.append("rsi_long_min: 55 -> 60 (require stronger RSI on volatile name)")
+                adj["rsi_long_min"] = 60
+            if adj.get("rsi_short_max", 45) != 40:
+                changes.append("rsi_short_max: 45 -> 40 (require weaker RSI on volatile short)")
+                adj["rsi_short_max"] = 40
+            # Wider stop buffer — high-vol bars have large wicks
+            if adj.get("stop_atr_buffer", 0.25) != 0.4:
+                changes.append(f"Stop ATR buffer: {adj['stop_atr_buffer']} -> 0.4 (wider buffer for volatile name)")
+                adj["stop_atr_buffer"] = 0.4
+            # Larger target — volatile names make bigger moves after squeeze
             if adj.get("r_multiple_target", 2.0) != 2.5:
-                changes.append(f"R target: {adj.get('r_multiple_target', 2.0)}R -> 2.5R (larger moves possible on {p.volatility_pct:.1f}% ATR)")
+                changes.append(f"R target: {adj['r_multiple_target']}R -> 2.5R (larger moves on {p.volatility_pct:.1f}% ATR)")
                 adj["r_multiple_target"] = 2.5
-            if adj.get("atr_stop_mult", 1.0) != 1.3:
-                changes.append(f"ATR stop mult: {adj.get('atr_stop_mult', 1.0)} -> 1.3 (wider stop needed on volatile name)")
-                adj["atr_stop_mult"] = 1.3
-            summary = f"Auto-tuned for high-volatility ({p.volatility_pct:.1f}% ATR): stricter squeeze, wider stops and targets."
+            summary = f"Auto-tuned for high-volatility ({p.volatility_pct:.1f}% ATR): stricter squeeze, stronger RSI required, wider stop buffer, larger target."
 
         else:
-            summary = f"Standard BB parameters ({p.volatility_pct:.1f}% ATR)."
+            summary = f"Standard BB momentum parameters ({p.volatility_pct:.1f}% ATR)."
 
         return ConfigAdjustment(
             strategy="BollingerMomentum", symbol=p.symbol,
@@ -306,25 +326,28 @@ class ConfigAdjuster:
             if adj.get("st_multiplier", 3.0) != 2.0:
                 changes.append(f"ST multiplier: {adj.get('st_multiplier', 3.0)} -> 2.0 (tighter bands on stable name)")
                 adj["st_multiplier"] = 2.0
-            if adj.get("pullback_atr_dist", 0.5) != 0.3:
-                changes.append(f"Pullback distance: {adj.get('pullback_atr_dist', 0.5)}x ATR -> 0.3x (closer pullbacks needed on low-vol)")
-                adj["pullback_atr_dist"] = 0.3
-            if adj.get("atr_stop_mult", 1.5) != 1.2:
-                changes.append(f"ATR stop mult: {adj.get('atr_stop_mult', 1.5)} -> 1.2 (tighter stop on stable name)")
-                adj["atr_stop_mult"] = 1.2
+            if adj.get("pullback_atr_dist", 0.8) != 0.5:
+                changes.append(f"Pullback distance: {adj.get('pullback_atr_dist', 0.8)}x ATR -> 0.5x (closer pullbacks on low-vol)")
+                adj["pullback_atr_dist"] = 0.5
+            if adj.get("atr_stop_mult", 1.0) != 0.8:
+                changes.append(f"ATR stop mult: {adj.get('atr_stop_mult', 1.0)} -> 0.8 (tighter stop on stable name)")
+                adj["atr_stop_mult"] = 0.8
             summary = f"Auto-tuned for low-volatility: tighter ST bands, closer pullback window, tighter stop."
 
         elif p.is_high_volatility:
             if adj.get("st_multiplier", 3.0) != 3.5:
                 changes.append(f"ST multiplier: {adj.get('st_multiplier', 3.0)} -> 3.5 (wider bands needed on {p.volatility_pct:.1f}% ATR)")
                 adj["st_multiplier"] = 3.5
-            if adj.get("pullback_atr_dist", 0.5) != 0.8:
-                changes.append(f"Pullback distance: {adj.get('pullback_atr_dist', 0.5)}x ATR -> 0.8x (wider pullbacks on volatile name)")
-                adj["pullback_atr_dist"] = 0.8
+            if adj.get("pullback_atr_dist", 0.8) != 1.2:
+                changes.append(f"Pullback distance: {adj.get('pullback_atr_dist', 0.8)}x ATR -> 1.2x (wider pullbacks on volatile name)")
+                adj["pullback_atr_dist"] = 1.2
+            if adj.get("atr_stop_mult", 1.0) != 1.5:
+                changes.append(f"ATR stop mult: {adj.get('atr_stop_mult', 1.0)} -> 1.5 (wider stop needed on {p.volatility_pct:.1f}% ATR name)")
+                adj["atr_stop_mult"] = 1.5
             if adj.get("r_multiple_target", 2.0) != 2.5:
                 changes.append(f"R target: {adj.get('r_multiple_target', 2.0)}R -> 2.5R (larger moves on high-vol)")
                 adj["r_multiple_target"] = 2.5
-            summary = f"Auto-tuned for high-volatility ({p.volatility_pct:.1f}% ATR): wider bands, bigger pullback window, larger target."
+            summary = f"Auto-tuned for high-volatility ({p.volatility_pct:.1f}% ATR): wider bands, bigger pullback window, wider stop, larger target."
 
         else:
             summary = f"Standard Supertrend parameters ({p.volatility_pct:.1f}% ATR)."

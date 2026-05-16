@@ -69,7 +69,7 @@ class VWAPMeanReversion:
             return signals
 
         today = _today_bars(df_5m)
-        if today.empty or len(today) < 20:
+        if today.empty or len(today) < 6:  # NaN guard in loop handles rolling-20 warmup; was 20 (blocked until 10:10 AM)
             return signals
 
         today = today.copy()

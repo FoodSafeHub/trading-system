@@ -68,7 +68,7 @@ class VolumeSpikeReversal:
         signals: list[DayTradeSignal] = []
 
         today = _today_bars(df_5m)
-        if today.empty or len(today) < 22:
+        if today.empty or len(today) < 15:  # 10-bar peak window + RSI warmup; was 22 (blocked until 11 AM)
             return signals
 
         today = today.copy()

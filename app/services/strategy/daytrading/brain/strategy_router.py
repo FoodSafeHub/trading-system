@@ -26,13 +26,15 @@ ALL_STRATEGY_NAMES = [
     "EMAMomentum",
     "OpeningGapFade",
     "VolumeSpikeReversal",
+    "BollingerMomentum",
+    "SupertrendTrend",
 ]
 
 # Routing table: state → allowed strategy names
 _ROUTING_TABLE: dict[str, list[str]] = {
-    TREND_UP:   ["ORBBreakout", "EMAMomentum", "VWAPMeanReversion"],
-    TREND_DOWN: ["EMAMomentum", "VolumeSpikeReversal", "OpeningGapFade"],
-    CHOPPY:     ["VWAPMeanReversion"],
+    TREND_UP:   ["ORBBreakout", "EMAMomentum", "VWAPMeanReversion", "BollingerMomentum", "SupertrendTrend"],
+    TREND_DOWN: ["EMAMomentum", "VolumeSpikeReversal", "OpeningGapFade", "BollingerMomentum", "SupertrendTrend"],
+    CHOPPY:     ["VWAPMeanReversion", "BollingerMomentum"],
     HIGH_VOL:   ["VolumeSpikeReversal"],
     NEWS_RISK:  [],   # all blocked
 }
@@ -52,29 +54,37 @@ _BLOCK_REASONS: dict[str, dict[str, str]] = {
         "EMAMomentum":          "EMA momentum requires directional trend — disabled in CHOPPY.",
         "OpeningGapFade":       "Gap fades need initial momentum to fade — unreliable in CHOPPY.",
         "VolumeSpikeReversal":  "Volume spikes without trend context produce noisy signals.",
+        "SupertrendTrend":      "Supertrend requires clear macro direction — disabled in CHOPPY.",
     },
     HIGH_VOL: {
         "ORBBreakout":          "ORB range is too wide in HIGH_VOL — stop distance unacceptable.",
         "VWAPMeanReversion":    "VWAP mean reversion fails when price trends hard away from VWAP.",
         "EMAMomentum":          "EMA crossovers are unreliable during spike volatility.",
         "OpeningGapFade":       "Gaps in HIGH_VOL sessions are often news-driven and don't fill.",
+        "BollingerMomentum":    "BB squeeze signals are invalidated by HIGH_VOL expansion — too many false breakouts.",
+        "SupertrendTrend":      "Supertrend flips rapidly in HIGH_VOL — direction unreliable.",
     },
     NEWS_RISK: {s: "NEWS_RISK detected — no new entries until catalyst is understood." for s in ALL_STRATEGY_NAMES},
 }
 
 _ALLOW_REASONS: dict[str, dict[str, str]] = {
     TREND_UP: {
-        "ORBBreakout":      "ORB breakouts have highest follow-through in TREND_UP.",
-        "EMAMomentum":      "EMA momentum thrives in directional uptrend sessions.",
-        "VWAPMeanReversion": "VWAP pullbacks offer lower-risk long entries in uptrends.",
+        "ORBBreakout":         "ORB breakouts have highest follow-through in TREND_UP.",
+        "EMAMomentum":         "EMA momentum thrives in directional uptrend sessions.",
+        "VWAPMeanReversion":   "VWAP pullbacks offer lower-risk long entries in uptrends.",
+        "BollingerMomentum":   "BB squeeze breakouts in a trend confirm directional momentum.",
+        "SupertrendTrend":     "Supertrend pullbacks in TREND_UP are high-probability continuation trades.",
     },
     TREND_DOWN: {
-        "EMAMomentum":          "EMA bearish crossover is valid in TREND_DOWN (short side).",
-        "VolumeSpikeReversal":  "Capitulation spikes in downtrends offer high-quality bounce trades.",
-        "OpeningGapFade":       "Gap-down fades work well when downtrend is already in place.",
+        "EMAMomentum":         "EMA bearish crossover is valid in TREND_DOWN (short side).",
+        "VolumeSpikeReversal": "Capitulation spikes in downtrends offer high-quality bounce trades.",
+        "OpeningGapFade":      "Gap-down fades work well when downtrend is already in place.",
+        "BollingerMomentum":   "BB breakdown shorts are valid in TREND_DOWN.",
+        "SupertrendTrend":     "Supertrend bearish pullbacks align with the session downtrend.",
     },
     CHOPPY: {
-        "VWAPMeanReversion": "VWAP mean reversion is the only strategy with edge in range-bound sessions.",
+        "VWAPMeanReversion":   "VWAP mean reversion is the primary strategy in range-bound sessions.",
+        "BollingerMomentum":   "BB squeezes can signal directional resolution even in choppy conditions.",
     },
     HIGH_VOL: {
         "VolumeSpikeReversal": "Volume spike reversals are specifically designed for elevated volatility.",

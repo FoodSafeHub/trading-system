@@ -57,6 +57,14 @@ class PipelineDiagnostics:
     trades_closed: int = 0
     trades_skipped_no_future_bars: int = 0
 
+    # ── First-hour window (9:30–10:30 AM ET) ─────────────────────────────────
+    first_hour_bars_loaded: int = 0
+    first_hour_raw_signals: int = 0
+    first_hour_brain_rejections: int = 0
+    first_hour_executed_trades: int = 0
+    first_hour_top_rejection_reason: str = ""
+    first_hour_rejection_counts: dict[str, int] = field(default_factory=dict)
+
     # ── Root cause diagnosis ──────────────────────────────────────────────────
     root_cause: str = ""      # human-readable single-sentence root cause
     diagnosis_steps: list[str] = field(default_factory=list)
@@ -165,6 +173,18 @@ class PipelineDiagnostics:
             )
             steps.append(f"STATUS: OK — {self.trades_opened} trades executed")
 
+        # ── First-hour summary ────────────────────────────────────────────────
+        if self.first_hour_bars_loaded > 0 or self.first_hour_raw_signals > 0:
+            fh_parts = [
+                f"bars={self.first_hour_bars_loaded}",
+                f"raw_signals={self.first_hour_raw_signals}",
+                f"brain_rejected={self.first_hour_brain_rejections}",
+                f"executed={self.first_hour_executed_trades}",
+            ]
+            if self.first_hour_top_rejection_reason:
+                fh_parts.append(f"top_rejection={self.first_hour_top_rejection_reason}")
+            steps.append(f"FIRST HOUR (9:30–10:30): {', '.join(fh_parts)}")
+
         self.diagnosis_steps = steps
 
     def to_dict(self) -> dict[str, Any]:
@@ -210,6 +230,14 @@ class PipelineDiagnostics:
                 "trades_opened": self.trades_opened,
                 "trades_closed": self.trades_closed,
                 "trades_skipped_no_future_bars": self.trades_skipped_no_future_bars,
+            },
+            "first_hour": {
+                "bars_loaded": self.first_hour_bars_loaded,
+                "raw_signals": self.first_hour_raw_signals,
+                "brain_rejections": self.first_hour_brain_rejections,
+                "executed_trades": self.first_hour_executed_trades,
+                "top_rejection_reason": self.first_hour_top_rejection_reason,
+                "rejection_counts": self.first_hour_rejection_counts,
             },
             "diagnosis": {
                 "root_cause": self.root_cause,

@@ -31,7 +31,11 @@ from app.services.strategy.daytrading.pipeline_diagnostics import (
 )
 from app.services.strategy.daytrading.strategies import ALL_STRATEGIES, STRATEGY_MAP
 
+from datetime import time as _time
+
 logger = logging.getLogger(__name__)
+
+_FIRST_HOUR_END = _time(10, 30)   # signals/bars at or before this are "first hour"
 
 # Module-level brain singleton
 _brain = DayTradingBrain()
@@ -238,6 +242,35 @@ def run_signals(
         diag.accepted_signals = len(accepted_signals)
         diag.rejection_reasons = rejection_sample
 
+        # ── First-hour window instrumentation ──────────────────────────────
+        fh_bars_today = df_5m.between_time("09:30", "10:30")
+        diag.first_hour_bars_loaded = len(fh_bars_today)
+        fh_rej_counts: dict[str, int] = {}
+        for sig_d in raw_signals:
+            try:
+                st = pd.Timestamp(sig_d.get("signal_time", ""))
+                if st.tzinfo is None:
+                    st = st.tz_localize(ET)
+                if st.time() <= _FIRST_HOUR_END:
+                    diag.first_hour_raw_signals += 1
+            except Exception:
+                pass
+        for dec in decisions:
+            try:
+                st = pd.Timestamp((dec.signal or {}).get("signal_time", ""))
+                if st.tzinfo is None:
+                    st = st.tz_localize(ET)
+                if st.time() <= _FIRST_HOUR_END:
+                    if not dec.accepted:
+                        diag.first_hour_brain_rejections += 1
+                        cat = _categorise_rejection(dec.rejection_reason or "")
+                        fh_rej_counts[cat] = fh_rej_counts.get(cat, 0) + 1
+            except Exception:
+                pass
+        diag.first_hour_rejection_counts = fh_rej_counts
+        if fh_rej_counts:
+            diag.first_hour_top_rejection_reason = max(fh_rej_counts, key=fh_rej_counts.get)
+
         logger.info(
             "run_signals: %s brain accepted=%d rejected=%d "
             "(regime=%d vol=%d rr=%d time=%d ext=%d kill=%d other=%d)",
@@ -376,6 +409,21 @@ def run_backtest(
         diag.raw_sell_signals += sum(1 for s in day_raw if s.direction in ("SELL", "SELL_SHORT"))
         diag.raw_hold_signals += sum(1 for s in signals if s.direction == "HOLD")
 
+        # First-hour bar count (9:30–10:30 ET)
+        fh_bars = day_5m.between_time("09:30", "10:30")
+        diag.first_hour_bars_loaded += len(fh_bars)
+        # First-hour raw signals
+        for s in day_raw:
+            try:
+                st = pd.Timestamp(s.signal_time)
+                if st.tzinfo is None:
+                    from app.services.strategy.daytrading.market_open import ET as _ET
+                    st = st.tz_localize(_ET)
+                if st.time() <= _FIRST_HOUR_END:
+                    diag.first_hour_raw_signals += 1
+            except Exception:
+                pass
+
         if day_raw:
             logger.debug(
                 "run_backtest: %s %s regime=%s → %d raw signals",
@@ -403,6 +451,16 @@ def run_backtest(
                 continue
 
             diag.trades_opened += 1
+            # First-hour trade tracking
+            try:
+                st_check = pd.Timestamp(sig.signal_time)
+                if st_check.tzinfo is None:
+                    from app.services.strategy.daytrading.market_open import ET as _ET2
+                    st_check = st_check.tz_localize(_ET2)
+                if st_check.time() <= _FIRST_HOUR_END:
+                    diag.first_hour_executed_trades += 1
+            except Exception:
+                pass
 
             outcome = "OPEN"
             exit_price = entry
@@ -873,12 +931,20 @@ def run_backtest_with_brain(
     profile = SymbolAnalyzer.analyze(fetch_intraday(symbol, "5m", "60d"), symbol)
     dates = sorted(set(df_5m.index.date))
 
+    # Diagnostics for the brain-filtered pass
+    brain_diag = PipelineDiagnostics(symbol=symbol, period=period)
+    brain_diag.bars_loaded_5m = len(df_5m)
+    brain_diag.bars_loaded_15m = len(df_15m)
+    brain_diag.trading_days_found = len(dates)
+    brain_regime_counts: dict[str, int] = {"BULL_OPEN": 0, "BEAR_OPEN": 0, "CHOPPY": 0}
+
     for date in dates:
         day_5m = df_5m[df_5m.index.date == date]
         day_15m = df_15m[df_15m.index.date == date] if not df_15m.empty else pd.DataFrame()
         day_spy = spy_df[spy_df.index.date == date] if not spy_df.empty else pd.DataFrame()
 
         if len(day_5m) < 4:
+            brain_diag.trading_days_skipped_short += 1
             continue
 
         # ── Full brain classifier (replaces simplified open/close heuristic) ──
@@ -900,6 +966,7 @@ def run_backtest_with_brain(
                 regime = "BEAR_OPEN"
             elif ms.state in (HIGH_VOL, NEWS_RISK):
                 # High-vol / news: skip new entries (too risky)
+                brain_diag.days_skipped_by_regime += 1
                 continue
             else:
                 regime = "CHOPPY"
@@ -921,13 +988,22 @@ def run_backtest_with_brain(
             regime = "CHOPPY"
             brain_day_size_mult = 0.7
 
+        brain_regime_counts[regime] = brain_regime_counts.get(regime, 0) + 1
+
         if not regime_allows_strategy(regime, strategy_name):
+            brain_diag.days_skipped_by_regime += 1
             continue
 
         try:
             signals = strategy.generate_signals(day_5m, day_15m, symbol, None, regime)
         except Exception:
             continue
+
+        day_raw = [s for s in signals if s.direction != "HOLD"]
+        brain_diag.raw_signals_generated += len(day_raw)
+        brain_diag.raw_buy_signals  += sum(1 for s in day_raw if s.direction == "BUY")
+        brain_diag.raw_sell_signals += sum(1 for s in day_raw if s.direction in ("SELL", "SELL_SHORT"))
+        brain_diag.raw_hold_signals += sum(1 for s in signals if s.direction == "HOLD")
 
         for sig in signals:
             if sig.direction == "HOLD":
@@ -943,6 +1019,20 @@ def run_backtest_with_brain(
                 },
             )
             if not decisions or not decisions[0].accepted:
+                # Track brain rejections
+                if decisions:
+                    reason_str = decisions[0].rejection_reason or decisions[0].explanation or ""
+                    cat = _categorise_rejection(reason_str)
+                    if cat == "regime":          brain_diag.rejected_by_regime      += 1
+                    elif cat == "volume":        brain_diag.rejected_by_volume       += 1
+                    elif cat == "rr":            brain_diag.rejected_by_rr           += 1
+                    elif cat == "time":          brain_diag.rejected_by_time         += 1
+                    elif cat == "extension":     brain_diag.rejected_by_extension    += 1
+                    elif cat == "kill_switch":   brain_diag.rejected_by_kill_switch  += 1
+                    else:                        brain_diag.rejected_other           += 1
+                    brain_diag.rejected_by_brain_total += 1
+                    if len(brain_diag.rejection_reasons) < 5:
+                        brain_diag.rejection_reasons.append(f"[{cat}] {reason_str[:80]}")
                 continue
 
             size_mult = decisions[0].size_multiplier * brain_day_size_mult
@@ -954,6 +1044,13 @@ def run_backtest_with_brain(
 
             sig_time = pd.Timestamp(sig.signal_time)
             future_bars = day_5m[day_5m.index > sig_time]
+
+            if future_bars.empty:
+                brain_diag.trades_skipped_no_future_bars += 1
+                continue
+
+            brain_diag.trades_opened += 1
+            brain_diag.accepted_signals += 1
 
             outcome = "OPEN"
             exit_price = entry
@@ -982,6 +1079,7 @@ def run_backtest_with_brain(
                 exit_time = future_bars.index[-1] if not future_bars.empty else sig_time
                 outcome = "EOD_EXIT"
 
+            brain_diag.trades_closed += 1
             vol_pct = profile.volatility_pct if profile else 1.0
             entry_fill = fill_sim.fill_entry(sig.direction, entry, position_size, vol_pct)
             exit_fill  = fill_sim.fill_exit(sig.direction, exit_price, position_size, vol_pct)
@@ -1023,6 +1121,12 @@ def run_backtest_with_brain(
 
     brain_result = _compute_metrics(filtered_trades, initial_capital, equity, symbol, strategy_name,
                                     total_commission=brain_total_commission, total_slippage=brain_total_slippage)
+
+    # Finalise brain diagnostics and attach to result
+    brain_diag.regime_distribution = brain_regime_counts
+    brain_diag.strategies_run = [strategy_name]
+    brain_diag.finalise()
+    brain_result["diagnostics"] = brain_diag.to_dict()
 
     # Combine both into a comparison dict
     raw_m = raw.get("metrics", {})

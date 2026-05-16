@@ -67,23 +67,44 @@ class EMAMomentum:
         cfg = {**self.default_config, **(config or {})}
         signals: list[DayTradeSignal] = []
 
-        today = _today_bars(df_15m)
-        if today.empty or len(today) < cfg["ema_slow"] + 3:
+        # Compute indicators on the full multi-day 15m history so EMAs are
+        # warmed up even during the first hour of today's session.
+        # BUG FIX: using today-only bars meant ema_slow=21 required 24 today-bars
+        # = 6 hours into the session before any signal was possible.
+        all_15m = _localize(df_15m)
+        if all_15m.empty or len(all_15m) < cfg["ema_slow"] + 3:
+            return signals
+
+        today_date = all_15m.index[-1].date()
+
+        all_15m = all_15m.copy()
+        all_15m["ema_fast"] = tat.EMAIndicator(all_15m["Close"], window=cfg["ema_fast"]).ema_indicator()
+        all_15m["ema_slow"] = tat.EMAIndicator(all_15m["Close"], window=cfg["ema_slow"]).ema_indicator()
+
+        # Restrict the scan window to today's bars only
+        today = all_15m[all_15m.index.date == today_date]
+        if today.empty:
             return signals
 
         today = today.copy()
-        today["ema_fast"] = tat.EMAIndicator(today["Close"], window=cfg["ema_fast"]).ema_indicator()
-        today["ema_slow"] = tat.EMAIndicator(today["Close"], window=cfg["ema_slow"]).ema_indicator()
-        today["rsi"] = tam.RSIIndicator(today["Close"], window=cfg["rsi_period"]).rsi()
-        macd_ind = tat.MACD(today["Close"],
+        # Slice the pre-computed multi-day series to today's index
+        today["ema_fast"] = all_15m["ema_fast"].reindex(today.index)
+        today["ema_slow"] = all_15m["ema_slow"].reindex(today.index)
+        # RSI, MACD, ATR computed on full history; VWAP resets per day so today-only is correct
+        all_15m["rsi"] = tam.RSIIndicator(all_15m["Close"], window=cfg["rsi_period"]).rsi()
+        macd_ind = tat.MACD(all_15m["Close"],
                             window_fast=cfg["macd_fast"],
                             window_slow=cfg["macd_slow"],
                             window_sign=cfg["macd_signal"])
-        today["macd_hist"] = macd_ind.macd_diff()
-        today["vwap"] = compute_vwap(today)
-        today["atr"] = tav.AverageTrueRange(
-            today["High"], today["Low"], today["Close"], window=14
+        all_15m["macd_hist"] = macd_ind.macd_diff()
+        all_15m["atr"] = tav.AverageTrueRange(
+            all_15m["High"], all_15m["Low"], all_15m["Close"], window=14
         ).average_true_range()
+
+        today["rsi"]       = all_15m["rsi"].reindex(today.index)
+        today["macd_hist"] = all_15m["macd_hist"].reindex(today.index)
+        today["atr"]       = all_15m["atr"].reindex(today.index)
+        today["vwap"]      = compute_vwap(today)
 
         open_signal_seen = False
 
@@ -226,7 +247,7 @@ class EMAMomentum:
         return signals
 
 
-def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
+def _localize(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     idx = pd.to_datetime(df.index)
@@ -236,8 +257,15 @@ def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
         idx = idx.tz_convert(ET)
     df = df.copy()
     df.index = idx
-    today = idx[-1].date()
-    return df[idx.date == today]
+    return df
+
+
+def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
+    df = _localize(df)
+    if df.empty:
+        return df
+    today = df.index[-1].date()
+    return df[df.index.date == today]
 
 
 def _score(rsi: float, ema_spread: float, hist_val: float, regime: str, rr: float, is_crossover: bool) -> float:

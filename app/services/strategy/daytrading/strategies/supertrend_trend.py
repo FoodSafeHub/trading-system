@@ -52,16 +52,16 @@ class SupertrendTrend:
     default_config: dict[str, Any] = {
         "st_length": 10,
         "st_multiplier": 3.0,
-        "ema_pullback": 20,
+        "ema_pullback": 13,              # reduced from 20 → min_bars=28 → signals from ~11:50 AM instead of 12:30 PM
         "rsi_period": 14,
         "rsi_min_long": 45,
         "rsi_max_long": 70,
         "rsi_min_short": 30,
         "rsi_max_short": 55,
         "vol_rel_min": 1.1,
-        "atr_stop_mult": 1.5,
+        "atr_stop_mult": 1.0,           # reduced from 1.5 — tighter default stop; ConfigAdjuster widens for high-vol
         "r_multiple_target": 2.0,
-        "pullback_atr_dist": 0.5,   # how close to ST/EMA qualifies as "pullback"
+        "pullback_atr_dist": 0.8,       # widened from 0.5 — 5m bars on high-vol names routinely exceed 0.5×ATR range
         "max_hold_bars": 80,
     }
 
@@ -76,7 +76,7 @@ class SupertrendTrend:
         cfg = {**self.default_config, **(config or {})}
         signals: list[DayTradeSignal] = []
 
-        # Supertrend needs at least st_length + a few bars
+        # needs st_length bars for ATR seed + ema_pullback for EMA warmup + a small buffer
         min_bars = cfg["st_length"] + cfg["ema_pullback"] + 5
         today_5m = _today_bars(df_5m)
         if today_5m.empty or len(today_5m) < min_bars:

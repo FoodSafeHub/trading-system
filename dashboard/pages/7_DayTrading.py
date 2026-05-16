@@ -251,6 +251,28 @@ def _render_pipeline_diagnostics(diag: dict, expanded: bool = False) -> None:
     if skipped_strats:
         st.caption(f"Strategies blocked by regime: {', '.join(skipped_strats)}")
 
+    # ── First-hour window (9:30–10:30 AM ET) ─────────────────────────────────
+    fh = diag.get("first_hour", {})
+    fh_raw  = fh.get("raw_signals", 0)
+    fh_rej  = fh.get("brain_rejections", 0)
+    fh_exec = fh.get("executed_trades", 0)
+    fh_bars = fh.get("bars_loaded", 0)
+    if fh_bars > 0 or fh_raw > 0:
+        with st.expander(f"🕙 First Hour (9:30–10:30 AM) — {fh_raw} signals, {fh_exec} trades", expanded=(fh_raw == 0 or fh_exec == 0)):
+            h1, h2, h3, h4 = st.columns(4)
+            h1.metric("Bars in window",   fh_bars)
+            h2.metric("Raw signals",      fh_raw,  delta="no signals — strategy warmup or filters" if fh_raw == 0 else None, delta_color="off")
+            h3.metric("Brain rejections", fh_rej,  delta=fh.get("top_rejection_reason", "") or None, delta_color="off")
+            h4.metric("Trades executed",  fh_exec)
+            fh_counts = fh.get("rejection_counts", {})
+            if fh_counts:
+                st.caption("Rejection breakdown: " + " | ".join(f"{k}: {v}" for k, v in sorted(fh_counts.items(), key=lambda x: -x[1])))
+            if fh_raw == 0 and fh_bars > 0:
+                st.info("No raw signals generated in the first hour. Typical causes: indicator warmup bars not met (EMA/RSI need history), minimum-bars checks, or time-cutoff rules in the strategy.")
+            elif fh_exec == 0 and fh_raw > 0:
+                top = fh.get("top_rejection_reason", "unknown")
+                st.warning(f"Signals generated but none executed — all rejected by brain. Top reason: **{top}**")
+
     # ── Brain rejection breakdown ─────────────────────────────────────────────
     if rej > 0:
         with st.expander(f"Brain rejection breakdown ({rej} rejected)", expanded=False):
@@ -596,10 +618,37 @@ with tab_backtest:
                 for change in adj.get("changes", []):
                     st.markdown(f"• {change}")
 
-        # ── Pipeline diagnostics (always shown) ──────────────────────────────
+        # ── Quick signal counts — always visible, no scrolling needed ───────
         diag_data = bt_result.get("diagnostics", {})
         if diag_data:
-            _render_pipeline_diagnostics(diag_data, expanded=bt_result.get("metrics", {}).get("total_trades", 0) == 0)
+            _dsig  = diag_data.get("signals", {})
+            _dbr   = diag_data.get("brain_filter", {})
+            _dex   = diag_data.get("execution", {})
+            _dregm = diag_data.get("regime", {})
+            _raw   = _dsig.get("raw_signals_generated", 0)
+            _acc   = _dbr.get("accepted_signals", _raw)
+            _exec  = _dex.get("trades_opened", bt_result.get("metrics", {}).get("total_trades", 0))
+            _rej   = _dbr.get("rejected_by_brain_total", 0)
+            _rskip = _dregm.get("days_skipped_by_regime", 0)
+            qs1, qs2, qs3, qs4, qs5 = st.columns(5)
+            qs1.metric("Raw Signals",    _raw,
+                       delta=f"Buy:{_dsig.get('raw_buy_signals',0)} Sell:{_dsig.get('raw_sell_signals',0)}",
+                       delta_color="off")
+            qs2.metric("Brain Accepted", _acc,
+                       delta=f"-{_rej} rejected" if _rej else "no brain filter",
+                       delta_color="inverse" if _rej > 0 else "off")
+            qs3.metric("Trades Executed", _exec)
+            qs4.metric("Regime-Blocked Days", _rskip)
+            _root = diag_data.get("diagnosis", {}).get("root_cause", "")
+            qs5.metric("Status", "✅ OK" if _exec > 0 else ("⚠️ Signals, no trades" if _raw > 0 else "❌ No signals"))
+            if _root and _exec == 0:
+                _fn = st.error if _raw == 0 else st.warning
+                _fn(f"**Why no trades:** {_root}")
+
+        # ── Full pipeline diagnostics panel ──────────────────────────────────
+        if diag_data:
+            with st.expander("📊 Pipeline Diagnostics", expanded=bt_result.get("metrics", {}).get("total_trades", 0) == 0):
+                _render_pipeline_diagnostics(diag_data, expanded=False)
 
         # ── Zero-trades: rich explanation ─────────────────────────────────────
         if bt_result.get("metrics", {}).get("total_trades", 0) == 0:
@@ -647,9 +696,14 @@ with tab_backtest:
                             unsafe_allow_html=True,
                         )
             else:
-                st.warning(
-                    "No trades generated. Try a longer period or a more volatile symbol (TSLA, NVDA)."
-                )
+                # Fallback when no TradeExplainer output (brain-filtered path)
+                diag_root = diag_data.get("diagnosis", {}).get("root_cause", "") if diag_data else ""
+                if diag_root:
+                    st.warning(f"**0 trades generated.** {diag_root}")
+                else:
+                    st.warning(
+                        "No trades generated. Try a longer period or a more volatile symbol (TSLA, NVDA)."
+                    )
             return
 
         m = bt_result.get("metrics", {})
@@ -802,7 +856,11 @@ with tab_backtest:
                 st.markdown("#### Brain-Filtered")
                 bfm = brain_result.get("metrics", {})
                 if bfm.get("total_trades", 0) == 0:
-                    st.info("Brain filter removed all trades in this period — strategy not aligned with market state rules.")
+                    brain_diag_data = brain_result.get("diagnostics", {})
+                    if brain_diag_data:
+                        _render_pipeline_diagnostics(brain_diag_data, expanded=True)
+                    else:
+                        st.info("Brain filter removed all trades in this period — strategy not aligned with market state rules.")
                 else:
                     _render_single_result(brain_result)
 
