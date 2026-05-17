@@ -82,6 +82,7 @@ class SchwabBroker(BrokerBase):
             )
             resp.raise_for_status()
             self._store_tokens(resp.json())
+            await self._save_tokens_to_db()
             logger.info("[schwab] Tokens exchanged successfully")
 
     async def authenticate(self) -> None:
@@ -110,7 +111,10 @@ class SchwabBroker(BrokerBase):
             return
 
         now = datetime.now(tz=timezone.utc)
-        if self._token_expiry and (self._token_expiry - now).total_seconds() > TOKEN_REFRESH_BUFFER_SECONDS:
+        expiry = self._token_expiry
+        if expiry and expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        if expiry and (expiry - now).total_seconds() > TOKEN_REFRESH_BUFFER_SECONDS:
             return  # Token still valid
 
         logger.info("[schwab] Refreshing access token...")

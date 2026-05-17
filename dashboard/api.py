@@ -2,23 +2,23 @@ from __future__ import annotations
 
 import requests
 
-BASE = "http://127.0.0.1:8000"
+BASE = "https://127.0.0.1:8001"
 
 
 def _get(path: str, timeout: int = 10, **kwargs):
-    r = requests.get(f"{BASE}{path}", timeout=timeout, **kwargs)
+    r = requests.get(f"{BASE}{path}", timeout=timeout, verify=False, **kwargs)
     r.raise_for_status()
     return r.json()
 
 
 def _post(path: str, **kwargs):
-    r = requests.post(f"{BASE}{path}", timeout=10, **kwargs)
+    r = requests.post(f"{BASE}{path}", timeout=10, verify=False, **kwargs)
     r.raise_for_status()
     return r.json()
 
 
 def _delete(path: str, timeout: int = 10):
-    r = requests.delete(f"{BASE}{path}", timeout=timeout)
+    r = requests.delete(f"{BASE}{path}", timeout=timeout, verify=False)
     r.raise_for_status()
     return r.json()
 
@@ -62,7 +62,7 @@ def update_scheduler_config(run_bollinger: bool | None = None, run_perplexity: b
         params["run_bollinger"] = str(run_bollinger).lower()
     if run_perplexity is not None:
         params["run_perplexity"] = str(run_perplexity).lower()
-    r = requests.post(f"{BASE}/strategy/scheduler/config", params=params, timeout=10)
+    r = requests.post(f"{BASE}/strategy/scheduler/config", params=params, timeout=10, verify=False)
     r.raise_for_status()
     return r.json()
 
@@ -79,19 +79,19 @@ def upsert_assignment(symbol: str, system: str, strategy_name: str, enabled: boo
                                        "notes": notes, "max_capital_usd": max_capital_usd})
 
 def toggle_assignment(symbol: str, enabled: bool):
-    r = requests.patch(f"{BASE}/assignments/{symbol}/toggle", params={"enabled": str(enabled).lower()}, timeout=10)
+    r = requests.patch(f"{BASE}/assignments/{symbol}/toggle", params={"enabled": str(enabled).lower()}, timeout=10, verify=False)
     r.raise_for_status()
     return r.json()
 
 def set_assignment_cap(symbol: str, max_capital_usd: float | None):
     r = requests.patch(f"{BASE}/assignments/{symbol}/cap",
                        params={"max_capital_usd": max_capital_usd if max_capital_usd else ""},
-                       timeout=10)
+                       timeout=10, verify=False)
     r.raise_for_status()
     return r.json()
 
 def delete_assignment(symbol: str):
-    r = requests.delete(f"{BASE}/assignments/{symbol}", timeout=10)
+    r = requests.delete(f"{BASE}/assignments/{symbol}", timeout=10, verify=False)
     r.raise_for_status()
     return r.json()
 
@@ -111,7 +111,7 @@ def perplexity_strategies():
 
 def perplexity_toggle_strategy(name: str, enabled: bool):
     r = requests.post(f"{BASE}/perplexity/strategies/{name}/toggle",
-                      params={"enabled": str(enabled).lower()}, timeout=10)
+                      params={"enabled": str(enabled).lower()}, timeout=10, verify=False)
     r.raise_for_status()
     return r.json()
 
