@@ -1,170 +1,170 @@
 from __future__ import annotations
 
-import json
-
-import plotly.graph_objects as go
 import streamlit as st
-from plotly.subplots import make_subplots
+import streamlit.components.v1 as components
 
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
 
 st.set_page_config(page_title="Charts", page_icon="📊", layout="wide")
-st.title("📊 Price Charts & Indicators")
+st.title("📊 Price Charts")
 
-# ── Controls ──────────────────────────────────────────────────
-col1, col2, col3 = st.columns([2, 2, 1])
+col1, col2 = st.columns([2, 6])
 with col1:
-    symbol = st.text_input("Symbol", value="SPY").upper()
+    symbol = st.text_input("Symbol", value="SPY", placeholder="AAPL, NVDA, SPY …").upper().strip() or "SPY"
 with col2:
-    period = st.selectbox("Period", ["1mo", "3mo", "6mo", "1y"], index=1)
-with col3:
     st.write("")
-    st.write("")
-    load = st.button("Load Chart", type="primary", use_container_width=True)
+    st.caption("Change the symbol above to update financials. To change the chart symbol without losing indicators, use the search bar **inside** the chart. Log in to TradingView inside the chart to save your indicator layout permanently.")
 
-if not load and "chart_data" not in st.session_state:
-    st.info("Enter a symbol and click Load Chart.")
-    st.stop()
+# ── Build watchlist: assigned symbols first, then defaults ────────
+_EXCHANGE_MAP = {
+    "SPY": "AMEX", "QQQ": "NASDAQ", "IWM": "AMEX",
+}
+_DEFAULT_WATCHLIST = ["AMEX:SPY","NASDAQ:QQQ","NASDAQ:AAPL","NASDAQ:NVDA",
+                      "NASDAQ:MSFT","NASDAQ:TSLA","NASDAQ:AMZN","NASDAQ:META",
+                      "NASDAQ:GOOGL","NYSE:JPM","NASDAQ:AMD","NYSE:NFLX"]
 
-if load:
-    with st.spinner(f"Fetching {symbol} data..."):
-        try:
-            data = api._get(f"/strategy/chart/{symbol}?period={period}")
-            st.session_state["chart_data"] = data
-            st.session_state["chart_symbol"] = symbol
-        except Exception as e:
-            st.error(f"Failed to load chart data: {e}")
-            st.stop()
+try:
+    _assignments = api.list_assignments()
+    _assigned_syms = [a["symbol"].upper() for a in _assignments if a.get("enabled")]
+except Exception:
+    _assigned_syms = []
 
-data = st.session_state.get("chart_data")
-if not data:
-    st.stop()
+def _tv_sym(sym):
+    if sym in _EXCHANGE_MAP:
+        return f"{_EXCHANGE_MAP[sym]}:{sym}"
+    # NYSE-listed ETFs and financials vs NASDAQ tech — best-effort default
+    _nyse = {"JPM","BAC","GS","MS","WFC","XOM","CVX","JNJ","UNH","V","MA"}
+    return f"NYSE:{sym}" if sym in _nyse else f"NASDAQ:{sym}"
 
-dates = data["dates"]
-ind = data["indicators"]
+_assigned_tv  = [_tv_sym(s) for s in _assigned_syms]
+_extra        = [s for s in _DEFAULT_WATCHLIST if not any(s.endswith(f":{sym}") for sym in _assigned_syms)]
+_watchlist    = _assigned_tv + _extra
+_watchlist_js = str(_watchlist).replace("'", '"')
 
-# ── Overlay toggles ───────────────────────────────────────────
-st.subheader(f"{data['symbol']} — {period}")
-c1, c2, c3, c4, c5 = st.columns(5)
-show_sma = c1.checkbox("SMA 10/30", value=True)
-show_ema = c2.checkbox("EMA 9", value=False)
-show_bb  = c3.checkbox("Bollinger Bands", value=True)
-show_vol = c4.checkbox("Volume", value=True)
-show_macd = c5.checkbox("MACD", value=False)
+# ── TradingView Advanced Chart ────────────────────────────────────
+import json as _json
 
-# ── Build figure ──────────────────────────────────────────────
-row_count = 2  # price + RSI always
-if show_vol:
-    row_count += 1
-if show_macd:
-    row_count += 1
+_tv_config = _json.dumps({
+    "autosize": True,
+    "symbol": "SPY",
+    "interval": "D",
+    "timezone": "America/New_York",
+    "theme": "dark",
+    "style": "1",
+    "locale": "en",
+    "backgroundColor": "rgba(19,23,34,1)",
+    "gridColor": "rgba(255,255,255,0.06)",
+    "hide_top_toolbar": False,
+    "hide_legend": False,
+    "range": "YTD",
+    "allow_symbol_change": True,
+    "save_image": True,
+    "watchlist": _watchlist,
+    "studies": [
+        {"name": "Moving Average Exponential", "override": {"length": 9,   "linecolor": "#26C6DA", "linewidth": 1}},
+        {"name": "Moving Average Exponential", "override": {"length": 21,  "linecolor": "#FF9800", "linewidth": 1}},
+        {"name": "Moving Average Exponential", "override": {"length": 50,  "linecolor": "#AB47BC", "linewidth": 1}},
+        {"name": "Moving Average Exponential", "override": {"length": 200, "linecolor": "#EF5350", "linewidth": 2}},
+        {"name": "Bollinger Bands",            "override": {"length": 20, "mult": 2}},
+        {"name": "VWAP",                       "override": {}},
+        {"name": "Supertrend",                 "override": {"Factor": 3, "ATR Length": 10}},
+        {"name": "Relative Strength Index",    "override": {"length": 14}},
+        {"name": "MACD",                       "override": {"fast length": 12, "slow length": 26, "signal smoothing": 9}},
+        {"name": "Stochastic RSI",             "override": {}},
+        {"name": "Average True Range",         "override": {"length": 14}},
+        {"name": "On Balance Volume",          "override": {}},
+        {"name": "Volume",                     "override": {}},
+    ],
+    "support_host": "https://www.tradingview.com",
+})
 
-row_heights = [0.5, 0.2]
-if show_vol:
-    row_heights.append(0.15)
-if show_macd:
-    row_heights.append(0.15)
+components.html(f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <style>html,body{{margin:0;padding:0;height:100%;overflow:hidden;background:transparent;}}</style>
+</head>
+<body>
+  <div class="tradingview-widget-container" style="height:860px;width:100%">
+    <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%"></div>
+    <div class="tradingview-widget-copyright">
+      <a href="https://www.tradingview.com/" rel="noopener nofollow" target="_blank">
+        <span class="blue-text">Track all markets on TradingView</span>
+      </a>
+    </div>
+  </div>
+  <script type="text/javascript"
+    src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+  {_tv_config}
+  </script>
+</body>
+</html>""", height=880, scrolling=False)
 
-subplot_titles = [data["symbol"], "RSI (14)"]
-if show_vol:
-    subplot_titles.append("Volume")
-if show_macd:
-    subplot_titles.append("MACD")
-
-fig = make_subplots(
-    rows=row_count, cols=1,
-    shared_xaxes=True,
-    vertical_spacing=0.04,
-    subplot_titles=subplot_titles,
-    row_heights=row_heights,
-)
-
-# ── Candlestick ───────────────────────────────────────────────
-fig.add_trace(go.Candlestick(
-    x=dates, open=data["open"], high=data["high"],
-    low=data["low"], close=data["close"],
-    name=data["symbol"],
-    increasing_line_color="#00d4aa",
-    decreasing_line_color="#ff4b4b",
-), row=1, col=1)
-
-if show_sma:
-    fig.add_trace(go.Scatter(x=dates, y=ind["sma10"], name="SMA 10",
-                             line=dict(color="#f7c948", width=1.5)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=dates, y=ind["sma30"], name="SMA 30",
-                             line=dict(color="#a78bfa", width=1.5)), row=1, col=1)
-
-if show_ema:
-    fig.add_trace(go.Scatter(x=dates, y=ind["ema9"], name="EMA 9",
-                             line=dict(color="#38bdf8", width=1.5, dash="dot")), row=1, col=1)
-
-if show_bb:
-    fig.add_trace(go.Scatter(x=dates, y=ind["bb_upper"], name="BB Upper",
-                             line=dict(color="rgba(148,163,184,0.6)", width=1, dash="dot")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=dates, y=ind["bb_middle"], name="BB Mid",
-                             line=dict(color="rgba(148,163,184,0.4)", width=1, dash="dash")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=dates, y=ind["bb_lower"], name="BB Lower",
-                             line=dict(color="rgba(148,163,184,0.6)", width=1, dash="dot"),
-                             fill="tonexty", fillcolor="rgba(148,163,184,0.05)"), row=1, col=1)
-
-# ── RSI ───────────────────────────────────────────────────────
-fig.add_trace(go.Scatter(x=dates, y=ind["rsi14"], name="RSI 14",
-                         line=dict(color="#f97316", width=1.5)), row=2, col=1)
-fig.add_hline(y=70, line_dash="dash", line_color="rgba(255,75,75,0.5)", row=2, col=1)
-fig.add_hline(y=30, line_dash="dash", line_color="rgba(0,212,170,0.5)", row=2, col=1)
-fig.add_hrect(y0=70, y1=100, fillcolor="rgba(255,75,75,0.05)", line_width=0, row=2, col=1)
-fig.add_hrect(y0=0, y1=30, fillcolor="rgba(0,212,170,0.05)", line_width=0, row=2, col=1)
-
-# ── Volume ────────────────────────────────────────────────────
-next_row = 3
-if show_vol:
-    colors = ["#00d4aa" if c >= o else "#ff4b4b"
-              for c, o in zip(data["close"], data["open"])]
-    fig.add_trace(go.Bar(x=dates, y=data["volume"], name="Volume",
-                         marker_color=colors, opacity=0.6), row=next_row, col=1)
-    next_row += 1
-
-# ── MACD ──────────────────────────────────────────────────────
-if show_macd:
-    hist = ind["macd_hist"]
-    hist_colors = ["#00d4aa" if (v or 0) >= 0 else "#ff4b4b" for v in hist]
-    fig.add_trace(go.Bar(x=dates, y=hist, name="MACD Hist",
-                         marker_color=hist_colors, opacity=0.7), row=next_row, col=1)
-    fig.add_trace(go.Scatter(x=dates, y=ind["macd"], name="MACD",
-                             line=dict(color="#38bdf8", width=1.5)), row=next_row, col=1)
-    fig.add_trace(go.Scatter(x=dates, y=ind["macd_signal"], name="Signal",
-                             line=dict(color="#f97316", width=1.5)), row=next_row, col=1)
-
-# ── Layout ────────────────────────────────────────────────────
-fig.update_layout(
-    height=700,
-    template="plotly_dark",
-    xaxis_rangeslider_visible=False,
-    showlegend=True,
-    legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1),
-    margin=dict(l=0, r=0, t=40, b=0),
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(0,0,0,0)",
-)
-fig.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-fig.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
-
-st.plotly_chart(fig, use_container_width=True)
-
-# ── Latest indicator values ───────────────────────────────────
+# ── Financials ────────────────────────────────────────────────────
 st.divider()
-st.subheader("Latest Values")
-latest = {}
-for key, vals in ind.items():
-    clean = [v for v in vals if v is not None]
-    latest[key] = round(clean[-1], 2) if clean else None
 
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("SMA 10", latest.get("sma10"))
-c2.metric("SMA 30", latest.get("sma30"))
-c3.metric("EMA 9",  latest.get("ema9"))
-rsi_val = latest.get("rsi14")
-rsi_label = " 🔴 Overbought" if rsi_val and rsi_val > 70 else (" 🟢 Oversold" if rsi_val and rsi_val < 30 else "")
-c4.metric("RSI 14", f"{rsi_val}{rsi_label}" if rsi_val else "—")
-c5.metric("MACD", latest.get("macd"))
+with st.spinner(f"Loading {symbol} fundamentals…"):
+    try:
+        data_fin = api.chart_data(symbol, period="1mo")
+        fund = data_fin.get("fundamentals", {})
+    except Exception:
+        fund = {}
+
+if not fund:
+    st.caption(f"No fundamental data available for {symbol}.")
+    st.stop()
+
+def _fmt_large(v):
+    if v is None: return "—"
+    if v >= 1e12: return f"${v/1e12:.2f}T"
+    if v >= 1e9:  return f"${v/1e9:.2f}B"
+    if v >= 1e6:  return f"${v/1e6:.2f}M"
+    return f"${v:,.0f}"
+
+def _pct(v):
+    return f"{v*100:.2f}%" if v is not None else "—"
+
+def _val(v, fmt=None):
+    if v is None: return "—"
+    return fmt.format(v) if fmt else str(v)
+
+name     = fund.get("company_name") or symbol
+sector   = fund.get("sector")   or "—"
+industry = fund.get("industry") or "—"
+st.subheader(f"{name}  ({symbol})")
+st.caption(f"**Sector:** {sector}  ·  **Industry:** {industry}")
+
+st.markdown("#### Valuation")
+vc = st.columns(5)
+vc[0].metric("Market Cap",   _fmt_large(fund.get("market_cap")))
+vc[1].metric("P/E (TTM)",    _val(fund.get("pe_ratio"),   "{:.2f}"))
+vc[2].metric("Forward P/E",  _val(fund.get("forward_pe"), "{:.2f}"))
+vc[3].metric("PEG Ratio",    _val(fund.get("peg_ratio"),  "{:.2f}"))
+vc[4].metric("EPS (TTM)",    _val(fund.get("eps"),        "${:.2f}"))
+
+st.markdown("#### Price Statistics")
+pc = st.columns(5)
+pc[0].metric("52W High",       _val(fund.get("52w_high"),    "${:.2f}"))
+pc[1].metric("52W Low",        _val(fund.get("52w_low"),     "${:.2f}"))
+pc[2].metric("Beta",           _val(fund.get("beta"),        "{:.2f}"))
+pc[3].metric("Dividend Yield", _pct(fund.get("dividend_yield")))
+pc[4].metric("Short Ratio",    _val(fund.get("short_ratio"), "{:.2f}x"))
+
+st.markdown("#### Fundamentals")
+fc = st.columns(5)
+fc[0].metric("Revenue",       _fmt_large(fund.get("revenue")))
+fc[1].metric("Profit Margin", _pct(fund.get("profit_margin")))
+fc[2].metric("Debt/Equity",   _val(fund.get("debt_to_equity"), "{:.2f}"))
+fc[3].metric("ROE",           _pct(fund.get("roe")))
+fc[4].metric("Avg Volume",    f"{fund.get('avg_volume'):,}" if fund.get("avg_volume") else "—")
+
+st.markdown("#### Analyst Consensus")
+ac = st.columns(3)
+rating     = (fund.get("analyst_rating") or "—").replace("_", " ").title()
+target     = fund.get("analyst_target")
+last_price = next((v for v in reversed(data_fin.get("close", [])) if v), None)
+upside     = round((target - last_price) / last_price * 100, 1) if target and last_price else None
+ac[0].metric("Rating",       rating)
+ac[1].metric("Price Target", f"${target:.2f}" if target else "—")
+ac[2].metric("Upside",       f"{upside:+.1f}%" if upside is not None else "—")

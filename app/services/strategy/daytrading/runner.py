@@ -42,32 +42,119 @@ _FIRST_HOUR_END = _time(10, 30)   # signals/bars at or before this are "first ho
 _brain = DayTradingBrain()
 
 
-def fetch_intraday(
-    symbol: str,
-    interval: str = "5m",
-    period: str = "5d",
-    diag: PipelineDiagnostics | None = None,
-) -> pd.DataFrame:
-    """Download intraday bars from yfinance, convert to ET timezone.
+# Twelve Data interval map: yfinance-style → Twelve Data format
+_TD_INTERVAL_MAP = {
+    "1m": "1min",
+    "5m": "5min",
+    "15m": "15min",
+    "30m": "30min",
+    "1h": "1h",
+    "1d": "1day",
+}
 
-    Optionally populates a PipelineDiagnostics object with data-quality info.
-    """
-    df = yf.download(symbol, period=period, interval=interval, progress=False)
-    if df.empty:
-        if diag is not None:
-            diag.data_warning = f"yfinance returned 0 bars for {symbol} {interval} {period}"
-        logger.warning("fetch_intraday: 0 bars for %s %s %s", symbol, interval, period)
+# period string → approximate outputsize (number of bars to request)
+_TD_OUTPUTSIZE = {
+    "1d":  390,    # 1 trading day of 1m bars
+    "2d":  780,
+    "5d":  390,    # 5d of 5m bars ≈ 390 bars
+    "60d": 780,    # 60d of 15m bars ≈ 780 bars
+    "730d": 1000,
+}
+
+
+def _fetch_twelvedata(symbol: str, interval: str, period: str) -> pd.DataFrame:
+    """Fetch intraday bars from Twelve Data REST API. Returns empty DataFrame on failure."""
+    try:
+        from app.config import get_settings
+        api_key = get_settings().twelve_data_api_key
+        if not api_key:
+            return pd.DataFrame()
+
+        td_interval = _TD_INTERVAL_MAP.get(interval)
+        if not td_interval:
+            return pd.DataFrame()
+
+        outputsize = _TD_OUTPUTSIZE.get(period, 500)
+
+        import requests
+        url = "https://api.twelvedata.com/time_series"
+        params = {
+            "symbol": symbol,
+            "interval": td_interval,
+            "outputsize": outputsize,
+            "timezone": "America/New_York",
+            "apikey": api_key,
+        }
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("status") == "error" or "values" not in data:
+            logger.warning("[twelvedata] %s %s: %s", symbol, interval, data.get("message", "no values"))
+            return pd.DataFrame()
+
+        records = data["values"]
+        df = pd.DataFrame(records)
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.set_index("datetime").sort_index()
+        df = df.rename(columns={"open": "Open", "high": "High", "low": "Low",
+                                 "close": "Close", "volume": "Volume"})
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # Localize to ET
+        if df.index.tzinfo is None:
+            df.index = df.index.tz_localize(ET)
+        else:
+            df.index = df.index.tz_convert(ET)
+
+        logger.info("[twelvedata] %s %s %s → %d bars", symbol, interval, period, len(df))
         return df
 
+    except Exception as e:
+        logger.warning("[twelvedata] fetch failed for %s %s: %s", symbol, interval, e)
+        return pd.DataFrame()
+
+
+def _normalise_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Flatten MultiIndex columns and ensure ET timezone."""
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-
     idx = pd.to_datetime(df.index)
     if idx.tzinfo is None:
         idx = idx.tz_localize("UTC").tz_convert(ET)
     else:
         idx = idx.tz_convert(ET)
     df.index = idx
+    return df
+
+
+def fetch_intraday(
+    symbol: str,
+    interval: str = "5m",
+    period: str = "5d",
+    diag: PipelineDiagnostics | None = None,
+) -> pd.DataFrame:
+    """Download intraday bars. Uses Twelve Data for intraday intervals, falls back to yfinance."""
+    df = pd.DataFrame()
+
+    # Try Twelve Data first for intraday intervals
+    if interval in _TD_INTERVAL_MAP and interval != "1d":
+        df = _fetch_twelvedata(symbol, interval, period)
+
+    # Fall back to yfinance if Twelve Data returned nothing
+    if df.empty:
+        source = "yfinance"
+        df = yf.download(symbol, period=period, interval=interval, progress=False)
+        if df.empty:
+            if diag is not None:
+                diag.data_warning = f"No data for {symbol} {interval} {period} (tried Twelve Data + yfinance)"
+            logger.warning("fetch_intraday: 0 bars for %s %s %s", symbol, interval, period)
+            return df
+        df = _normalise_df(df)
+    else:
+        source = "twelvedata"
 
     if diag is not None and interval == "5m":
         mh = df.between_time("09:30", "16:00")
@@ -77,14 +164,14 @@ def fetch_intraday(
         diag.latest_bar = str(df.index[-1]) if not df.empty else ""
         diag.timezone = str(df.index.tzinfo)
         logger.info(
-            "fetch_intraday: %s %s %s → %d bars (%d mkt-hrs) [%s .. %s]",
-            symbol, interval, period, len(df), len(mh),
+            "fetch_intraday [%s]: %s %s %s → %d bars (%d mkt-hrs) [%s .. %s]",
+            source, symbol, interval, period, len(df), len(mh),
             diag.earliest_bar[:16], diag.latest_bar[:16],
         )
         if len(df) < 10:
             diag.data_warning = (
                 f"Only {len(df)} bars loaded for {symbol} {period} — "
-                "likely insufficient intraday data from yfinance"
+                f"source={source}"
             )
     elif diag is not None and interval == "15m":
         diag.bars_loaded_15m = len(df)
@@ -959,7 +1046,7 @@ def run_backtest_with_brain(
     brain_diag.bars_loaded_5m = len(df_5m)
     brain_diag.bars_loaded_15m = len(df_15m)
     brain_diag.trading_days_found = len(dates)
-    brain_regime_counts: dict[str, int] = {"BULL_OPEN": 0, "BEAR_OPEN": 0, "CHOPPY": 0}
+    brain_regime_counts: dict[str, int] = {"BULL_OPEN": 0, "BEAR_OPEN": 0, "CHOPPY": 0, "HIGH_VOL": 0, "NEWS_RISK": 0}
 
     for date in dates:
         day_5m = df_5m[df_5m.index.date == date]
@@ -971,13 +1058,17 @@ def run_backtest_with_brain(
             continue
 
         # ── Full brain classifier (replaces simplified open/close heuristic) ──
-        ref_df = day_spy if not day_spy.empty else day_5m
+        # Pass the full history up-to-and-including this date so the classifier's
+        # rolling 20-bar ATR average has proper cross-day context. _today_bars()
+        # inside classify_market_state will extract only today's bars for signals.
+        hist_5m = df_5m[df_5m.index.date <= date]
+        hist_spy = spy_df[spy_df.index.date <= date] if not spy_df.empty else pd.DataFrame()
         try:
             from app.services.strategy.daytrading.brain.market_state import (
                 classify_market_state, TREND_UP, TREND_DOWN, HIGH_VOL, NEWS_RISK,
             )
             from app.services.strategy.daytrading.brain.strategy_router import route_strategies
-            ms = classify_market_state(day_5m, ref_df if not ref_df.empty else None)
+            ms = classify_market_state(hist_5m, hist_spy if not hist_spy.empty else None)
             routing = route_strategies(ms)
             local_brain._last_market_state = ms
             local_brain._last_routing = routing
@@ -989,6 +1080,7 @@ def run_backtest_with_brain(
                 regime = "BEAR_OPEN"
             elif ms.state in (HIGH_VOL, NEWS_RISK):
                 # High-vol / news: skip new entries (too risky)
+                brain_regime_counts[ms.state] = brain_regime_counts.get(ms.state, 0) + 1
                 brain_diag.days_skipped_by_regime += 1
                 continue
             else:
@@ -998,13 +1090,10 @@ def run_backtest_with_brain(
             if ms.confidence < 0.25:
                 regime = "CHOPPY"
 
-            # Brain-based position size multiplier: bull=1.0, bear=0.5, choppy=0.7
-            _brain_regime_size = {
-                "BULL_OPEN": 1.0,
-                "BEAR_OPEN": 0.5,
-                "CHOPPY": 0.7,
-            }
-            brain_day_size_mult = _brain_regime_size.get(regime, 0.7)
+            # brain_day_size_mult is intentionally 1.0 here — the routing size multiplier
+            # (0.75 CHOPPY, 0.5 HIGH_VOL, etc.) is already baked into decisions[0].size_multiplier
+            # by the router+governor pipeline. Applying a second table would double-penalise.
+            brain_day_size_mult = 1.0
 
         except Exception:
             ms = None
@@ -1033,13 +1122,19 @@ def run_backtest_with_brain(
                 continue
 
             sig_dict = asdict(sig)
+            today_trades_only = [t for t in filtered_trades if t.get("date") == str(date)]
+            # For consecutive-loss kill switch: include recent prior trades so it
+            # persists across day boundaries (governor resets to today-only otherwise).
+            recent_prior = [t for t in filtered_trades if t.get("date") != str(date)][-6:]
+            governor_trades = recent_prior + today_trades_only
             decisions = local_brain.filter_signals(
                 [sig_dict],
                 account_state={
-                    "today_trades": [t for t in filtered_trades if t.get("date") == str(date)],
+                    "today_trades": governor_trades,
                     "initial_capital": initial_capital,
                     "open_positions": 0,
                 },
+                current_bar_time=pd.Timestamp(sig.signal_time) if sig.signal_time else None,
             )
             if not decisions or not decisions[0].accepted:
                 # Track brain rejections

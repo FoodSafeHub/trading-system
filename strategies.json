@@ -474,5 +474,215 @@
       "take_profit_pct": 6.0,
       "max_hold_bars": 8
     }
+  },
+  {
+    "name": "NVDA_RSI2_Mean_Reversion",
+    "symbol": "NVDA",
+    "type": "rsi2_mean_reversion",
+    "enabled": true,
+    "params": {"rsi_period": 2, "rsi_entry_threshold": 10, "rsi_exit_threshold": 70, "sma_trend": 200, "exit_sma": 5, "hard_stop_pct": 5.0, "take_profit_pct": 8.0, "max_hold_bars": 10, "atr_skip_threshold": 5.0}
+  },
+  {
+    "name": "NVDA_EMA_MACD_Crossover",
+    "symbol": "NVDA",
+    "type": "ema_macd_crossover",
+    "enabled": true,
+    "params": {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "rsi_period": 14, "rsi_min": 45, "rsi_max": 65, "vol_ratio_min": 1.1, "atr_stop_multiplier": 1.5, "atr_tp_multiplier": 2.0, "max_hold_bars": 20}
+  },
+  {
+    "name": "NVDA_BB_Squeeze_Breakout",
+    "symbol": "NVDA",
+    "type": "bb_squeeze_breakout",
+    "enabled": true,
+    "params": {"bb_period": 20, "bb_std": 2.0, "squeeze_bars": 5, "rsi_period": 14, "rsi_entry_min": 50, "rsi_overbought": 80, "vol_ratio_min": 1.3, "max_hold_bars": 15}
+  },
+  {
+    "name": "NVDA_Pullback_EMA50",
+    "symbol": "NVDA",
+    "type": "pullback_ema50",
+    "enabled": true,
+    "params": {"ema_trend": 50, "ema_slope_bars": 5, "price_ema_proximity_pct": 1.0, "rsi_period": 14, "rsi_min": 35, "rsi_max": 55, "wick_ratio_min": 0.4, "exit_rsi": 65, "exit_extension_pct": 3.0, "hard_stop_pct": 2.0, "max_hold_bars": 20, "bear_skip_threshold_pct": 10.0}
+  },
+  {
+    "name": "NVDA_VIX_Spike_Reversal",
+    "symbol": "NVDA",
+    "type": "vix_spike_reversal",
+    "enabled": true,
+    "params": {"atr_period": 14, "atr_spike_threshold": 3.0, "atr_exit_threshold": 2.0, "rsi_period": 14, "rsi_entry_max": 30, "rsi_exit": 55, "bb_pos_max": 0.15, "wick_ratio_min": 0.5, "prior_decline_pct": 2.0, "prior_decline_bars": 3, "hard_stop_pct": 4.0, "take_profit_pct": 6.0, "max_hold_bars": 8}
+  },
+  {
+    "name": "TSLA_RSI2_Mean_Reversion",
+    "symbol": "TSLA",
+    "type": "rsi2_mean_reversion",
+    "enabled": true,
+    "params": {"rsi_period": 2, "rsi_entry_threshold": 10, "rsi_exit_threshold": 70, "sma_trend": 200, "exit_sma": 5, "hard_stop_pct": 6.0, "take_profit_pct": 10.0, "max_hold_bars": 10, "atr_skip_threshold": 6.0}
+  },
+  {
+    "name": "TSLA_EMA_MACD_Crossover",
+    "symbol": "TSLA",
+    "type": "ema_macd_crossover",
+    "enabled": true,
+    "params": {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "rsi_period": 14, "rsi_min": 45, "rsi_max": 65, "vol_ratio_min": 1.2, "atr_stop_multiplier": 1.5, "atr_tp_multiplier": 2.0, "max_hold_bars": 20}
+  },
+  {
+    "name": "TSLA_BB_Squeeze_Breakout",
+    "symbol": "TSLA",
+    "type": "bb_squeeze_breakout",
+    "enabled": true,
+    "params": {"bb_period": 20, "bb_std": 2.0, "squeeze_bars": 5, "rsi_period": 14, "rsi_entry_min": 50, "rsi_overbought": 80, "vol_ratio_min": 1.3, "max_hold_bars": 15}
+  },
+  {
+    "name": "TSLA_Pullback_EMA50",
+    "symbol": "TSLA",
+    "type": "pullback_ema50",
+    "enabled": true,
+    "params": {"ema_trend": 50, "ema_slope_bars": 5, "price_ema_proximity_pct": 1.5, "rsi_period": 14, "rsi_min": 35, "rsi_max": 55, "wick_ratio_min": 0.4, "exit_rsi": 65, "exit_extension_pct": 3.0, "hard_stop_pct": 3.0, "max_hold_bars": 20, "bear_skip_threshold_pct": 15.0}
+  },
+  {
+    "name": "TSLA_VIX_Spike_Reversal",
+    "symbol": "TSLA",
+    "type": "vix_spike_reversal",
+    "enabled": true,
+    "params": {"atr_period": 14, "atr_spike_threshold": 3.0, "atr_exit_threshold": 2.0, "rsi_period": 14, "rsi_entry_max": 30, "rsi_exit": 55, "bb_pos_max": 0.15, "wick_ratio_min": 0.5, "prior_decline_pct": 2.0, "prior_decline_bars": 3, "hard_stop_pct": 5.0, "take_profit_pct": 8.0, "max_hold_bars": 8}
+  },
+  {
+    "name": "AMZN_RSI2_Mean_Reversion",
+    "symbol": "AMZN",
+    "type": "rsi2_mean_reversion",
+    "enabled": true,
+    "params": {"rsi_period": 2, "rsi_entry_threshold": 10, "rsi_exit_threshold": 70, "sma_trend": 200, "exit_sma": 5, "hard_stop_pct": 5.0, "take_profit_pct": 8.0, "max_hold_bars": 10, "atr_skip_threshold": 5.0}
+  },
+  {
+    "name": "AMZN_EMA_MACD_Crossover",
+    "symbol": "AMZN",
+    "type": "ema_macd_crossover",
+    "enabled": true,
+    "params": {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "rsi_period": 14, "rsi_min": 45, "rsi_max": 65, "vol_ratio_min": 1.1, "atr_stop_multiplier": 1.5, "atr_tp_multiplier": 2.0, "max_hold_bars": 20}
+  },
+  {
+    "name": "AMZN_BB_Squeeze_Breakout",
+    "symbol": "AMZN",
+    "type": "bb_squeeze_breakout",
+    "enabled": true,
+    "params": {"bb_period": 20, "bb_std": 2.0, "squeeze_bars": 5, "rsi_period": 14, "rsi_entry_min": 50, "rsi_overbought": 80, "vol_ratio_min": 1.3, "max_hold_bars": 15}
+  },
+  {
+    "name": "AMZN_Pullback_EMA50",
+    "symbol": "AMZN",
+    "type": "pullback_ema50",
+    "enabled": true,
+    "params": {"ema_trend": 50, "ema_slope_bars": 5, "price_ema_proximity_pct": 1.0, "rsi_period": 14, "rsi_min": 35, "rsi_max": 55, "wick_ratio_min": 0.4, "exit_rsi": 65, "exit_extension_pct": 3.0, "hard_stop_pct": 2.0, "max_hold_bars": 20, "bear_skip_threshold_pct": 10.0}
+  },
+  {
+    "name": "AMZN_VIX_Spike_Reversal",
+    "symbol": "AMZN",
+    "type": "vix_spike_reversal",
+    "enabled": true,
+    "params": {"atr_period": 14, "atr_spike_threshold": 3.0, "atr_exit_threshold": 2.0, "rsi_period": 14, "rsi_entry_max": 30, "rsi_exit": 55, "bb_pos_max": 0.15, "wick_ratio_min": 0.5, "prior_decline_pct": 2.0, "prior_decline_bars": 3, "hard_stop_pct": 4.0, "take_profit_pct": 6.0, "max_hold_bars": 8}
+  },
+  {
+    "name": "META_RSI2_Mean_Reversion",
+    "symbol": "META",
+    "type": "rsi2_mean_reversion",
+    "enabled": true,
+    "params": {"rsi_period": 2, "rsi_entry_threshold": 10, "rsi_exit_threshold": 70, "sma_trend": 200, "exit_sma": 5, "hard_stop_pct": 5.0, "take_profit_pct": 8.0, "max_hold_bars": 10, "atr_skip_threshold": 5.0}
+  },
+  {
+    "name": "META_EMA_MACD_Crossover",
+    "symbol": "META",
+    "type": "ema_macd_crossover",
+    "enabled": true,
+    "params": {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "rsi_period": 14, "rsi_min": 45, "rsi_max": 65, "vol_ratio_min": 1.1, "atr_stop_multiplier": 1.5, "atr_tp_multiplier": 2.0, "max_hold_bars": 20}
+  },
+  {
+    "name": "META_BB_Squeeze_Breakout",
+    "symbol": "META",
+    "type": "bb_squeeze_breakout",
+    "enabled": true,
+    "params": {"bb_period": 20, "bb_std": 2.0, "squeeze_bars": 5, "rsi_period": 14, "rsi_entry_min": 50, "rsi_overbought": 80, "vol_ratio_min": 1.3, "max_hold_bars": 15}
+  },
+  {
+    "name": "META_Pullback_EMA50",
+    "symbol": "META",
+    "type": "pullback_ema50",
+    "enabled": true,
+    "params": {"ema_trend": 50, "ema_slope_bars": 5, "price_ema_proximity_pct": 1.0, "rsi_period": 14, "rsi_min": 35, "rsi_max": 55, "wick_ratio_min": 0.4, "exit_rsi": 65, "exit_extension_pct": 3.0, "hard_stop_pct": 2.0, "max_hold_bars": 20, "bear_skip_threshold_pct": 10.0}
+  },
+  {
+    "name": "META_VIX_Spike_Reversal",
+    "symbol": "META",
+    "type": "vix_spike_reversal",
+    "enabled": true,
+    "params": {"atr_period": 14, "atr_spike_threshold": 3.0, "atr_exit_threshold": 2.0, "rsi_period": 14, "rsi_entry_max": 30, "rsi_exit": 55, "bb_pos_max": 0.15, "wick_ratio_min": 0.5, "prior_decline_pct": 2.0, "prior_decline_bars": 3, "hard_stop_pct": 4.0, "take_profit_pct": 6.0, "max_hold_bars": 8}
+  },
+  {
+    "name": "AMD_RSI2_Mean_Reversion",
+    "symbol": "AMD",
+    "type": "rsi2_mean_reversion",
+    "enabled": true,
+    "params": {"rsi_period": 2, "rsi_entry_threshold": 10, "rsi_exit_threshold": 70, "sma_trend": 200, "exit_sma": 5, "hard_stop_pct": 5.0, "take_profit_pct": 8.0, "max_hold_bars": 10, "atr_skip_threshold": 5.0}
+  },
+  {
+    "name": "AMD_EMA_MACD_Crossover",
+    "symbol": "AMD",
+    "type": "ema_macd_crossover",
+    "enabled": true,
+    "params": {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "rsi_period": 14, "rsi_min": 45, "rsi_max": 65, "vol_ratio_min": 1.1, "atr_stop_multiplier": 1.5, "atr_tp_multiplier": 2.0, "max_hold_bars": 20}
+  },
+  {
+    "name": "AMD_BB_Squeeze_Breakout",
+    "symbol": "AMD",
+    "type": "bb_squeeze_breakout",
+    "enabled": true,
+    "params": {"bb_period": 20, "bb_std": 2.0, "squeeze_bars": 5, "rsi_period": 14, "rsi_entry_min": 50, "rsi_overbought": 80, "vol_ratio_min": 1.3, "max_hold_bars": 15}
+  },
+  {
+    "name": "AMD_Pullback_EMA50",
+    "symbol": "AMD",
+    "type": "pullback_ema50",
+    "enabled": true,
+    "params": {"ema_trend": 50, "ema_slope_bars": 5, "price_ema_proximity_pct": 1.0, "rsi_period": 14, "rsi_min": 35, "rsi_max": 55, "wick_ratio_min": 0.4, "exit_rsi": 65, "exit_extension_pct": 3.0, "hard_stop_pct": 2.0, "max_hold_bars": 20, "bear_skip_threshold_pct": 10.0}
+  },
+  {
+    "name": "AMD_VIX_Spike_Reversal",
+    "symbol": "AMD",
+    "type": "vix_spike_reversal",
+    "enabled": true,
+    "params": {"atr_period": 14, "atr_spike_threshold": 3.0, "atr_exit_threshold": 2.0, "rsi_period": 14, "rsi_entry_max": 30, "rsi_exit": 55, "bb_pos_max": 0.15, "wick_ratio_min": 0.5, "prior_decline_pct": 2.0, "prior_decline_bars": 3, "hard_stop_pct": 4.0, "take_profit_pct": 6.0, "max_hold_bars": 8}
+  },
+  {
+    "name": "JPM_RSI2_Mean_Reversion",
+    "symbol": "JPM",
+    "type": "rsi2_mean_reversion",
+    "enabled": true,
+    "params": {"rsi_period": 2, "rsi_entry_threshold": 10, "rsi_exit_threshold": 70, "sma_trend": 200, "exit_sma": 5, "hard_stop_pct": 4.0, "take_profit_pct": 6.0, "max_hold_bars": 10, "atr_skip_threshold": 4.0}
+  },
+  {
+    "name": "JPM_EMA_MACD_Crossover",
+    "symbol": "JPM",
+    "type": "ema_macd_crossover",
+    "enabled": true,
+    "params": {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "rsi_period": 14, "rsi_min": 45, "rsi_max": 65, "vol_ratio_min": 1.1, "atr_stop_multiplier": 1.5, "atr_tp_multiplier": 2.0, "max_hold_bars": 20}
+  },
+  {
+    "name": "JPM_BB_Squeeze_Breakout",
+    "symbol": "JPM",
+    "type": "bb_squeeze_breakout",
+    "enabled": true,
+    "params": {"bb_period": 20, "bb_std": 2.0, "squeeze_bars": 5, "rsi_period": 14, "rsi_entry_min": 50, "rsi_overbought": 80, "vol_ratio_min": 1.3, "max_hold_bars": 15}
+  },
+  {
+    "name": "JPM_Pullback_EMA50",
+    "symbol": "JPM",
+    "type": "pullback_ema50",
+    "enabled": true,
+    "params": {"ema_trend": 50, "ema_slope_bars": 5, "price_ema_proximity_pct": 1.0, "rsi_period": 14, "rsi_min": 35, "rsi_max": 55, "wick_ratio_min": 0.4, "exit_rsi": 65, "exit_extension_pct": 3.0, "hard_stop_pct": 2.0, "max_hold_bars": 20, "bear_skip_threshold_pct": 10.0}
+  },
+  {
+    "name": "JPM_VIX_Spike_Reversal",
+    "symbol": "JPM",
+    "type": "vix_spike_reversal",
+    "enabled": true,
+    "params": {"atr_period": 14, "atr_spike_threshold": 3.0, "atr_exit_threshold": 2.0, "rsi_period": 14, "rsi_entry_max": 30, "rsi_exit": 55, "bb_pos_max": 0.15, "wick_ratio_min": 0.5, "prior_decline_pct": 2.0, "prior_decline_bars": 3, "hard_stop_pct": 3.0, "take_profit_pct": 5.0, "max_hold_bars": 8}
   }
 ]

@@ -19,6 +19,9 @@ from app.services.strategy.perplexity.strategies import (
     BreakoutConsolidation,
     BollingerMeanReversionUptrend,
     FibPullbackSupport,
+    RsiSwingReversal,
+    SupertrendSwing,
+    BollingerBandBreakout,
 )
 
 PERPLEXITY_STRATEGIES: List[PerplexityStrategy] = [
@@ -27,6 +30,9 @@ PERPLEXITY_STRATEGIES: List[PerplexityStrategy] = [
     BreakoutConsolidation(),
     BollingerMeanReversionUptrend(),
     FibPullbackSupport(),
+    RsiSwingReversal(),
+    SupertrendSwing(),
+    BollingerBandBreakout(),
 ]
 
 

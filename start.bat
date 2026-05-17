@@ -5,7 +5,7 @@ echo.
 
 cd /d "%~dp0"
 
-start "API Server" cmd /k ".venv\Scripts\uvicorn app.main:app --host 127.0.0.1 --port 8000"
+start "API Server" cmd /k ".venv\Scripts\uvicorn app.main:app --host 127.0.0.1 --port 8001 --ssl-keyfile=key.pem --ssl-certfile=cert.pem"
 
 timeout /t 3 /nobreak >nul
 

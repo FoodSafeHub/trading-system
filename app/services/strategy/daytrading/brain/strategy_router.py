@@ -34,8 +34,8 @@ ALL_STRATEGY_NAMES = [
 _ROUTING_TABLE: dict[str, list[str]] = {
     TREND_UP:   ["ORBBreakout", "EMAMomentum", "VWAPMeanReversion", "BollingerMomentum", "SupertrendTrend"],
     TREND_DOWN: ["EMAMomentum", "VolumeSpikeReversal", "OpeningGapFade", "BollingerMomentum", "SupertrendTrend"],
-    CHOPPY:     ["VWAPMeanReversion", "BollingerMomentum"],
-    HIGH_VOL:   ["VolumeSpikeReversal"],
+    CHOPPY:     ["VWAPMeanReversion", "BollingerMomentum", "ORBBreakout", "OpeningGapFade"],
+    HIGH_VOL:   ["VolumeSpikeReversal", "ORBBreakout"],
     NEWS_RISK:  [],   # all blocked
 }
 
@@ -50,14 +50,11 @@ _BLOCK_REASONS: dict[str, dict[str, str]] = {
         "VWAPMeanReversion":    "VWAP mean reversion (long-only) disabled in TREND_DOWN.",
     },
     CHOPPY: {
-        "ORBBreakout":          "Breakouts fail in choppy markets — false breakout rate too high.",
         "EMAMomentum":          "EMA momentum requires directional trend — disabled in CHOPPY.",
-        "OpeningGapFade":       "Gap fades need initial momentum to fade — unreliable in CHOPPY.",
         "VolumeSpikeReversal":  "Volume spikes without trend context produce noisy signals.",
         "SupertrendTrend":      "Supertrend requires clear macro direction — disabled in CHOPPY.",
     },
     HIGH_VOL: {
-        "ORBBreakout":          "ORB range is too wide in HIGH_VOL — stop distance unacceptable.",
         "VWAPMeanReversion":    "VWAP mean reversion fails when price trends hard away from VWAP.",
         "EMAMomentum":          "EMA crossovers are unreliable during spike volatility.",
         "OpeningGapFade":       "Gaps in HIGH_VOL sessions are often news-driven and don't fill.",
@@ -85,9 +82,12 @@ _ALLOW_REASONS: dict[str, dict[str, str]] = {
     CHOPPY: {
         "VWAPMeanReversion":   "VWAP mean reversion is the primary strategy in range-bound sessions.",
         "BollingerMomentum":   "BB squeezes can signal directional resolution even in choppy conditions.",
+        "ORBBreakout":         "ORB breakouts allowed in CHOPPY at reduced size — breakouts can resolve choppy range.",
+        "OpeningGapFade":      "Gap fades are valid in CHOPPY — gaps often fill when there is no trend to sustain them.",
     },
     HIGH_VOL: {
         "VolumeSpikeReversal": "Volume spike reversals are specifically designed for elevated volatility.",
+        "ORBBreakout":         "ORB breakouts in HIGH_VOL can produce large moves — allowed at reduced size.",
     },
     NEWS_RISK: {},
 }

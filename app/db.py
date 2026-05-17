@@ -60,6 +60,7 @@ def init_db() -> None:
         executions,
         orders,
         positions,
+        scan_results,
         settings as settings_model,
         signals,
         strategy_runs,

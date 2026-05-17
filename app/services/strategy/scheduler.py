@@ -139,7 +139,6 @@ def _run_cycle() -> None:
                     .filter_by(enabled=True)
                     .all()
                 )
-                # snapshot to plain dicts so we can close the session
                 assignments = [
                     {"symbol": a.symbol, "system": a.system, "strategy_name": a.strategy_name,
                      "max_capital_usd": a.max_capital_usd}
@@ -148,13 +147,34 @@ def _run_cycle() -> None:
 
             assigned_symbols = {a["symbol"] for a in assignments}
 
-            # signals_to_act: list of (symbol, direction, strategy_label, entry_price, stop_price)
+            # ── Fetch Schwab live prices for all assigned symbols ─
+            # Used to replace yfinance close for entry price accuracy.
+            all_symbols = list(assigned_symbols)
+            live_prices: dict[str, float] = {}
+            if all_symbols:
+                try:
+                    quotes = loop.run_until_complete(broker.get_quotes(all_symbols))
+                    for sym, q in quotes.items():
+                        price = q.last or q.ask or q.bid
+                        if price and price > 0:
+                            live_prices[sym] = float(price)
+                    logger.info("[scheduler] Schwab live prices: %d/%d symbols", len(live_prices), len(all_symbols))
+                except Exception as exc:
+                    logger.warning("[scheduler] Schwab quote fetch failed, using yfinance: %s", exc)
+
+            # ── Fetch current positions to size SELL orders correctly ─
+            current_positions: dict[str, float] = {}
+            try:
+                positions = loop.run_until_complete(broker.get_positions(account_id))
+                for pos in positions:
+                    current_positions[pos.symbol.upper()] = pos.quantity
+            except Exception as exc:
+                logger.warning("[scheduler] Could not fetch positions: %s", exc)
+
+            # signals_to_act: list of (symbol, direction, label, entry_price, stop_price)
             signals_to_act: list[tuple[str, str, str, float, float | None]] = []
 
-            # ── 1. Run assigned strategies (one per symbol) ──────
-            # Each assigned symbol runs exactly its assigned strategy.
-            # A single signal from the assigned strategy is enough — no
-            # consensus needed because the user explicitly chose this strategy.
+            # ── 1. Run assigned strategies ───────────────────────
             for asgn in assignments:
                 symbol = asgn["symbol"]
                 system = asgn["system"]
@@ -168,19 +188,24 @@ def _run_cycle() -> None:
                         if strat is None or not strat.enabled:
                             continue
                         df = get_ohlcv(symbol, period="2y")
-                        if df.empty or len(df) < 220:
+                        if df.empty or len(df) < 60:
                             continue
+                        # Patch latest close with Schwab live price for accurate signal
+                        live = live_prices.get(symbol)
+                        if live:
+                            df = df.copy()
+                            df.iloc[-1, df.columns.get_loc("Close")] = live
                         sig = strat.run(symbol, df)
                         if sig.direction != "HOLD":
-                            entry = sig.entry_price or float(df["Close"].iloc[-1])
+                            entry = live or sig.entry_price or float(df["Close"].iloc[-1])
                             signals_to_act.append((
                                 symbol, sig.direction,
                                 f"perplexity:{strategy_name}",
                                 entry, sig.stop_price,
                             ))
                             logger.info(
-                                f"[scheduler] Assigned {strategy_name} → {symbol}: "
-                                f"{sig.direction} entry={entry:.2f} stop={sig.stop_price} ({sig.reason})"
+                                "[scheduler] Assigned %s → %s: %s entry=%.2f stop=%s (%s)",
+                                strategy_name, symbol, sig.direction, entry, sig.stop_price, sig.reason
                             )
 
                     elif system == "bollinger":
@@ -191,18 +216,16 @@ def _run_cycle() -> None:
                             sigs = _engine.run(config, prices)
                             for s in sigs:
                                 if s.direction != "HOLD":
-                                    entry = s.price_at_signal or float(prices.iloc[-1])
+                                    entry = live_prices.get(symbol) or s.price_at_signal or float(prices.iloc[-1])
                                     signals_to_act.append((
                                         symbol, s.direction, strategy_name, entry, None
                                     ))
-                                    logger.info(f"[scheduler] Assigned {strategy_name} → {symbol}: {s.direction}")
+                                    logger.info("[scheduler] Assigned %s → %s: %s", strategy_name, symbol, s.direction)
 
                 except Exception as exc:
-                    logger.error(f"[scheduler] Assigned strategy {strategy_name} on {symbol} failed: {exc}")
+                    logger.error("[scheduler] Assigned strategy %s on %s failed: %s", strategy_name, symbol, exc)
 
-            # ── 2. Run general pool for non-assigned symbols ──────
-            # Bollinger and/or Perplexity run on symbols NOT already covered
-            # by an assignment, using the original consensus approach.
+            # ── 2. Run general pool (consensus) for non-assigned symbols ─
             votes: dict = defaultdict(lambda: defaultdict(list))
             min_agree = int(settings.min_signal_agreement)
 
@@ -218,20 +241,20 @@ def _run_cycle() -> None:
                             if s.direction != "HOLD":
                                 votes[s.symbol][s.direction].append(config.name)
                     except Exception as exc:
-                        logger.error(f"[scheduler] Bollinger {config.name} failed: {exc}")
+                        logger.error("[scheduler] Bollinger %s failed: %s", config.name, exc)
 
             if _perplexity_enabled():
+                # Use symbols from assignments or bollinger configs as the pool universe
                 try:
-                    all_bollinger_symbols = list({c.symbol for c in load_strategies_from_config()})
+                    pool_symbols = list({c.symbol for c in load_strategies_from_config()})
                 except Exception:
-                    all_bollinger_symbols = ["SPY", "QQQ", "AAPL", "TSLA", "NVDA",
-                                             "MSFT", "AMZN", "META", "GOOGL", "JPM"]
-                for symbol in all_bollinger_symbols:
+                    pool_symbols = []
+                for symbol in pool_symbols:
                     if symbol in assigned_symbols:
                         continue
                     try:
                         df = get_ohlcv(symbol, period="2y")
-                        if df.empty or len(df) < 220:
+                        if df.empty or len(df) < 60:
                             continue
                         pool_sigs = run_perplexity_signal(symbol, df)
                         for sig in pool_sigs:
@@ -240,36 +263,52 @@ def _run_cycle() -> None:
                                     f"perplexity:{sig.strategy_name}"
                                 )
                     except Exception as exc:
-                        logger.error(f"[scheduler] Perplexity pool {symbol} failed: {exc}")
+                        logger.error("[scheduler] Perplexity pool %s failed: %s", symbol, exc)
 
             # ── 3. Execute assigned signals (no consensus needed) ─
             for symbol, direction, label, entry, stop in signals_to_act:
                 asgn_cap = next((a["max_capital_usd"] for a in assignments if a["symbol"] == symbol), None)
-                qty = _compute_quantity(symbol, entry, stop, asgn_cap) if direction == "BUY" else 1.0
+                if direction == "BUY":
+                    qty = _compute_quantity(symbol, entry, stop, asgn_cap)
+                else:
+                    # SELL: use actual position size so we close the whole position
+                    qty = current_positions.get(symbol, 0.0)
+                    if qty <= 0:
+                        logger.info("[scheduler] SELL %s skipped — no open position", symbol)
+                        continue
                 order_req = OrderRequest(
                     symbol=symbol,
                     side=direction,  # type: ignore[arg-type]
                     order_type="MARKET",
                     quantity=qty,
+                    limit_price=None,
+                    stop_price=stop if direction == "BUY" else None,
                 )
                 loop.run_until_complete(svc.execute(order_req, account_id=account_id))
 
-            # ── 4. Execute consensus signals for unassigned symbols
-            # Only act if exactly one direction qualifies — skip if both BUY+SELL agree (conflicting)
+            # ── 4. Execute consensus signals ─────────────────────
             for symbol, directions in votes.items():
                 qualifying = {d: v for d, v in directions.items() if len(v) >= min_agree}
                 if len(qualifying) != 1:
                     continue
                 direction, agreeing = next(iter(qualifying.items()))
                 logger.info(
-                    f"[scheduler] Consensus: {direction} {symbol} "
-                    f"({len(agreeing)}/{min_agree}: {agreeing})"
+                    "[scheduler] Consensus: %s %s (%d/%d: %s)",
+                    direction, symbol, len(agreeing), min_agree, agreeing,
                 )
+                if direction == "SELL":
+                    qty = current_positions.get(symbol, 0.0)
+                    if qty <= 0:
+                        logger.info("[scheduler] Consensus SELL %s skipped — no open position", symbol)
+                        continue
+                else:
+                    entry_p = live_prices.get(symbol) or 0.0
+                    qty = _compute_quantity(symbol, entry_p, None) if entry_p > 0 else 1.0
                 order_req = OrderRequest(
                     symbol=symbol,
                     side=direction,  # type: ignore[arg-type]
                     order_type="MARKET",
-                    quantity=1,
+                    quantity=qty,
                 )
                 loop.run_until_complete(svc.execute(order_req, account_id=account_id))
         finally:
@@ -283,6 +322,21 @@ def _run_cycle() -> None:
 
 
 _scheduler: BackgroundScheduler | None = None
+_SCANNER_INTERVAL_SECONDS = 900  # scan every 15 minutes during market hours
+
+
+def _run_scanner_job() -> None:
+    """Scheduled scanner job — scans watchlist every 15 min during market hours."""
+    settings = get_settings()
+    if not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
+        return
+    try:
+        from app.schemas.scanner import ScanConfig
+        from app.services.scanner.scanner_service import run_scan
+        summary = run_scan(ScanConfig(universe="watchlist", top_n=5, auto_trade_top=False))
+        logger.info("[scheduler] Scanner — %d scanned, %d matches", summary.total_scanned, summary.total_matches)
+    except Exception as e:
+        logger.error("[scheduler] Scanner job failed: %s", e)
 
 
 def start_scheduler() -> None:
@@ -299,6 +353,14 @@ def start_scheduler() -> None:
         trigger=IntervalTrigger(seconds=settings.scheduler_interval_seconds),
         id="strategy_cycle",
         name="Strategy Evaluation Cycle",
+        replace_existing=True,
+        max_instances=1,
+    )
+    _scheduler.add_job(
+        _run_scanner_job,
+        trigger=IntervalTrigger(seconds=_SCANNER_INTERVAL_SECONDS),
+        id="scanner_cycle",
+        name="Market Scanner",
         replace_existing=True,
         max_instances=1,
     )

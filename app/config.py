@@ -94,6 +94,9 @@ class Settings(BaseSettings):
     # 2 = at least 2 strategies must agree (recommended)
     min_signal_agreement: int = 2
 
+    # ── Twelve Data ─────────────────────────────────────────
+    twelve_data_api_key: str = ""
+
     # ── API ──────────────────────────────────────────────────
     api_host: str = "127.0.0.1"
     api_port: int = 8000

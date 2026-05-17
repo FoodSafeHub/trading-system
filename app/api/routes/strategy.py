@@ -137,63 +137,190 @@ def update_scheduler_config(run_bollinger: bool | None = None, run_perplexity: b
 
 @router.get("/chart/{symbol}")
 def chart_data(symbol: str, period: str = "3mo"):
-    """
-    Return OHLCV + indicator data for charting.
-    period: yfinance period string (1mo, 3mo, 6mo, 1y)
-    """
+    """Return OHLCV + indicators + fundamentals for charting."""
+    import math
+    import pandas as pd
+    import yfinance as yf
+
+    def _r(v):
+        try:
+            return round(float(v), 4) if v is not None and not math.isnan(float(v)) else None
+        except Exception:
+            return None
+
+    def _safe_list(series, n):
+        try:
+            return [_r(v) for v in series.values.tolist()]
+        except Exception:
+            return [None] * n
+
     try:
         symbol = symbol.upper()
         df = get_ohlcv(symbol, period=period)
-        closes = df["Close"].dropna()
+        n = len(df)
+        closes = df["Close"]
+        highs  = df["High"]
+        lows   = df["Low"]
 
-        def _safe(fn, *args):
-            try:
-                return fn(*args).values.tolist()
-            except Exception:
-                return [None] * len(closes)
+        # ── Standard indicators ──────────────────────────────────
+        sma10 = _safe_list(compute_sma(closes, 10), n)
+        sma20 = _safe_list(compute_sma(closes, 20), n)
+        sma50 = _safe_list(compute_sma(closes, 50), n)
+        sma200= _safe_list(compute_sma(closes, 200), n)
+        ema9  = _safe_list(compute_ema(closes, 9), n)
+        ema21 = _safe_list(compute_ema(closes, 21), n)
+        ema50 = _safe_list(compute_ema(closes, 50), n)
+        ema200= _safe_list(compute_ema(closes, 200), n)
+        rsi14 = _safe_list(compute_rsi(closes, 14), n)
 
         try:
             bb = compute_bollinger(closes, 20, 2.0)
-            bb_upper  = bb.upper.values.tolist()
-            bb_middle = bb.middle.values.tolist()
-            bb_lower  = bb.lower.values.tolist()
+            bb_upper  = [_r(v) for v in bb.upper.values.tolist()]
+            bb_middle = [_r(v) for v in bb.middle.values.tolist()]
+            bb_lower  = [_r(v) for v in bb.lower.values.tolist()]
         except Exception:
-            bb_upper = bb_middle = bb_lower = [None] * len(closes)
+            bb_upper = bb_middle = bb_lower = [None] * n
 
-        sma10 = _safe(compute_sma, closes, 10)
-        sma30 = _safe(compute_sma, closes, 30)
-        rsi14 = _safe(compute_rsi, closes, 14)
-        ema9  = _safe(compute_ema, closes, 9)
         try:
             macd_result = compute_macd(closes, 12, 26, 9)
-            macd_line = macd_result.macd.values.tolist()
-            macd_sig  = macd_result.signal.values.tolist()
-            macd_hist = macd_result.histogram.values.tolist()
+            macd_line = [_r(v) for v in macd_result.macd.values.tolist()]
+            macd_sig  = [_r(v) for v in macd_result.signal.values.tolist()]
+            macd_hist = [_r(v) for v in macd_result.histogram.values.tolist()]
         except Exception:
-            macd_line = macd_sig = macd_hist = [None] * len(closes)
+            macd_line = macd_sig = macd_hist = [None] * n
+
+        # ── ATR ──────────────────────────────────────────────────
+        try:
+            prev_close = closes.shift(1)
+            tr = pd.concat([
+                highs - lows,
+                (highs - prev_close).abs(),
+                (lows  - prev_close).abs(),
+            ], axis=1).max(axis=1)
+            atr14 = [_r(v) for v in tr.ewm(alpha=1/14, adjust=False).mean().values.tolist()]
+        except Exception:
+            atr14 = [None] * n
+
+        # ── Stochastic %K/%D (14,3) ──────────────────────────────
+        try:
+            low14  = lows.rolling(14).min()
+            high14 = highs.rolling(14).max()
+            stoch_k = ((closes - low14) / (high14 - low14) * 100).rolling(3).mean()
+            stoch_d = stoch_k.rolling(3).mean()
+            stoch_k_list = [_r(v) for v in stoch_k.values.tolist()]
+            stoch_d_list = [_r(v) for v in stoch_d.values.tolist()]
+        except Exception:
+            stoch_k_list = stoch_d_list = [None] * n
+
+        # ── VWAP (daily rolling) ─────────────────────────────────
+        try:
+            typical = (highs + lows + closes) / 3
+            cum_vol = df["Volume"].cumsum()
+            cum_tp_vol = (typical * df["Volume"]).cumsum()
+            vwap = [_r(v) for v in (cum_tp_vol / cum_vol).values.tolist()]
+        except Exception:
+            vwap = [None] * n
+
+        # ── OBV ──────────────────────────────────────────────────
+        try:
+            direction = closes.diff().apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+            obv = (direction * df["Volume"]).cumsum()
+            obv_list = [_r(v) for v in obv.values.tolist()]
+        except Exception:
+            obv_list = [None] * n
+
+        # ── Supertrend (10, 3) ───────────────────────────────────
+        try:
+            atr_period, factor = 10, 3.0
+            prev_c = closes.shift(1)
+            tr_s = pd.concat([highs - lows, (highs - prev_c).abs(), (lows - prev_c).abs()], axis=1).max(axis=1)
+            atr_s = tr_s.ewm(alpha=1/atr_period, adjust=False).mean()
+            hl2   = (highs + lows) / 2
+            upper = hl2 + factor * atr_s
+            lower = hl2 - factor * atr_s
+            st_line = [None] * n
+            trend   = [None] * n  # 1=bull, -1=bear
+            for i in range(1, n):
+                prev_upper = upper.iloc[i-1]
+                prev_lower = lower.iloc[i-1]
+                upper.iloc[i] = min(upper.iloc[i], prev_upper) if closes.iloc[i-1] > prev_lower else upper.iloc[i]
+                lower.iloc[i] = max(lower.iloc[i], prev_lower) if closes.iloc[i-1] < prev_upper else lower.iloc[i]
+                if trend[i-1] == -1:
+                    trend[i] = 1 if closes.iloc[i] > upper.iloc[i-1] else -1
+                else:
+                    trend[i] = -1 if closes.iloc[i] < lower.iloc[i-1] else 1
+                st_line[i] = _r(lower.iloc[i]) if trend[i] == 1 else _r(upper.iloc[i])
+            trend[0] = 1
+            st_line[0] = _r(lower.iloc[0])
+        except Exception:
+            st_line = [None] * n
+            trend   = [None] * n
+
+        # ── Fundamentals via yfinance ────────────────────────────
+        fundamentals = {}
+        try:
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+            def _fi(key):
+                v = info.get(key)
+                try:
+                    return round(float(v), 2) if v is not None and not math.isnan(float(v)) else None
+                except Exception:
+                    return None
+            def _fs(key):
+                return info.get(key) or None
+
+            fundamentals = {
+                "company_name":      _fs("longName") or _fs("shortName"),
+                "sector":            _fs("sector"),
+                "industry":          _fs("industry"),
+                "market_cap":        _fi("marketCap"),
+                "pe_ratio":          _fi("trailingPE"),
+                "forward_pe":        _fi("forwardPE"),
+                "peg_ratio":         _fi("pegRatio"),
+                "eps":               _fi("trailingEps"),
+                "dividend_yield":    _fi("dividendYield"),
+                "beta":              _fi("beta"),
+                "52w_high":          _fi("fiftyTwoWeekHigh"),
+                "52w_low":           _fi("fiftyTwoWeekLow"),
+                "avg_volume":        info.get("averageVolume"),
+                "float_shares":      info.get("floatShares"),
+                "short_ratio":       _fi("shortRatio"),
+                "revenue":           _fi("totalRevenue"),
+                "profit_margin":     _fi("profitMargins"),
+                "debt_to_equity":    _fi("debtToEquity"),
+                "roe":               _fi("returnOnEquity"),
+                "analyst_target":    _fi("targetMeanPrice"),
+                "analyst_rating":    _fs("recommendationKey"),
+            }
+        except Exception:
+            pass
 
         dates = [str(d)[:10] for d in df.index]
-
         return {
             "symbol": symbol,
-            "dates": dates,
-            "open":  [round(v, 4) if v == v else None for v in df["Open"].tolist()],
-            "high":  [round(v, 4) if v == v else None for v in df["High"].tolist()],
-            "low":   [round(v, 4) if v == v else None for v in df["Low"].tolist()],
-            "close": [round(v, 4) if v == v else None for v in df["Close"].tolist()],
-            "volume":[int(v) if v == v else None for v in df["Volume"].tolist()],
+            "dates":  dates,
+            "open":   [_r(v) for v in df["Open"].tolist()],
+            "high":   [_r(v) for v in df["High"].tolist()],
+            "low":    [_r(v) for v in df["Low"].tolist()],
+            "close":  [_r(v) for v in df["Close"].tolist()],
+            "volume": [int(v) if v == v else None for v in df["Volume"].tolist()],
             "indicators": {
-                "sma10":  [round(v, 4) if v is not None and v == v else None for v in sma10],
-                "sma30":  [round(v, 4) if v is not None and v == v else None for v in sma30],
-                "ema9":   [round(v, 4) if v is not None and v == v else None for v in ema9],
-                "rsi14":  [round(v, 4) if v is not None and v == v else None for v in rsi14],
-                "macd":        [round(v, 4) if v is not None and v == v else None for v in macd_line],
-                "macd_signal": [round(v, 4) if v is not None and v == v else None for v in macd_sig],
-                "macd_hist":   [round(v, 4) if v is not None and v == v else None for v in macd_hist],
-                "bb_upper":  [round(v, 4) if v is not None and v == v else None for v in bb_upper],
-                "bb_middle": [round(v, 4) if v is not None and v == v else None for v in bb_middle],
-                "bb_lower":  [round(v, 4) if v is not None and v == v else None for v in bb_lower],
+                "sma10":    sma10,   "sma20":    sma20,
+                "sma50":    sma50,   "sma200":   sma200,
+                "ema9":     ema9,    "ema21":    ema21,
+                "ema50":    ema50,   "ema200":   ema200,
+                "rsi14":    rsi14,
+                "macd":     macd_line, "macd_signal": macd_sig, "macd_hist": macd_hist,
+                "bb_upper": bb_upper,  "bb_middle":   bb_middle, "bb_lower": bb_lower,
+                "atr14":    atr14,
+                "stoch_k":  stoch_k_list, "stoch_d": stoch_d_list,
+                "vwap":     vwap,
+                "obv":      obv_list,
+                "supertrend": st_line,
+                "supertrend_trend": trend,
             },
+            "fundamentals": fundamentals,
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))

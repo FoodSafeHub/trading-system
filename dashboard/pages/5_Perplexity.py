@@ -19,8 +19,9 @@ from app.config import get_settings
 st.set_page_config(page_title="Perplexity Strategies", page_icon="🧠", layout="wide")
 st.title("🧠 Perplexity Swing Strategies")
 st.caption(
-    "5 swing trading strategies — EMA mean reversion, MA crossover, consolidation breakout, "
-    "BB mean reversion, and Fibonacci pullback. Daily bars, 3–10 day holds."
+    "8 swing trading strategies — EMA mean reversion, MA crossover, consolidation breakout, "
+    "BB mean reversion, Fibonacci pullback, RSI swing reversal, Supertrend, and BB breakout. "
+    "Daily bars, 3–20 day holds. Scan the full market or analyse a single symbol."
 )
 
 STRATEGY_DESCRIPTIONS = {
@@ -44,6 +45,19 @@ STRATEGY_DESCRIPTIONS = {
                               "Triggers when ATR% > 3% (panic day) + RSI < 30 + BB%B < 0.15 + lower rejection wick ≥ 50% "
                               "+ 3-bar prior decline ≥ 2%. Stop: 4% hard stop. Target: +6%. Max hold: 8 bars. "
                               "Best on: SPY, AAPL, MSFT — liquid names that recover fast after selloffs.",
+    "RSI_Swing_Reversal":    "RSI(14) pullback reversal in an uptrend. Price must be above rising EMA(50). "
+                              "Buys when RSI dips below 40 on the prior bar then turns back up — confirming the dip "
+                              "is a pullback rather than a breakdown. Stop: 1.5×ATR. Target: 2.5×ATR. Max hold: 15 bars. "
+                              "Best on: AAPL, MSFT, SPY — smooth EMA(50) uptrends.",
+    "Supertrend_Swing":      "Supertrend indicator (ATR-based trailing stop) trend-follow on daily bars. "
+                              "Enters when Supertrend flips from bearish to bullish with ADX > 20 (filters trendless chop). "
+                              "Exit: Supertrend flips bearish. Stop: Supertrend line. Target: 2.5×risk. Max hold: 20 bars. "
+                              "Best on: trending names — NVDA, TSLA, AMD during strong directional moves.",
+    "BB_Breakout":           "Bollinger Band upper-band breakout with expanding bands and above-average volume. "
+                              "Enters when close breaks above BB(20,2) upper band after being inside the bands, "
+                              "with RSI 52–80 (momentum confirmation) and volume ≥ 1.2×. "
+                              "Stop: BB midline. Target: upper band + one full band width. Max hold: 12 bars. "
+                              "Best on: TSLA, NVDA, AMZN — volatile names with strong breakout momentum.",
 }
 
 SYMBOLS = ["SPY", "QQQ", "IWM", "AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "META", "GOOGL"]
@@ -164,8 +178,8 @@ def _plot_equity_curve(result: dict, height: int = 380, show_markers: bool = Tru
 
 
 # ── Tab layout ────────────────────────────────────────────────
-tab_signals, tab_sizer, tab_backtest, tab_compare, tab_portfolio, tab_walkforward, tab_profiles, tab_analysis, tab_config = st.tabs([
-    "📡 Live Signals", "📐 Position Sizer", "🔬 Backtest", "📊 Compare All",
+tab_signals, tab_scanner, tab_sizer, tab_backtest, tab_compare, tab_portfolio, tab_walkforward, tab_profiles, tab_analysis, tab_config = st.tabs([
+    "📡 Live Signals", "🔭 Market Scanner", "📐 Position Sizer", "🔬 Backtest", "📊 Compare All",
     "🗂 Portfolio", "🔀 Walk-Forward", "🎯 Symbol Profiles", "🔍 Analysis", "⚙️ Config"
 ])
 
@@ -264,7 +278,160 @@ with tab_signals:
 
 
 # ══════════════════════════════════════════════════════════════
-# TAB 2 — POSITION SIZER
+# TAB 2 — MARKET SCANNER
+# ══════════════════════════════════════════════════════════════
+from app.services.strategy.perplexity.runner import PERPLEXITY_STRATEGIES as _ALL_STRATEGIES
+_STRATEGY_NAMES = [s.name for s in _ALL_STRATEGIES]
+
+with tab_scanner:
+    st.subheader("🔭 Market Scanner")
+    st.caption(
+        "Enter any tickers you want to scan. Live prices are fetched from Schwab; "
+        "historical bars (indicators) come from yfinance. Results show actionable signals ready for auto-trading."
+    )
+
+    st.info(
+        "**How to use:** Paste tickers you want to watch — one per line or comma-separated. "
+        "The scanner runs all 8 strategies and shows only signals that pass your confidence threshold. "
+        "Signals from this scanner can be auto-executed by assigning them in the **Strategy** page.",
+        icon="ℹ️",
+    )
+
+    sc1, sc2, sc3 = st.columns([2, 1, 1])
+    scan_direction  = sc1.selectbox("Signal direction", ["BUY", "SELL", "ALL"], index=0, key="scan_dir")
+    scan_min_conf   = sc2.slider("Min confidence", 0.0, 1.0, 0.55, 0.05, key="scan_conf")
+    scan_strategies = sc3.multiselect(
+        "Strategies (blank = all)", options=_STRATEGY_NAMES, default=[], key="scan_strats",
+    )
+
+    st.markdown("**Tickers to scan** — enter comma-separated or one per line:")
+    scan_universe_input = st.text_area(
+        "Tickers",
+        placeholder="AAPL\nMSFT\nNVDA\nTSLA\nSPY,QQQ,AMD",
+        height=140,
+        key="scan_universe",
+        label_visibility="collapsed",
+    )
+
+    sc_run = st.button("▶ Run Scan", type="primary", key="scan_run")
+
+    if sc_run:
+        raw_tickers = [t.strip().upper() for t in scan_universe_input.replace("\n", ",").split(",") if t.strip()]
+        raw_tickers = list(dict.fromkeys(raw_tickers))
+        if not raw_tickers:
+            st.error("No tickers entered. Paste at least one symbol above.")
+        elif len(raw_tickers) > 500:
+            st.error("Maximum 500 symbols per scan.")
+        else:
+            strat_filter = ",".join(scan_strategies) if scan_strategies else None
+            with st.spinner(f"Fetching Schwab live prices and scanning {len(raw_tickers)} symbols…"):
+                try:
+                    scan_result = api.perplexity_scan(
+                        symbols=raw_tickers,
+                        direction=scan_direction,
+                        min_confidence=scan_min_conf,
+                        strategies=strat_filter,
+                        max_workers=10,
+                    )
+                    st.session_state["px_scan_result"] = scan_result
+                    st.session_state["px_scan_tickers"] = raw_tickers
+                except Exception as e:
+                    st.error(f"Scan failed: {e}")
+
+    scan_data = st.session_state.get("px_scan_result")
+    if scan_data:
+        hits    = scan_data.get("results", [])
+        scanned = scan_data.get("scanned", 0)
+        schwab_loaded = scan_data.get("schwab_prices_loaded", 0)
+
+        sc_c1, sc_c2, sc_c3, sc_c4, sc_c5 = st.columns(5)
+        sc_c1.metric("Symbols scanned", scanned)
+        sc_c2.metric("Signals found",   len(hits))
+        sc_c3.metric("BUY signals",  sum(1 for h in hits if h["direction"] == "BUY"))
+        sc_c4.metric("SELL signals", sum(1 for h in hits if h["direction"] == "SELL"))
+        sc_c5.metric("Schwab live prices", schwab_loaded,
+                     delta="yfinance fallback" if schwab_loaded < scanned else "all live",
+                     delta_color="off")
+
+        if not hits:
+            st.info("No signals matched your filters. Try lowering min confidence, adding more tickers, or selecting ALL direction.")
+        else:
+            rows = []
+            for h in hits:
+                rr = None
+                if h["entry_price"] and h["stop_price"] and h["target_price"]:
+                    risk   = abs(h["entry_price"] - h["stop_price"])
+                    reward = abs(h["target_price"] - h["entry_price"])
+                    rr = round(reward / risk, 1) if risk > 0 else None
+                price_src = "🟢 Schwab" if h.get("price_source") == "schwab" else "⚪ yfinance"
+                rows.append({
+                    "Symbol":      h["symbol"],
+                    "Strategy":    h["strategy"],
+                    "Signal":      h["direction"],
+                    "Confidence":  f"{h['confidence']:.0%}",
+                    "Live Price":  f"${h['live_price']:,.2f}" if h.get("live_price") else "—",
+                    "Entry":       f"${h['entry_price']:,.2f}" if h["entry_price"] else "—",
+                    "Stop":        f"${h['stop_price']:,.2f}"  if h["stop_price"]   else "—",
+                    "Target":      f"${h['target_price']:,.2f}" if h["target_price"] else "—",
+                    "R:R":         f"{rr:.1f}" if rr else "—",
+                    "Price Src":   price_src,
+                    "Regime":      h.get("regime", "").replace("_", " ").title(),
+                    "Reason":      h.get("reason", ""),
+                })
+            df_hits = pd.DataFrame(rows)
+
+            def _color_row(row):
+                if row["Signal"] == "BUY":
+                    return ["background-color: rgba(0,212,170,0.08)"] * len(row)
+                if row["Signal"] == "SELL":
+                    return ["background-color: rgba(255,75,75,0.08)"] * len(row)
+                return [""] * len(row)
+
+            st.dataframe(df_hits.style.apply(_color_row, axis=1),
+                         use_container_width=True, hide_index=True)
+
+            # Detail cards for BUY signals
+            buy_hits_list = [h for h in hits if h["direction"] == "BUY"]
+            if buy_hits_list:
+                st.markdown("---")
+                st.markdown("### BUY Signal Details")
+                for h in buy_hits_list:
+                    ps = h.get("position_size") or {}
+                    price_badge = "🟢 Schwab live" if h.get("price_source") == "schwab" else "⚪ yfinance close"
+                    with st.expander(
+                        f"🟢 **{h['symbol']}** — {h['strategy']} | conf {h['confidence']:.0%} | {price_badge}",
+                        expanded=False,
+                    ):
+                        if h.get("live_price"):
+                            st.metric("Live Price (Schwab)", f"${h['live_price']:,.2f}")
+                        d1, d2, d3 = st.columns(3)
+                        if h["entry_price"]:
+                            d1.metric("Entry", f"${h['entry_price']:,.2f}")
+                        if h["stop_price"] and h["entry_price"]:
+                            stop_pct = (h["entry_price"] - h["stop_price"]) / h["entry_price"] * 100
+                            d2.metric("Stop", f"${h['stop_price']:,.2f}",
+                                      delta=f"-{stop_pct:.1f}%", delta_color="inverse")
+                        if h["target_price"] and h["entry_price"]:
+                            tgt_pct = (h["target_price"] - h["entry_price"]) / h["entry_price"] * 100
+                            d3.metric("Target", f"${h['target_price']:,.2f}", delta=f"+{tgt_pct:.1f}%")
+                        st.info(f"**Signal reason:** {h['reason']}")
+                        if ps and ps.get("viable"):
+                            p1, p2, p3 = st.columns(3)
+                            p1.metric("Shares",         f"{ps.get('shares', 0):,.0f}")
+                            p2.metric("Position Value", f"${ps.get('position_value', 0):,.0f}")
+                            p3.metric("Risk Amount",    f"${ps.get('risk_amount', 0):,.2f}")
+                        st.caption(
+                            f"Strategy: {h['strategy']} | Regime: {h.get('regime','').replace('_',' ').title()} "
+                            f"| Vol bucket: {h.get('volatility_bucket','')} | Price: {price_badge}"
+                        )
+                        st.caption(
+                            "To auto-trade this signal, go to the **Strategy** page → Assignments "
+                            f"and assign **{h['strategy']}** to **{h['symbol']}** with the Perplexity system."
+                        )
+
+
+# ══════════════════════════════════════════════════════════════
+# TAB 3 — POSITION SIZER
 # ══════════════════════════════════════════════════════════════
 with tab_sizer:
     st.subheader("📐 Position Sizer")

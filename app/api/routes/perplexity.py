@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Optional
+from typing import List, Optional
+import concurrent.futures
+import logging
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+
+logger = logging.getLogger(__name__)
 
 from app.config import get_settings
 from app.services.backtest.perplexity_engine import run_perplexity_backtest
@@ -108,6 +112,136 @@ def get_signals(symbol: str):
         raise
     except Exception as exc:
         raise HTTPException(500, str(exc))
+
+
+@router.get("/scan")
+def scan_universe(
+    symbols: str = Query(..., description="Comma-separated list of tickers to scan"),
+    direction: str = Query("BUY", description="Filter: BUY, SELL, or ALL"),
+    min_confidence: float = Query(0.0, description="Minimum signal confidence 0–1"),
+    strategies: Optional[str] = Query(None, description="Comma-separated strategy names to include (default: all enabled)"),
+    max_workers: int = Query(8, description="Parallel fetch workers (max 20)"),
+):
+    """
+    Scan a list of symbols for swing trading signals.
+    Historical OHLCV bars come from yfinance (Schwab has no historical API).
+    Live entry prices are refreshed from Schwab quotes; yfinance is the fallback.
+    Returns one row per (symbol, strategy) where direction matches the filter.
+    """
+    import asyncio
+
+    settings = get_settings()
+    ticker_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not ticker_list:
+        raise HTTPException(400, "No symbols provided")
+    if len(ticker_list) > 500:
+        raise HTTPException(400, "Maximum 500 symbols per scan")
+
+    strategy_filter = {s.strip() for s in strategies.split(",")} if strategies else None
+    max_workers = min(max_workers, 20)
+    direction_filter = direction.upper()
+
+    # Fetch live Schwab quotes for all symbols upfront (one batch call)
+    live_prices: dict[str, float] = {}
+    try:
+        from app.services.brokers.schwab import SchwabBroker
+        loop = asyncio.new_event_loop()
+        try:
+            schwab = SchwabBroker()
+            loop.run_until_complete(schwab.authenticate())
+            quotes = loop.run_until_complete(schwab.get_quotes(ticker_list))
+            for sym, q in quotes.items():
+                price = q.last or q.ask or q.bid
+                if price and price > 0:
+                    live_prices[sym] = float(price)
+            logger.info("[scan] Schwab live prices loaded for %d/%d symbols", len(live_prices), len(ticker_list))
+        finally:
+            loop.close()
+    except Exception as exc:
+        logger.warning("[scan] Schwab quotes unavailable, will use yfinance close prices: %s", exc)
+
+    def _scan_one(symbol: str) -> list[dict]:
+        try:
+            df = get_ohlcv(symbol, period="1y")
+            if df.empty or len(df) < 60:
+                return []
+
+            # Override the last close with live Schwab price if available
+            live_price = live_prices.get(symbol)
+            if live_price:
+                df = df.copy()
+                df.iloc[-1, df.columns.get_loc("Close")] = live_price
+
+            regime = get_current_regime(df.index[-1])
+            signals = run_perplexity_signal(symbol, df, regime=regime)
+            regime_caps = get_regime_risk_caps(regime)
+            hits = []
+            for s in signals:
+                if strategy_filter and s.strategy_name not in strategy_filter:
+                    continue
+                if s.suitability_blocked:
+                    continue
+                if direction_filter != "ALL" and s.direction != direction_filter:
+                    continue
+                if s.confidence < min_confidence:
+                    continue
+                item = {
+                    "symbol":        symbol,
+                    "strategy":      s.strategy_name,
+                    "direction":     s.direction,
+                    "entry_price":   s.entry_price,
+                    "stop_price":    s.stop_price,
+                    "target_price":  s.target_price,
+                    "confidence":    round(s.confidence, 2),
+                    "reason":        s.reason,
+                    "regime":        regime.value,
+                    "volatility_bucket": s.volatility_bucket,
+                    "live_price":    live_price,
+                    "price_source":  "schwab" if live_price else "yfinance",
+                    "position_size": None,
+                }
+                if s.direction == "BUY" and s.entry_price and s.stop_price and settings.position_sizing_enabled:
+                    try:
+                        sz = calculate_position_size(
+                            symbol=symbol,
+                            entry_price=s.entry_price,
+                            stop_price=s.stop_price,
+                            account_value=settings.account_value,
+                            risk_pct_per_trade=regime_caps["risk_pct_per_trade"],
+                            max_position_size_usd=settings.max_position_size_usd,
+                            max_account_risk_pct=regime_caps["max_account_risk_pct"],
+                        )
+                        item["position_size"] = {
+                            "shares": sz.shares,
+                            "position_value": sz.position_value,
+                            "risk_amount": sz.risk_amount,
+                            "risk_pct_of_account": sz.risk_pct_of_account,
+                            "stop_distance_pct": sz.stop_distance_pct,
+                            "viable": sz.viable,
+                        }
+                    except Exception:
+                        pass
+                hits.append(item)
+            return hits
+        except Exception as exc:
+            logger.warning("[scan] %s failed: %s", symbol, exc)
+            return []
+
+    results: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_scan_one, sym): sym for sym in ticker_list}
+        for fut in concurrent.futures.as_completed(futures):
+            results.extend(fut.result())
+
+    results.sort(key=lambda x: (-{"BUY": 2, "SELL": 1}.get(x["direction"], 0), -x["confidence"]))
+    return {
+        "scanned": len(ticker_list),
+        "hits": len(results),
+        "direction_filter": direction_filter,
+        "min_confidence": min_confidence,
+        "schwab_prices_loaded": len(live_prices),
+        "results": results,
+    }
 
 
 @router.get("/atr/{symbol}")

@@ -700,3 +700,342 @@ class FibPullbackSupport(PerplexityStrategy):
                 "bb_lower":  round(float(bb_lower.iloc[-1]), 2),
             },
         )
+
+
+# ══════════════════════════════════════════════════════════════
+# STRATEGY 6 — RSI Swing Reversal
+# ══════════════════════════════════════════════════════════════
+class RsiSwingReversal(PerplexityStrategy):
+    """
+    Buys pullbacks in an uptrend when RSI(14) dips into oversold territory
+    and turns up, confirmed by price holding above EMA(50).
+
+    BUY : price > EMA(50) + EMA(50) rising + RSI(14) < rsi_oversold on previous bar
+          + RSI(14) now turning up (today > yesterday) + volume ≥ 0.8× avg
+    SELL: RSI(14) > rsi_overbought OR price > EMA(50) * (1 + exit_ext_pct/100) OR max_hold
+    Stop : entry - atr_stop_mult × ATR
+    Target: entry + atr_tp_mult × ATR
+    """
+    name = "RSI_Swing_Reversal"
+
+    config: dict = {
+        "min_data_bars":     60,
+        "ema_trend":         50,
+        "rsi_period":        14,
+        "rsi_oversold":      40,      # RSI < 40 on prior bar = pullback dip
+        "rsi_overbought":    70,      # RSI > 70 = exit
+        "atr_stop_mult":     1.5,
+        "atr_tp_mult":       2.5,
+        "vol_ratio_min":     0.8,
+        "max_hold_bars":     15,
+        "filter_vol_min":    0.0,
+    }
+
+    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None, **kwargs) -> PerplexitySignal:
+        cfg = self.config
+        if len(df) < cfg["min_data_bars"]:
+            return self._hold(symbol, "not enough data")
+
+        close = df["Close"]
+        c_now = float(close.iloc[-1])
+        atr_v = _current_atr(df, 14)
+        rsi   = _rsi(close, cfg["rsi_period"])
+        rsi_now  = float(rsi.iloc[-1])
+        rsi_prev = float(rsi.iloc[-2])
+        ema50    = _ema(close, cfg["ema_trend"])
+        ema50_now  = float(ema50.iloc[-1])
+        ema50_prev = float(ema50.iloc[-5])  # 5-bar slope check
+
+        # Trend filter: price above rising EMA(50)
+        if c_now <= ema50_now:
+            return self._hold(symbol, f"price below EMA({cfg['ema_trend']})")
+        if ema50_now <= ema50_prev:
+            return self._hold(symbol, f"EMA({cfg['ema_trend']}) not rising")
+
+        # Volume filter
+        vol_avg = float(df["Volume"].rolling(20).mean().iloc[-1])
+        vol_now = float(df["Volume"].iloc[-1])
+        vol_ratio = vol_now / vol_avg if vol_avg > 0 else 1.0
+        if vol_ratio < cfg["vol_ratio_min"]:
+            return self._hold(symbol, f"vol ratio {vol_ratio:.2f} < {cfg['vol_ratio_min']}")
+
+        if cfg.get("filter_vol_min", 0.0) > 0 and vol_ratio < cfg["filter_vol_min"]:
+            return self._hold(symbol, f"vol ratio {vol_ratio:.2f} < calibrated min {cfg['filter_vol_min']}")
+
+        # BUY: prior bar dipped into oversold, now turning up
+        if rsi_prev < cfg["rsi_oversold"] and rsi_now > rsi_prev:
+            stop   = round(c_now - cfg["atr_stop_mult"] * atr_v, 2)
+            target = round(c_now + cfg["atr_tp_mult"] * atr_v, 2)
+            rr = (target - c_now) / (c_now - stop) if (c_now - stop) > 0 else 0
+            confidence = min(0.90, 0.55 + (cfg["rsi_oversold"] - rsi_prev) / cfg["rsi_oversold"] * 0.35)
+            return PerplexitySignal(
+                symbol=symbol, strategy_name=self.name, direction="BUY",
+                entry_price=round(c_now, 2),
+                stop_price=stop,
+                target_price=target,
+                confidence=round(confidence, 2),
+                reason=(
+                    f"RSI({cfg['rsi_period']}) dipped to {rsi_prev:.0f} then turned up to {rsi_now:.0f} "
+                    f"— pullback in EMA({cfg['ema_trend']}) uptrend. R:R={rr:.1f}"
+                ),
+                indicators={
+                    "rsi":        round(rsi_now, 1),
+                    "rsi_prev":   round(rsi_prev, 1),
+                    "ema50":      round(ema50_now, 2),
+                    "vol_ratio":  round(vol_ratio, 2),
+                    "atr_pct":    round(atr_v / c_now * 100, 2),
+                },
+            )
+
+        # SELL: overbought
+        if rsi_now > cfg["rsi_overbought"]:
+            return PerplexitySignal(
+                symbol=symbol, strategy_name=self.name, direction="SELL",
+                entry_price=c_now, confidence=0.70,
+                reason=f"RSI({cfg['rsi_period']})={rsi_now:.0f} overbought — potential reversal",
+                indicators={"rsi": round(rsi_now, 1)},
+            )
+
+        return self._hold(symbol)
+
+
+# ══════════════════════════════════════════════════════════════
+# STRATEGY 7 — Supertrend Trend Follow
+# ══════════════════════════════════════════════════════════════
+class SupertrendSwing(PerplexityStrategy):
+    """
+    Follows the Supertrend indicator (ATR-based trailing stop) on daily bars.
+    Enters long when Supertrend flips from bearish to bullish.
+    Exits when Supertrend flips back.
+
+    BUY : Supertrend just flipped from SELL to BUY (prior bar was bearish, current is bullish)
+          + ADX > adx_min (avoid trading in trendless markets)
+    SELL: Supertrend flips from BUY to SELL
+    Stop : Supertrend line value (trailing)
+    Target: entry + rr_target × risk
+    """
+    name = "Supertrend_Swing"
+
+    config: dict = {
+        "min_data_bars":  30,
+        "atr_period":     10,
+        "atr_multiplier": 3.0,
+        "adx_min":        20.0,   # only trade when there is trend strength
+        "rr_target":      2.5,
+        "max_hold_bars":  20,
+        "filter_vol_min": 0.0,
+    }
+
+    def _supertrend(self, df: pd.DataFrame, period: int, multiplier: float):
+        """Compute Supertrend; returns (direction_series, st_line_series).
+        direction: +1 = bullish (price above line), -1 = bearish."""
+        high  = df["High"]
+        low   = df["Low"]
+        close = df["Close"]
+        hl2   = (high + low) / 2
+        atr   = _atr_series(df, period)
+        basic_upper = hl2 + multiplier * atr
+        basic_lower = hl2 - multiplier * atr
+
+        n = len(df)
+        final_upper = basic_upper.copy()
+        final_lower = basic_lower.copy()
+        direction   = pd.Series(1, index=df.index)
+
+        for i in range(1, n):
+            # Upper band
+            if basic_upper.iloc[i] < final_upper.iloc[i - 1] or close.iloc[i - 1] > final_upper.iloc[i - 1]:
+                final_upper.iloc[i] = basic_upper.iloc[i]
+            else:
+                final_upper.iloc[i] = final_upper.iloc[i - 1]
+            # Lower band
+            if basic_lower.iloc[i] > final_lower.iloc[i - 1] or close.iloc[i - 1] < final_lower.iloc[i - 1]:
+                final_lower.iloc[i] = basic_lower.iloc[i]
+            else:
+                final_lower.iloc[i] = final_lower.iloc[i - 1]
+            # Direction
+            if close.iloc[i] > final_upper.iloc[i - 1]:
+                direction.iloc[i] = 1
+            elif close.iloc[i] < final_lower.iloc[i - 1]:
+                direction.iloc[i] = -1
+            else:
+                direction.iloc[i] = direction.iloc[i - 1]
+
+        st_line = pd.Series(index=df.index, dtype=float)
+        for i in range(n):
+            st_line.iloc[i] = final_lower.iloc[i] if direction.iloc[i] == 1 else final_upper.iloc[i]
+
+        return direction, st_line
+
+    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None, **kwargs) -> PerplexitySignal:
+        cfg = self.config
+        if len(df) < cfg["min_data_bars"]:
+            return self._hold(symbol, "not enough data")
+
+        close  = df["Close"]
+        c_now  = float(close.iloc[-1])
+        atr_v  = _current_atr(df, cfg["atr_period"])
+        adx    = _adx(df, 14)
+
+        direction, st_line = self._supertrend(df, cfg["atr_period"], cfg["atr_multiplier"])
+        dir_now  = int(direction.iloc[-1])
+        dir_prev = int(direction.iloc[-2])
+        st_now   = float(st_line.iloc[-1])
+
+        vol_avg   = float(df["Volume"].rolling(20).mean().iloc[-1])
+        vol_now   = float(df["Volume"].iloc[-1])
+        vol_ratio = vol_now / vol_avg if vol_avg > 0 else 1.0
+
+        if cfg.get("filter_vol_min", 0.0) > 0 and vol_ratio < cfg["filter_vol_min"]:
+            return self._hold(symbol, f"vol ratio {vol_ratio:.2f} < calibrated min {cfg['filter_vol_min']}")
+
+        # BUY: flip from bearish to bullish
+        if dir_prev == -1 and dir_now == 1:
+            if adx < cfg["adx_min"]:
+                return self._hold(symbol, f"ADX={adx:.0f} < {cfg['adx_min']} — not enough trend strength")
+            risk   = c_now - st_now
+            stop   = round(st_now, 2)
+            target = round(c_now + cfg["rr_target"] * risk, 2)
+            rr     = cfg["rr_target"]
+            confidence = min(0.90, 0.60 + (adx - cfg["adx_min"]) / 60 * 0.30)
+            return PerplexitySignal(
+                symbol=symbol, strategy_name=self.name, direction="BUY",
+                entry_price=round(c_now, 2),
+                stop_price=stop,
+                target_price=target,
+                confidence=round(confidence, 2),
+                reason=(
+                    f"Supertrend flipped bullish — ADX={adx:.0f}, "
+                    f"ST support={st_now:.2f}, R:R={rr:.1f}"
+                ),
+                indicators={
+                    "adx":       round(adx, 1),
+                    "st_line":   round(st_now, 2),
+                    "atr_pct":   round(atr_v / c_now * 100, 2),
+                    "vol_ratio": round(vol_ratio, 2),
+                },
+            )
+
+        # SELL: flip from bullish to bearish
+        if dir_prev == 1 and dir_now == -1:
+            return PerplexitySignal(
+                symbol=symbol, strategy_name=self.name, direction="SELL",
+                entry_price=c_now, confidence=0.75,
+                reason=f"Supertrend flipped bearish — ST resistance={st_now:.2f}",
+                indicators={"st_line": round(st_now, 2), "adx": round(adx, 1)},
+            )
+
+        return self._hold(symbol)
+
+
+# ══════════════════════════════════════════════════════════════
+# STRATEGY 8 — Bollinger Band Breakout
+# ══════════════════════════════════════════════════════════════
+class BollingerBandBreakout(PerplexityStrategy):
+    """
+    Buys a confirmed break above the upper Bollinger Band with strong momentum
+    — the opposite of mean reversion, used when a squeeze resolves upward
+    with expanding volume and RSI above 50.
+
+    BUY : close breaks above upper BB(20,2) + RSI(14) in [rsi_min, rsi_max]
+          + volume ≥ vol_ratio_min × 20-bar avg
+          + BB width expanding (current width > prior width)
+          + prior bar was inside the bands (no premature entry)
+    SELL: close drops back below middle BB OR RSI > rsi_overbought OR max_hold
+    Stop : middle BB at entry (mean)
+    Target: upper BB + (upper BB - mid BB) — one full band width above breakout
+    """
+    name = "BB_Breakout"
+
+    config: dict = {
+        "min_data_bars":   30,
+        "bb_period":       20,
+        "bb_std":          2.0,
+        "rsi_period":      14,
+        "rsi_min":         52,    # must have some momentum, not just bouncing
+        "rsi_max":         80,    # not already overbought
+        "rsi_overbought":  80,
+        "vol_ratio_min":   1.2,   # need above-avg volume on breakout bar
+        "max_hold_bars":   12,
+        "filter_vol_min":  0.0,
+    }
+
+    def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None, **kwargs) -> PerplexitySignal:
+        cfg = self.config
+        if len(df) < cfg["min_data_bars"]:
+            return self._hold(symbol, "not enough data")
+
+        close  = df["Close"]
+        c_now  = float(close.iloc[-1])
+        c_prev = float(close.iloc[-2])
+
+        bb_upper, bb_mid, bb_lower = _bb_bands(close, cfg["bb_period"], cfg["bb_std"])
+        upper_now  = float(bb_upper.iloc[-1])
+        mid_now    = float(bb_mid.iloc[-1])
+        upper_prev = float(bb_upper.iloc[-2])
+        mid_prev   = float(bb_mid.iloc[-2])
+
+        rsi      = _rsi(close, cfg["rsi_period"])
+        rsi_now  = float(rsi.iloc[-1])
+
+        # BB width expansion check
+        width_now  = upper_now - float(bb_lower.iloc[-1])
+        width_prev = upper_prev - float(bb_lower.iloc[-2])
+        bb_expanding = width_now > width_prev
+
+        vol_avg   = float(df["Volume"].rolling(20).mean().iloc[-1])
+        vol_now   = float(df["Volume"].iloc[-1])
+        vol_ratio = vol_now / vol_avg if vol_avg > 0 else 1.0
+
+        if cfg.get("filter_vol_min", 0.0) > 0 and vol_ratio < cfg["filter_vol_min"]:
+            return self._hold(symbol, f"vol ratio {vol_ratio:.2f} < calibrated min {cfg['filter_vol_min']}")
+
+        # BUY: close breaks above upper band, prior close was inside bands
+        if (c_now > upper_now and c_prev <= upper_prev
+                and cfg["rsi_min"] <= rsi_now <= cfg["rsi_max"]
+                and vol_ratio >= cfg["vol_ratio_min"]
+                and bb_expanding):
+            stop   = round(mid_now, 2)
+            reward = upper_now - mid_now        # one band width
+            target = round(upper_now + reward, 2)
+            risk   = c_now - stop
+            rr     = reward / risk if risk > 0 else 0
+            confidence = min(0.90, 0.55 + (rsi_now - cfg["rsi_min"]) / 30 * 0.20 + min(vol_ratio - 1, 1) * 0.15)
+            return PerplexitySignal(
+                symbol=symbol, strategy_name=self.name, direction="BUY",
+                entry_price=round(c_now, 2),
+                stop_price=stop,
+                target_price=target,
+                confidence=round(confidence, 2),
+                reason=(
+                    f"BB upper band breakout: close {c_now:.2f} > upper {upper_now:.2f}, "
+                    f"RSI={rsi_now:.0f}, vol={vol_ratio:.1f}×, R:R={rr:.1f}"
+                ),
+                indicators={
+                    "rsi":        round(rsi_now, 1),
+                    "bb_upper":   round(upper_now, 2),
+                    "bb_mid":     round(mid_now, 2),
+                    "vol_ratio":  round(vol_ratio, 2),
+                    "bb_width":   round(width_now, 2),
+                },
+            )
+
+        # SELL: close falls back below middle band
+        if c_now < mid_now and c_prev >= mid_prev:
+            return PerplexitySignal(
+                symbol=symbol, strategy_name=self.name, direction="SELL",
+                entry_price=c_now, confidence=0.65,
+                reason=f"Price fell back below BB midline ({mid_now:.2f}) — momentum fading",
+                indicators={"bb_mid": round(mid_now, 2), "rsi": round(rsi_now, 1)},
+            )
+
+        # SELL: overbought
+        if rsi_now > cfg["rsi_overbought"]:
+            return PerplexitySignal(
+                symbol=symbol, strategy_name=self.name, direction="SELL",
+                entry_price=c_now, confidence=0.60,
+                reason=f"RSI={rsi_now:.0f} overbought — take profit",
+                indicators={"rsi": round(rsi_now, 1)},
+            )
+
+        return self._hold(symbol)

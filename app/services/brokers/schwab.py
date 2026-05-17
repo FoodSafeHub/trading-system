@@ -33,6 +33,7 @@ from app.services.brokers.base import BrokerBase
 logger = logging.getLogger(__name__)
 
 SCHWAB_BASE_URL = "https://api.schwabapi.com/trader/v1"
+SCHWAB_MARKETDATA_URL = "https://api.schwabapi.com/marketdata/v1"
 SCHWAB_AUTH_URL = "https://api.schwabapi.com/v1/oauth/authorize"
 SCHWAB_TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 TOKEN_REFRESH_BUFFER_SECONDS = 300  # refresh 5 min before expiry
@@ -270,11 +271,16 @@ class SchwabBroker(BrokerBase):
         ]
 
     async def get_quotes(self, symbols: List[str]) -> Dict[str, Quote]:
-        # ASSUMPTION: GET /marketdata/v1/quotes?symbols=AAPL,MSFT returns {AAPL: {...}, MSFT: {...}}
-        data = await self._get(
-            "/marketdata/v1/quotes",
-            params={"symbols": ",".join(symbols), "fields": "quote"},
-        )
+        await self.refresh_token_if_needed()
+        async with httpx.AsyncClient(base_url=SCHWAB_MARKETDATA_URL) as client:
+            resp = await client.get(
+                "/quotes",
+                headers=self._auth_headers(),
+                params={"symbols": ",".join(symbols), "fields": "quote"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
         quotes: Dict[str, Quote] = {}
         for sym, info in data.items():
             q = info.get("quote", {})

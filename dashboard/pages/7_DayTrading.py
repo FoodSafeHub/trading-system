@@ -222,7 +222,7 @@ def _render_pipeline_diagnostics(diag: dict, expanded: bool = False) -> None:
               delta=f"Buy:{signals.get('raw_buy_signals',0)} Sell:{signals.get('raw_sell_signals',0)}",
               delta_color="off")
     f2.metric("Brain Accepted",     acc,
-              delta=f"-{rej} rejected" if rej else "no brain filter",
+              delta=f"-{rej} rejected" if rej else "backtest mode (no live brain)",
               delta_color="inverse" if rej > 0 else "off")
     f3.metric("Trades Executed",    execs,
               delta=f"{exec_.get('trades_skipped_no_future_bars',0)} skip (no future bars)" if exec_.get('trades_skipped_no_future_bars',0) else None,
@@ -329,7 +329,7 @@ def _metrics_row(m: dict) -> None:
     slippage = m.get("total_slippage", 0.0)
     if gross is not None and (comm > 0 or slippage > 0):
         net = m.get("net_pnl", m.get("total_pnl", 0))
-        st.caption(
+        st.markdown(
             f"Gross P&L: **${gross:,.2f}** &nbsp;|&nbsp; "
             f"Commission: **-${comm:,.2f}** &nbsp;|&nbsp; "
             f"Slippage: **-${slippage:,.2f}** &nbsp;|&nbsp; "
@@ -636,7 +636,7 @@ with tab_backtest:
                        delta=f"Buy:{_dsig.get('raw_buy_signals',0)} Sell:{_dsig.get('raw_sell_signals',0)}",
                        delta_color="off")
             qs2.metric("Brain Accepted", _acc,
-                       delta=f"-{_rej} rejected" if _rej else "no brain filter",
+                       delta=f"-{_rej} rejected" if _rej else "backtest mode (no live brain)",
                        delta_color="inverse" if _rej > 0 else "off")
             qs3.metric("Trades Executed", _exec)
             qs4.metric("Regime-Blocked Days", _rskip)
@@ -645,6 +645,16 @@ with tab_backtest:
             if _root and _exec == 0:
                 _fn = st.error if _raw == 0 else st.warning
                 _fn(f"**Why no trades:** {_root}")
+            # Explain regime-blocked rejections clearly
+            _rej_regime = _dbr.get("rejected_by_regime", 0)
+            if _rej_regime > 0 and _rej_regime == _rej:
+                st.info(
+                    f"**All {_rej} brain rejections were regime-blocked.** "
+                    "The brain classified each historical day's market state (TREND_UP/TREND_DOWN/CHOPPY) "
+                    "and the selected strategy is not allowed in those states. "
+                    "Try a strategy that works in CHOPPY markets (e.g. VWAPMeanReversion or BollingerMomentum), "
+                    "or run in Raw Strategy mode to see unfiltered results."
+                )
 
         # ── Full pipeline diagnostics panel ──────────────────────────────────
         if diag_data:

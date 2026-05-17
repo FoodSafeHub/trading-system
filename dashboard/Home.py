@@ -67,7 +67,7 @@ except Exception as e:
 st.divider()
 
 # ── P&L Summary ───────────────────────────────────────────────
-st.subheader("Paper Trading P&L")
+st.subheader("Trading P&L")
 try:
     orders = api.orders()
     filled = [o for o in orders if o.get("status") == "filled"]
@@ -102,6 +102,36 @@ try:
         st.info("No filled orders yet — P&L will appear here once the bot places trades during market hours.")
 except Exception as e:
     st.warning(f"P&L data unavailable: {e}")
+
+st.divider()
+
+# ── Live Quotes (Schwab real-time) ────────────────────────────
+st.subheader("Live Quotes")
+try:
+    default_symbols = "SPY,QQQ,AAPL,MSFT,NVDA"
+    symbols_input = st.text_input("Symbols (comma-separated)", value=default_symbols, key="quote_symbols")
+    if symbols_input:
+        quotes = api._get(f"/account/quotes?symbols={symbols_input.replace(' ', '')}")
+        if quotes:
+            rows = []
+            for sym, q in quotes.items():
+                bid = q.get("bid")
+                ask = q.get("ask")
+                last = q.get("last")
+                spread = round(ask - bid, 4) if bid and ask else None
+                rows.append({
+                    "Symbol": sym,
+                    "Last": f"${last:,.2f}" if last else "—",
+                    "Bid":  f"${bid:,.2f}"  if bid  else "—",
+                    "Ask":  f"${ask:,.2f}"  if ask  else "—",
+                    "Spread": f"${spread:,.4f}" if spread else "—",
+                    "Volume": f"{int(q.get('volume', 0) or 0):,}",
+                })
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+        else:
+            st.info("No quote data returned.")
+except Exception as e:
+    st.warning(f"Live quotes unavailable: {e}")
 
 st.divider()
 

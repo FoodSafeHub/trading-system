@@ -9,13 +9,19 @@ import api
 st.set_page_config(page_title="Strategy & Signals", page_icon="⚙️", layout="wide")
 st.title("⚙️ Strategy & Signals")
 
-PERPLEXITY_STRATEGIES = [
-    "EMA_Mean_Reversion",
-    "MA_Crossover_RSI",
-    "Breakout_Consolidation",
-    "BB_Mean_Reversion",
-    "Fib_Pullback_Support",
-]
+def _load_perplexity_strategy_names() -> list[str]:
+    try:
+        data = api.perplexity_strategies()
+        return [s["name"] for s in data if isinstance(s, dict) and "name" in s]
+    except Exception:
+        pass
+    return [
+        "EMA_Mean_Reversion", "MA_Crossover_RSI", "Breakout_Consolidation",
+        "BB_Mean_Reversion", "Fib_Pullback_Support",
+        "RSI_Swing_Reversal", "Supertrend_Swing", "BB_Breakout",
+    ]
+
+PERPLEXITY_STRATEGIES = _load_perplexity_strategy_names()
 
 ALL_SYMBOLS = ["SPY", "QQQ", "AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "JPM"]
 
@@ -188,7 +194,7 @@ try:
     with col_p:
         perplexity_on = sched_cfg.get("run_perplexity", True)
         st.markdown("**Perplexity Strategies** (consensus pool)")
-        st.caption("All 5 advanced swing strategies — requires 2+ to agree on same symbol+direction")
+        st.caption("All 8 advanced swing strategies — requires 2+ to agree on same symbol+direction")
         new_perplexity = st.toggle("Enable Perplexity in scheduler", value=perplexity_on, key="tog_perplexity")
 
     if new_bollinger != bollinger_on or new_perplexity != perplexity_on:

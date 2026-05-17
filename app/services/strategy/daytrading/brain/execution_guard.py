@@ -85,8 +85,18 @@ class ExecutionGuard:
             rejection_reason = f"Confidence {confidence:.0%} below minimum {self.config['min_confidence']:.0%}."
 
         # ── 3. Market close proximity ──────────────────────────────────────────
-        now_et = datetime.now(ET)
-        checks["not_near_close"] = now_et.time() < _NO_NEW_ENTRY_AFTER
+        # In backtest mode use the signal's own timestamp; live mode uses now().
+        if current_bar_time is not None:
+            try:
+                ref_time = pd.Timestamp(current_bar_time)
+                if ref_time.tzinfo is None:
+                    ref_time = ref_time.tz_localize(ET)
+                check_time = ref_time.time()
+            except Exception:
+                check_time = datetime.now(ET).time()
+        else:
+            check_time = datetime.now(ET).time()
+        checks["not_near_close"] = check_time < _NO_NEW_ENTRY_AFTER
         if not checks["not_near_close"] and not rejection_reason:
             rejection_reason = f"Too close to market close — no new entries after {_NO_NEW_ENTRY_AFTER}."
 

@@ -26,6 +26,18 @@ def _delete(path: str, timeout: int = 10):
 def health():
     return _get("/health")
 
+def scanner_status():
+    return _get("/scanner/status")
+
+def scanner_run(config: dict):
+    return _post("/scanner/run", json=config)
+
+def scanner_results(limit: int = 50):
+    return _get(f"/scanner/results?limit={limit}")
+
+def scanner_latest():
+    return _get("/scanner/latest")
+
 def account_summary():
     return _get("/account/summary")
 
@@ -37,6 +49,9 @@ def risk_status():
 
 def set_kill_switch(active: bool):
     return _post(f"/risk/kill-switch?active={str(active).lower()}")
+
+def live_quotes(symbols: str):
+    return _get(f"/account/quotes?symbols={symbols}")
 
 def orders():
     return _get("/orders")
@@ -117,6 +132,19 @@ def perplexity_toggle_strategy(name: str, enabled: bool):
 
 def perplexity_signals(symbol: str):
     return _get(f"/perplexity/signals/{symbol}", timeout=30)
+
+def perplexity_scan(symbols: list[str], direction: str = "BUY",
+                    min_confidence: float = 0.0, strategies: str | None = None,
+                    max_workers: int = 8):
+    params = {
+        "symbols": ",".join(symbols),
+        "direction": direction,
+        "min_confidence": min_confidence,
+        "max_workers": max_workers,
+    }
+    if strategies:
+        params["strategies"] = strategies
+    return _get("/perplexity/scan", params=params, timeout=300)
 
 def perplexity_atr(symbol: str):
     return _get(f"/perplexity/atr/{symbol}")

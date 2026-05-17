@@ -249,13 +249,32 @@ class PaperBroker(BaseBroker):
         self._emit(order)
 
     def _get_last_price(self, symbol: str) -> float:
-        """Fetch latest price. Falls back to 0 on failure."""
+        """Fetch latest price from Schwab real-time quotes, fall back to yfinance."""
+        try:
+            import asyncio
+            from app.services.brokers.schwab import SchwabBroker
+            broker = SchwabBroker()
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(broker.authenticate())
+                quotes = loop.run_until_complete(broker.get_quotes([symbol]))
+                if quotes and symbol in quotes:
+                    price = quotes[symbol].last or quotes[symbol].ask or quotes[symbol].bid
+                    if price and price > 0:
+                        return float(price)
+            finally:
+                loop.close()
+        except Exception:
+            pass
         try:
             t = yf.Ticker(symbol)
             info = t.fast_info
-            return float(info.last_price or info.previous_close or 100.0)
+            price = float(info.last_price or info.previous_close or 0)
+            if price > 0:
+                return price
         except Exception:
-            return 100.0
+            pass
+        raise RuntimeError(f"Could not fetch price for {symbol} — market may be closed or symbol invalid")
 
     def _emit(self, order: Order) -> None:
         for fn in self._callbacks:

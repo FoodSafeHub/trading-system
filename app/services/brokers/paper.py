@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import random
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -69,22 +68,35 @@ class PaperBroker(BrokerBase):
         ]
 
     async def get_quotes(self, symbols: List[str]) -> Dict[str, Quote]:
-        # Simulate a plausible last price (pure simulation — not real data)
+        """Fetch real quotes from Schwab; fall back to yfinance if unavailable."""
+        try:
+            from app.services.brokers.schwab import SchwabBroker
+            schwab = SchwabBroker()
+            await schwab.authenticate()
+            return await schwab.get_quotes(symbols)
+        except Exception:
+            pass
+        # yfinance fallback
+        import yfinance as yf
         quotes = {}
         for sym in symbols:
-            base = _paper_positions.get(sym, {}).get("average_cost", 100.0)
-            last = round(base * (1 + random.uniform(-0.005, 0.005)), 2)
-            quotes[sym] = Quote(
-                symbol=sym,
-                bid=round(last - 0.01, 2),
-                ask=round(last + 0.01, 2),
-                last=last,
-                timestamp=datetime.utcnow().isoformat(),
-            )
+            try:
+                info = yf.Ticker(sym).fast_info
+                last = float(info.last_price or info.previous_close or 0)
+                quotes[sym] = Quote(
+                    symbol=sym,
+                    bid=round(last - 0.01, 2),
+                    ask=round(last + 0.01, 2),
+                    last=last,
+                    timestamp=datetime.utcnow().isoformat(),
+                )
+            except Exception:
+                pass
         return quotes
 
     async def preview_order(self, order: OrderRequest, account_id: str) -> OrderPreviewResponse:
-        estimated_cost = order.quantity * (order.limit_price or 100.0)
+        price = order.limit_price or await self._get_real_price(order.symbol)
+        estimated_cost = order.quantity * price
         return OrderPreviewResponse(
             broker="paper",
             estimated_cost=estimated_cost,
@@ -96,7 +108,8 @@ class PaperBroker(BrokerBase):
         global _paper_cash
 
         broker_order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
-        fill_price = round((order.limit_price or 100.0) * (1 + random.uniform(-0.002, 0.002)), 4)
+        # Use real market price for fill
+        fill_price = order.limit_price or await self._get_real_price(order.symbol)
         cost = fill_price * order.quantity
 
         if order.side == "BUY":
@@ -154,6 +167,29 @@ class PaperBroker(BrokerBase):
             filled_quantity=order.quantity,
             raw={"paper": True},
         )
+
+    async def _get_real_price(self, symbol: str) -> float:
+        """Fetch real market price from Schwab then yfinance fallback."""
+        try:
+            from app.services.brokers.schwab import SchwabBroker
+            schwab = SchwabBroker()
+            await schwab.authenticate()
+            quotes = await schwab.get_quotes([symbol])
+            if quotes and symbol in quotes:
+                price = quotes[symbol].last or quotes[symbol].ask or quotes[symbol].bid
+                if price and price > 0:
+                    return float(price)
+        except Exception:
+            pass
+        try:
+            import yfinance as yf
+            info = yf.Ticker(symbol).fast_info
+            price = float(info.last_price or info.previous_close or 0)
+            if price > 0:
+                return price
+        except Exception:
+            pass
+        raise RuntimeError(f"Could not fetch price for {symbol}")
 
     async def cancel_order(self, broker_order_id: str, account_id: str) -> bool:
         if broker_order_id in _paper_orders:

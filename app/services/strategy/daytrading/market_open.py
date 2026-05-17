@@ -21,6 +21,66 @@ from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
 
+
+def _td_fetch(symbol: str, interval: str, period: str) -> pd.DataFrame:
+    """
+    Fetch intraday bars from Twelve Data. Returns empty DataFrame on failure.
+    interval: "1m","5m","15m"  period: "1d","2d","5d","60d"
+    """
+    _TD_MAP = {"1m": "1min", "5m": "5min", "15m": "15min", "1d": "1day"}
+    _SIZE_MAP = {"1d": 390, "2d": 780, "5d": 500, "60d": 800}
+    try:
+        from app.config import get_settings
+        api_key = get_settings().twelve_data_api_key
+        if not api_key:
+            return pd.DataFrame()
+        td_interval = _TD_MAP.get(interval)
+        if not td_interval:
+            return pd.DataFrame()
+        outputsize = _SIZE_MAP.get(period, 500)
+        import requests
+        resp = requests.get(
+            "https://api.twelvedata.com/time_series",
+            params={"symbol": symbol, "interval": td_interval,
+                    "outputsize": outputsize, "timezone": "America/New_York",
+                    "apikey": api_key},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") == "error" or "values" not in data:
+            _log.debug("[twelvedata] %s %s: %s", symbol, interval, data.get("message", ""))
+            return pd.DataFrame()
+        df = pd.DataFrame(data["values"])
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.set_index("datetime").sort_index()
+        df = df.rename(columns={"open": "Open", "high": "High", "low": "Low",
+                                 "close": "Close", "volume": "Volume"})
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        if df.index.tzinfo is None:
+            df.index = df.index.tz_localize(ET)
+        else:
+            df.index = df.index.tz_convert(ET)
+        return df
+    except Exception as e:
+        _log.debug("[twelvedata] fetch failed %s %s: %s", symbol, interval, e)
+        return pd.DataFrame()
+
+
+def _normalise_yf(df: pd.DataFrame) -> pd.DataFrame:
+    """Flatten MultiIndex columns and convert index to ET timezone."""
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    idx = pd.to_datetime(df.index)
+    if idx.tzinfo is None:
+        idx = idx.tz_localize("UTC").tz_convert(ET)
+    else:
+        idx = idx.tz_convert(ET)
+    df.index = idx
+    return df
+
 MARKET_OPEN_TIME = time(9, 30)
 MARKET_CLOSE_TIME = time(15, 45)
 REGIME_EVAL_TIME = time(9, 45)
@@ -137,12 +197,12 @@ def get_spy_regime(df_spy_5m: pd.DataFrame | None = None) -> Tuple[str, float, f
     """
     if df_spy_5m is None:
         try:
-            df_spy_5m = yf.download("SPY", period="2d", interval="5m", progress=False)
+            df_spy_5m = _td_fetch("SPY", "5m", "2d")
             if df_spy_5m.empty:
-                return "CHOPPY", 0.0, 0.0, "unknown"
-            if isinstance(df_spy_5m.columns, pd.MultiIndex):
-                df_spy_5m.columns = df_spy_5m.columns.get_level_values(0)
-            df_spy_5m.index = pd.to_datetime(df_spy_5m.index).tz_convert(ET)
+                df_spy_5m = yf.download("SPY", period="2d", interval="5m", progress=False)
+                if df_spy_5m.empty:
+                    return "CHOPPY", 0.0, 0.0, "unknown"
+                df_spy_5m = _normalise_yf(df_spy_5m)
         except Exception:
             return "CHOPPY", 0.0, 0.0, "unknown"
 
@@ -193,12 +253,14 @@ def get_prior_close(symbol: str) -> float | None:
     Returns None if data is unavailable.
     """
     try:
-        df = yf.download(symbol, period="5d", interval="1d", progress=False)
+        df = _td_fetch(symbol, "1d", "5d")
         if df.empty:
-            return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df.index = pd.to_datetime(df.index)
+            df = yf.download(symbol, period="5d", interval="1d", progress=False)
+            if df.empty:
+                return None
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df.index = pd.to_datetime(df.index)
         today = now_et().date()
         prior = df[df.index.date < today]
         if prior.empty:
@@ -227,11 +289,12 @@ def get_premarket_gap(symbol: str, open_price: float | None = None) -> dict:
 
     if open_price is None:
         try:
-            df = yf.download(symbol, period="1d", interval="5m", progress=False)
+            df = _td_fetch(symbol, "5m", "1d")
+            if df.empty:
+                df = yf.download(symbol, period="1d", interval="5m", progress=False)
+                if not df.empty:
+                    df = _normalise_yf(df)
             if not df.empty:
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                df.index = pd.to_datetime(df.index).tz_convert(ET) if df.index.tzinfo else pd.to_datetime(df.index).tz_localize("UTC").tz_convert(ET)
                 today = now_et().date()
                 today_bars = df[df.index.date == today]
                 if not today_bars.empty:

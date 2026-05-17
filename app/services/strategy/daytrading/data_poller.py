@@ -168,6 +168,13 @@ class MarketDataPoller:
 
     @staticmethod
     def _fetch(symbol: str, interval: str, period: str) -> pd.DataFrame:
+        # Use Twelve Data for intraday intervals, yfinance for daily
+        if interval in ("1m", "5m", "15m", "30m"):
+            from app.services.strategy.daytrading.runner import _fetch_twelvedata
+            df = _fetch_twelvedata(symbol, interval, period)
+            if not df.empty:
+                return df
+        # Fallback: yfinance
         df = yf.download(symbol, period=period, interval=interval, progress=False)
         if df.empty:
             return df

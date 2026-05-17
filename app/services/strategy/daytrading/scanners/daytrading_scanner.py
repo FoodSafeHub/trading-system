@@ -538,12 +538,18 @@ class DayTradingScanner:
         )
 
     def _get_daily_bars(self, symbol: str) -> pd.DataFrame | None:
-        """Return 60-day daily OHLCV. Tries BarCache first, then yfinance."""
-        # Try cache first (BarCache stores "1d" timeframe)
+        """Return 60-day daily OHLCV. Tries BarCache → Twelve Data → yfinance."""
+        from app.services.strategy.daytrading.market_open import _td_fetch
+        # Try cache first
         if self._cache is not None:
             cached = self._cache.get_bars(symbol, "1d")
             if cached is not None and len(cached) >= 10:
                 return cached
+
+        # Try Twelve Data
+        df = _td_fetch(symbol, "1d", "60d")
+        if not df.empty:
+            return df
 
         # Fall back to yfinance
         try:
@@ -555,45 +561,38 @@ class DayTradingScanner:
             df.index = pd.to_datetime(df.index)
             return df
         except Exception as e:
-            logger.debug("yfinance daily fetch failed for %s: %s", symbol, e)
+            logger.debug("daily fetch failed for %s: %s", symbol, e)
             return None
 
     def _get_premarket_volume(self, symbol: str, avg_daily_vol: float) -> float:
         """
         Attempt to get pre-market volume (04:00–09:30 ET).
-
-        yfinance 1m data covers pre-market when 'prepost=True' is set, but
-        coverage is unreliable. Falls back to first two 5m intraday bars
-        (9:30–9:40 ET) as a rough proxy for overnight demand.
+        Tries Twelve Data 1m bars first, then yfinance prepost, then first-bar proxy.
         """
+        from app.services.strategy.daytrading.market_open import _td_fetch, _normalise_yf
         try:
-            df = yf.download(
-                symbol, period="1d", interval="1m",
-                prepost=True, progress=False,
-            )
-            if df.empty:
-                return _fallback_premarket_vol(symbol)
+            # Twelve Data 1m bars (regular session — no prepost, but 1m resolution good)
+            df = _td_fetch(symbol, "1m", "1d")
+            if not df.empty:
+                pm_mask = (df.index.time >= time(4, 0)) & (df.index.time < time(9, 30))
+                pm_df = df[pm_mask]
+                if not pm_df.empty:
+                    return float(pm_df["Volume"].sum())
+                # Use first two regular-session bars as proxy
+                reg = df[df.index.time >= time(9, 30)]
+                if len(reg) >= 2:
+                    return float(reg["Volume"].iloc[:2].sum())
 
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
+            # Fallback: yfinance with prepost
+            df = yf.download(symbol, period="1d", interval="1m", prepost=True, progress=False)
+            if not df.empty:
+                df = _normalise_yf(df)
+                pm_mask = (df.index.time >= time(4, 0)) & (df.index.time < time(9, 30))
+                pm_df = df[pm_mask]
+                if not pm_df.empty:
+                    return float(pm_df["Volume"].sum())
 
-            idx = pd.to_datetime(df.index)
-            # Normalise timezone
-            if idx.tzinfo is None:
-                idx = idx.tz_localize("UTC").tz_convert(ET)
-            else:
-                idx = idx.tz_convert(ET)
-            df.index = idx
-
-            # Pre-market window: 04:00–09:29 ET
-            pm_mask = (df.index.time >= time(4, 0)) & (df.index.time < time(9, 30))
-            pm_df = df[pm_mask]
-            if not pm_df.empty:
-                return float(pm_df["Volume"].sum())
-
-            # Fallback: use 5m intraday (regular session) first two bars as proxy
             return _fallback_premarket_vol(symbol)
-
         except Exception:
             return _fallback_premarket_vol(symbol)
 
@@ -642,23 +641,17 @@ def _is_today(df: pd.DataFrame) -> bool:
 
 def _fallback_premarket_vol(symbol: str) -> float:
     """
-    Pre-market volume approximation using first two 5m intraday bars
-    (9:30–9:40 ET). These bars carry higher-than-normal volume when there
-    was genuine pre-market interest. Returns 0.0 on failure.
+    Pre-market volume proxy using first two 5m bars (9:30–9:40 ET).
+    Tries Twelve Data first, falls back to yfinance.
     """
+    from app.services.strategy.daytrading.market_open import _td_fetch, _normalise_yf
     try:
-        df = yf.download(symbol, period="1d", interval="5m", progress=False)
+        df = _td_fetch(symbol, "5m", "1d")
         if df.empty:
-            return 0.0
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        idx = pd.to_datetime(df.index)
-        if idx.tzinfo is None:
-            idx = idx.tz_localize("UTC").tz_convert(ET)
-        else:
-            idx = idx.tz_convert(ET)
-        df.index = idx
-        # First two 5m bars of regular session
+            df = yf.download(symbol, period="1d", interval="5m", progress=False)
+            if df.empty:
+                return 0.0
+            df = _normalise_yf(df)
         reg_mask = df.index.time >= time(9, 30)
         reg_df = df[reg_mask]
         if len(reg_df) >= 2:
