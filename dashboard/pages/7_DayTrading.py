@@ -1016,6 +1016,42 @@ with tab_scanner:
         "price and float range you actually want to trade."
     )
 
+    # ── Presets: pre-fill the filters with sensible day-trade profiles ───────
+    # Float values are in MILLIONS, volume in shares, price in dollars.
+    # universe_cap=500 on presets keeps scans snappy (~30-60s) while still
+    # covering enough of the universe to find good candidates.
+    SCANNER_PRESETS = {
+        "Custom": None,
+        "Low-float runners ($2-$20, 5-50M float)": {
+            "min_price": 2.0, "max_price": 20.0,
+            "min_vol": 500_000,
+            "min_float_m": 5.0, "max_float_m": 50.0,
+            "universe_cap": 0,
+            "desc": "Small floats with room to move. Best for momentum/gap plays in HIGH_VOL regime.",
+        },
+        "Mid-cap movers ($20-$100, 50-500M float)": {
+            "min_price": 20.0, "max_price": 100.0,
+            "min_vol": 1_000_000,
+            "min_float_m": 50.0, "max_float_m": 500.0,
+            "universe_cap": 0,
+            "desc": "Liquid mid-caps that still move meaningfully. Good for ORB and VWAP strategies.",
+        },
+        "Large-cap day trades ($50+, 1M+ vol)": {
+            "min_price": 50.0, "max_price": 0.0,
+            "min_vol": 5_000_000,
+            "min_float_m": 0.0, "max_float_m": 0.0,
+            "universe_cap": 0,
+            "desc": "Mega-caps with deep liquidity. Tight spreads, smaller % moves, safest for size.",
+        },
+        "Pre-market gappers (any price, 500k+ vol)": {
+            "min_price": 1.0, "max_price": 0.0,
+            "min_vol": 500_000,
+            "min_float_m": 0.0, "max_float_m": 0.0,
+            "universe_cap": 0,
+            "desc": "Wide net — let the gap/catalyst scoring do the filtering. Use in pre-market only.",
+        },
+    }
+
     mc1, mc2, mc3 = st.columns([1, 1, 2])
     ms_max = mc1.number_input("Top N", min_value=5, max_value=50, value=20, step=5, key="ms_max")
     ms_state = mc2.selectbox(
@@ -1028,17 +1064,54 @@ with tab_scanner:
         placeholder="leave empty to scan the full US-listed universe",
     )
 
+    ms_preset_name = st.selectbox(
+        "Filter preset",
+        list(SCANNER_PRESETS.keys()),
+        index=1,  # default to "Low-float runners" — most useful for the user's stated goal
+        key="ms_preset",
+        help="Pick a preset to auto-fill the filters below. Choose 'Custom' to set everything manually.",
+    )
+    _preset = SCANNER_PRESETS[ms_preset_name]
+    if _preset:
+        st.caption(f"_{_preset['desc']}_")
+
+    # Streamlit widgets remember their last value via `key`. Reset session_state
+    # when the preset changes so the inputs reflect the new preset values.
+    # Setting state BEFORE the widget is rendered avoids the "value+key both set"
+    # Streamlit warning.
+    if st.session_state.get("_ms_last_preset") != ms_preset_name:
+        st.session_state["_ms_last_preset"] = ms_preset_name
+        if _preset:
+            st.session_state["ms_min_price"] = _preset["min_price"]
+            st.session_state["ms_max_price"] = _preset["max_price"]
+            st.session_state["ms_min_vol"] = _preset["min_vol"]
+            st.session_state["ms_min_float_m"] = _preset["min_float_m"]
+            st.session_state["ms_max_float_m"] = _preset["max_float_m"]
+            st.session_state["ms_universe_cap"] = _preset["universe_cap"]
+
     # ── Filters row 1: price + volume ────────────────────────────────────────
+    # We rely on session_state for defaults (set above), so no `value=` param.
+    # On first render with no session_state, fall back to Custom defaults.
+    st.session_state.setdefault("ms_min_price", 5.0)
+    st.session_state.setdefault("ms_max_price", 0.0)
+    st.session_state.setdefault("ms_min_vol", 1_000_000)
+    st.session_state.setdefault("ms_min_float_m", 0.0)
+    st.session_state.setdefault("ms_max_float_m", 0.0)
+    st.session_state.setdefault("ms_universe_cap", 0)
+
     f1, f2, f3 = st.columns(3)
     ms_min_price = f1.number_input(
-        "Min price ($)", min_value=0.0, max_value=10_000.0, value=5.0, step=1.0, key="ms_min_price",
+        "Min price ($)", min_value=0.0, max_value=10_000.0, step=1.0, key="ms_min_price",
+        help="Skip sub-$1 names (PDT/marginability issues) and pennies. Typical: $2 for runners, $20+ for mid-caps.",
     )
     ms_max_price = f2.number_input(
-        "Max price ($, 0 = no cap)", min_value=0.0, max_value=10_000.0, value=0.0, step=10.0, key="ms_max_price",
+        "Max price ($, 0 = no cap)", min_value=0.0, max_value=10_000.0, step=10.0, key="ms_max_price",
+        help="Cap to focus on a price band. Typical: $20 for low-float, $100 for mid-cap, 0 for large-cap.",
     )
     ms_min_vol = f3.number_input(
         "Min avg daily volume (shares)",
-        min_value=0, max_value=500_000_000, value=1_000_000, step=100_000, key="ms_min_vol",
+        min_value=0, max_value=500_000_000, step=100_000, key="ms_min_vol",
+        help="Liquidity floor. 500k = thin but tradable, 1M = comfortable, 5M+ = institutional-grade.",
     )
 
     # ── Filters row 2: float ─────────────────────────────────────────────────
@@ -1047,18 +1120,18 @@ with tab_scanner:
     f4, f5, f6 = st.columns(3)
     ms_min_float_m = f4.number_input(
         "Min float (millions, 0 = no floor)",
-        min_value=0.0, max_value=10_000.0, value=0.0, step=1.0, key="ms_min_float_m",
-        help="Lower bound on shares float in millions. Low-float runners typically have 5–50M shares.",
+        min_value=0.0, max_value=10_000.0, step=1.0, key="ms_min_float_m",
+        help="Lower bound on shares float in millions. Low-float runners: 5–50M. Mid-caps: 50–500M.",
     )
     ms_max_float_m = f5.number_input(
         "Max float (millions, 0 = no cap)",
-        min_value=0.0, max_value=10_000.0, value=0.0, step=10.0, key="ms_max_float_m",
-        help="Upper bound on shares float in millions. ~50 for low-float candidates; ~500 for mid-caps.",
+        min_value=0.0, max_value=10_000.0, step=10.0, key="ms_max_float_m",
+        help="Upper bound on shares float. ~50 for low-float, ~500 for mid-caps, 0 for no cap.",
     )
     ms_universe_cap = f6.number_input(
         "Cap universe size (0 = all)",
-        min_value=0, max_value=10_000, value=0, step=100, key="ms_universe_cap",
-        help="Useful for quick test scans. 0 = scan the full ~5,800-symbol universe.",
+        min_value=0, max_value=10_000, step=100, key="ms_universe_cap",
+        help="Useful for quick test scans. 500 = fast (~30s). 0 = full ~5,800 universe (~2-3 min).",
     )
 
     # Convert millions to absolute share counts for the API

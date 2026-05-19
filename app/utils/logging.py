@@ -47,7 +47,13 @@ _MASK_PATTERNS = [
 class MaskingFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = _mask(str(record.msg))
-        record.args = tuple(_mask(str(a)) for a in record.args) if record.args else record.args
+        # Only mask string args. Coercing every arg to str via `str(a)` before
+        # masking would break numeric format specifiers like %d / %.2f under
+        # Python 3.14 (which no longer auto-coerces a digit-string back to int).
+        if record.args:
+            record.args = tuple(
+                _mask(a) if isinstance(a, str) else a for a in record.args
+            )
         return True
 
 
