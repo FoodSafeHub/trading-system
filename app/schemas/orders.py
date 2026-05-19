@@ -19,6 +19,9 @@ class OrderRequest(BaseModel):
     time_in_force: Literal["DAY", "GTC", "IOC", "FOK"] = "DAY"
     signal_id: Optional[int] = None
     idempotency_key: Optional[str] = None  # set by execution service
+    # Caller MUST set this so DB rows are correctly attributed.
+    # ExecutionService treats missing as "manual" but the explicit value is preferred.
+    source: Literal["manual", "scheduler", "autotrader", "scanner"] = "manual"
 
     @field_validator("symbol")
     @classmethod
@@ -60,6 +63,7 @@ class OrderOut(BaseModel):
     is_paper: bool
     signal_id: Optional[int] = None
     preview_json: Optional[str] = None
+    source: str = "manual"
     created_at: datetime
     submitted_at: Optional[datetime]
     filled_at: Optional[datetime]

@@ -54,6 +54,7 @@ def list_orders(
             "is_paper": o.is_paper,
             "signal_id": o.signal_id,
             "preview_json": o.preview_json,
+            "source": getattr(o, "source", None) or "manual",
             "strategy_name": strategy_by_signal.get(o.signal_id) if o.signal_id else None,
             "created_at": serialize_et(o.created_at),
             "submitted_at": serialize_et(o.submitted_at),
@@ -75,6 +76,10 @@ async def manual_order(order_req: OrderRequest, account_id: str = ""):
         if not accounts:
             raise HTTPException(status_code=400, detail="No accounts found")
         account_id = accounts[0].account_id
+
+    # Force-stamp source=manual so the dashboard's Source column shows the
+    # truth even if a caller passed a different value in the payload.
+    order_req.source = "manual"
 
     svc = ExecutionService(broker)
     result = await svc.execute(order_req, account_id=account_id)

@@ -275,6 +275,7 @@ def _auto_trade_top(candidate: dict, scan_run_id: str, scanned_at: datetime) -> 
         side=direction,
         order_type="MARKET",
         quantity=1,
+        source="scanner",
     )
     check = risk.check(order_req, estimated_price=price)
     if not check.passed:

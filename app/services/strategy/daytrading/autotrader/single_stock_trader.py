@@ -478,44 +478,40 @@ class SingleStockTrader:
         self._notify_update()
 
     def _place_order(self, action: str, qty: float) -> float:
-        """Submit entry order. Returns fill price (0.0 on failure)."""
+        """Submit entry order. Returns fill price (0.0 on failure).
+
+        NOTE: this path calls the legacy broker interface directly, which means
+        it does NOT go through ExecutionService — no DB Order row, no risk
+        engine check, no audit event. That makes any live order fired here
+        invisible in the Order History table. Until the path is rewritten to
+        route through ExecutionService, live submission is hard-blocked. Paper
+        sim mode still works.
+        """
         if self._broker is None:
             # Paper sim: fill at last price
             return self._last_price()
-        try:
-            from app.services.broker.models import OrderSide
-            side = "BUY" if action == "BUY" else "SELL"
-            order = self._broker.place_order(
-                symbol=self.symbol,
-                qty=qty,
-                side=side,
-                order_type="market",
-                strategy="AutoTrader",
-                reason=action,
-            )
-            return float(order.avg_fill_price) if order.avg_fill_price else self._last_price()
-        except Exception as e:
-            logger.error("Order placement failed: %s", e)
-            return 0.0
+        logger.error(
+            "[autotrader] BLOCKED live order: %s %s qty=%s — legacy broker path "
+            "is disabled because it bypasses ExecutionService (no DB row, no "
+            "risk gate, no audit). Wire SingleStockTrader through "
+            "ExecutionService before re-enabling.",
+            action, self.symbol, qty,
+        )
+        return 0.0
 
     def _place_exit_order(self, action: str, qty: float) -> float:
-        """Submit exit order. Returns fill price (0.0 on failure)."""
+        """Submit exit order. Returns fill price (0.0 on failure).
+
+        See _place_order for the bypass-block rationale.
+        """
         if self._broker is None:
             return self._last_price()
-        try:
-            side = "SELL" if action in ("SELL", "SELL_SHORT") else "BUY"
-            order = self._broker.place_order(
-                symbol=self.symbol,
-                qty=qty,
-                side=side,
-                order_type="market",
-                strategy="AutoTrader",
-                reason=action,
-            )
-            return float(order.avg_fill_price) if order.avg_fill_price else self._last_price()
-        except Exception as e:
-            logger.error("Exit order failed: %s", e)
-            return 0.0
+        logger.error(
+            "[autotrader] BLOCKED live exit: %s %s qty=%s — legacy broker path "
+            "is disabled because it bypasses ExecutionService.",
+            action, self.symbol, qty,
+        )
+        return 0.0
 
     def _last_price(self) -> float:
         """Return the latest close from 5m data."""

@@ -66,3 +66,34 @@ def init_db() -> None:
         strategy_runs,
     )
     Base.metadata.create_all(bind=engine)
+    _migrate_add_orders_source_column()
+
+
+def _migrate_add_orders_source_column() -> None:
+    """One-shot, idempotent ALTER TABLE to add orders.source on existing DBs.
+
+    We don't use Alembic; SQLAlchemy's create_all only creates missing tables,
+    not missing columns. This runs at every startup but is a no-op once the
+    column exists.
+    """
+    with engine.connect() as conn:
+        # Detect column presence — works on SQLite.
+        try:
+            rows = conn.exec_driver_sql("PRAGMA table_info(orders)").fetchall()
+        except Exception:
+            return  # Non-SQLite engine — skip the migration.
+        cols = {r[1] for r in rows}
+        if "source" in cols:
+            return
+        try:
+            conn.exec_driver_sql(
+                "ALTER TABLE orders ADD COLUMN source TEXT DEFAULT 'manual'"
+            )
+            conn.exec_driver_sql(
+                "UPDATE orders SET source = 'unknown_pre_migration' "
+                "WHERE source IS NULL OR source = 'manual'"
+            )
+            conn.commit()
+        except Exception:
+            # If the ALTER raced with another worker, the column will exist; safe to ignore.
+            pass

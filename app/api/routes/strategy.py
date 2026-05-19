@@ -67,16 +67,41 @@ async def run_strategy_cycle():
     orders_placed: dict = {}  # (symbol, direction) → order_status
     consensus_info: dict = {}  # (symbol, direction) → agreeing strategies
 
+    # Fetch current positions once so SELL consensus can size to the actual
+    # holding instead of blindly trying to sell 1 share of nothing.
+    current_positions: dict[str, float] = {}
+    try:
+        positions = await broker.get_positions(account_id)
+        for pos in positions:
+            current_positions[pos.symbol.upper()] = pos.quantity
+    except Exception as exc:
+        # Can't risk a SELL burst on stale data — log loud and continue.
+        # The SELL branch below will skip any symbol not in current_positions.
+        import logging
+        logging.getLogger(__name__).warning(
+            "Could not fetch positions for /strategy/run: %s — all SELLs will be skipped",
+            exc,
+        )
+
     for symbol, directions in votes.items():
         for direction, agreeing in directions.items():
             count = len(agreeing)
             consensus_info[(symbol, direction)] = {"count": count, "strategies": agreeing}
             if count >= min_agree:
+                if direction == "SELL":
+                    held = current_positions.get(symbol.upper(), 0.0)
+                    if held < 1.0:
+                        orders_placed[(symbol, direction)] = f"skipped_no_position (held={held:.4f})"
+                        continue
+                    qty = held
+                else:
+                    qty = 1.0  # manual cycle defaults to 1 share for BUYs
                 order_req = OrderRequest(
                     symbol=symbol,
                     side=direction,  # type: ignore[arg-type]
                     order_type="MARKET",
-                    quantity=1,
+                    quantity=qty,
+                    source="scheduler",
                 )
                 order = await svc.execute(order_req, account_id=account_id)
                 orders_placed[(symbol, direction)] = order.status if order else "risk_blocked"

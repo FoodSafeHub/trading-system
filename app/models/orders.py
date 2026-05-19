@@ -31,6 +31,10 @@ class Order(Base):
     fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+    # Origin of the order. Set explicitly by every code path that submits orders so
+    # we can always tell a manual click from a scheduler/autotrader/scanner fire.
+    # Values: "manual" | "scheduler" | "autotrader" | "scanner" | "unknown_pre_migration"
+    source: Mapped[str] = mapped_column(String(32), default="manual", nullable=False)
 
 
 class OrderPreview(Base):

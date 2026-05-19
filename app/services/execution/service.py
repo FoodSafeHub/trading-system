@@ -187,6 +187,9 @@ class ExecutionService:
                 is_paper=(self.broker.name == "paper"),
                 signal_id=signal_id,
                 idempotency_key=req.idempotency_key,
+                # source is required for downstream auditing; pydantic enforces
+                # the literal values, but default to "manual" defensively.
+                source=getattr(req, "source", "manual") or "manual",
                 created_at=datetime.now(tz=timezone.utc),
             )
             db.add(order)

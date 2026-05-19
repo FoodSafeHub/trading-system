@@ -12,14 +12,26 @@ import pandas as pd
 def _derive_source(row: pd.Series) -> str:
     """Label where an order came from.
 
-    Strategy-driven orders have signal_id populated (set by the scheduler when
-    routing a signal to the broker). Anything else is a manual entry — either
-    from the dashboard's "Place Manual Order" form or another non-strategy path.
+    Reads the authoritative `source` column written by ExecutionService. The
+    older rows (before the column existed) are tagged `unknown_pre_migration`
+    in the DB and surfaced as "Unknown (pre-fix)" so users see they're not
+    confirmed manual.
     """
-    if pd.notna(row.get("strategy_name")) and row.get("strategy_name"):
-        return f"Strategy: {row['strategy_name']}"
-    if pd.notna(row.get("signal_id")) and row.get("signal_id"):
-        return f"Strategy (signal #{int(row['signal_id'])})"
+    src = row.get("source")
+    strategy = row.get("strategy_name") if pd.notna(row.get("strategy_name")) else None
+    if src == "scheduler":
+        return f"Scheduler: {strategy}" if strategy else "Scheduler"
+    if src == "scanner":
+        return f"Scanner: {strategy}" if strategy else "Scanner"
+    if src == "autotrader":
+        return "Autotrader"
+    if src == "unknown_pre_migration":
+        return "Unknown (pre-fix)"
+    if src == "manual":
+        return "Manual"
+    # Fallback for rows missing the column entirely — shouldn't happen.
+    if strategy:
+        return f"Strategy: {strategy}"
     return "Manual"
 
 
@@ -111,7 +123,7 @@ try:
                     "fill_price", "status", "source", "planned_exit",
                     "broker_order_id"]
         # Hide the raw JSON / numeric ID plumbing columns — they're noise in the table.
-        hidden = {"preview_json", "signal_id", "strategy_name"}
+        hidden = {"preview_json", "signal_id", "strategy_name", "source"}
         show_cols = [c for c in priority if c in df.columns] + \
                     [c for c in df.columns if c not in priority and c not in hidden]
         st.dataframe(df[show_cols], use_container_width=True, hide_index=True)

@@ -289,11 +289,19 @@ def _run_cycle() -> None:
                         logger.info("[scheduler] BUY %s skipped — sizing produced 0 shares (cap=%s, entry=%.2f)", symbol, asgn_cap, entry)
                         continue
                 else:
-                    # SELL: use actual position size so we close the whole position
-                    qty = current_positions.get(symbol, 0.0)
-                    if qty <= 0:
-                        logger.info("[scheduler] SELL %s skipped — no open position", symbol)
+                    # SELL: only close positions we actually hold. Be strict —
+                    # require a meaningful position (>= 1 share) to avoid the
+                    # phantom-SELL burst that hit AAPL/SPY/GOOGL/AMZN/AMD on
+                    # 2026-05-19 13:49 where the broker rejected every order
+                    # as oversold/overbought.
+                    held = current_positions.get(symbol, 0.0)
+                    if held < 1.0:
+                        logger.info(
+                            "[scheduler] SELL %s skipped — held=%.4f (need >= 1.0)",
+                            symbol, held,
+                        )
                         continue
+                    qty = held
                 order_req = OrderRequest(
                     symbol=symbol,
                     side=direction,  # type: ignore[arg-type]
@@ -301,6 +309,7 @@ def _run_cycle() -> None:
                     quantity=qty,
                     limit_price=None,
                     stop_price=stop if direction == "BUY" else None,
+                    source="scheduler",
                 )
                 loop.run_until_complete(svc.execute(order_req, account_id=account_id, estimated_price=entry))
 
@@ -315,11 +324,15 @@ def _run_cycle() -> None:
                     direction, symbol, len(agreeing), min_agree, agreeing,
                 )
                 if direction == "SELL":
-                    qty = current_positions.get(symbol, 0.0)
+                    held = current_positions.get(symbol, 0.0)
                     entry_p = live_prices.get(symbol) or 0.0
-                    if qty <= 0:
-                        logger.info("[scheduler] Consensus SELL %s skipped — no open position", symbol)
+                    if held < 1.0:
+                        logger.info(
+                            "[scheduler] Consensus SELL %s skipped — held=%.4f (need >= 1.0)",
+                            symbol, held,
+                        )
                         continue
+                    qty = held
                 else:
                     entry_p = live_prices.get(symbol) or 0.0
                     qty = _compute_quantity(symbol, entry_p, None) if entry_p > 0 else _quantize_for_broker(1.0)
@@ -331,6 +344,7 @@ def _run_cycle() -> None:
                     side=direction,  # type: ignore[arg-type]
                     order_type="MARKET",
                     quantity=qty,
+                    source="scheduler",
                 )
                 loop.run_until_complete(svc.execute(order_req, account_id=account_id, estimated_price=entry_p or None))
         finally:
