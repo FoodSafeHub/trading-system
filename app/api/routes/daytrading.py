@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
+from app.services.strategy.daytrading.autotrader import (
+    AutoTraderConfig,
+    get_manager,
+)
 from app.services.strategy.daytrading.market_open import (
     get_spy_regime,
     market_status,
@@ -147,3 +152,67 @@ def toggle_strategy(name: str, enabled: bool = Query(...)) -> dict[str, Any]:
     else:
         _disabled.add(name)
     return {"name": name, "enabled": enabled}
+
+
+# ── Auto-trader switch ────────────────────────────────────────────────────────
+# Flip ON to have the system day-trade automatically against a list of symbols
+# using the active intraday strategies. Each symbol gets its own SingleStockTrader
+# (polls 1m/5m/15m bars, enters/exits with the risk governor active, flattens at
+# 3:45 PM ET). The whole switch auto-stops at 4:00 PM ET.
+
+
+class AutoTraderStartRequest(BaseModel):
+    symbols: list[str] = Field(..., min_length=1, description="Tickers to trade, e.g. ['TSLA','NVDA']")
+    direction_mode: Literal["long_only", "short_only", "both"] = "long_only"
+    trail_mode: Literal["ema", "atr", "candle"] = "atr"
+    partial_tp: bool = True
+    risk_per_trade_pct: float = Field(0.01, gt=0, le=0.05, description="Fraction of capital risked per trade")
+    max_daily_loss_pct: float = Field(2.0, gt=0, le=20.0)
+    max_trades_per_day: int = Field(6, ge=1, le=50)
+    max_consecutive_losses: int = Field(3, ge=1, le=10)
+    initial_capital: float = Field(10_000.0, gt=0)
+    broker_name: Literal["paper", "alpaca"] = "paper"
+    force: bool = Field(False, description="Arm even if outside regular trading hours")
+
+
+@router.post("/autotrader/start")
+def autotrader_start(req: AutoTraderStartRequest) -> dict[str, Any]:
+    """Flip the day-trading switch ON. Spins up one trader per symbol."""
+    cfg = AutoTraderConfig(
+        symbols=req.symbols,
+        direction_mode=req.direction_mode,
+        trail_mode=req.trail_mode,
+        partial_tp=req.partial_tp,
+        risk_per_trade_pct=req.risk_per_trade_pct,
+        max_daily_loss_pct=req.max_daily_loss_pct,
+        max_trades_per_day=req.max_trades_per_day,
+        max_consecutive_losses=req.max_consecutive_losses,
+        initial_capital=req.initial_capital,
+        broker_name=req.broker_name,
+    )
+    try:
+        return get_manager().flip_on(cfg, force=req.force)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/autotrader/stop")
+def autotrader_stop(
+    flatten: bool = Query(False, description="Close open positions at market before stopping"),
+) -> dict[str, Any]:
+    """Flip the day-trading switch OFF. Pass flatten=true to also close open positions."""
+    return get_manager().flip_off(flatten=flatten)
+
+
+@router.get("/autotrader/status")
+def autotrader_status() -> dict[str, Any]:
+    """Snapshot of the switch, config, and every active trader."""
+    return get_manager().status()
+
+
+@router.post("/autotrader/flatten")
+def autotrader_flatten(
+    symbol: str | None = Query(None, description="Symbol to flatten; omit to flatten ALL"),
+) -> dict[str, Any]:
+    """Force-close one or all open positions without stopping the loop."""
+    return {"flattened": get_manager().flatten(symbol)}
