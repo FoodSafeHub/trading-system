@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+import io
 import logging
 import re
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from rich.console import Console
 from rich.logging import RichHandler
+
+
+def _utf8_stream(stream):
+    """Wrap a text stream so Unicode chars (— → ✓ etc.) don't crash on cp1252 Windows consoles."""
+    try:
+        buf = getattr(stream, "buffer", None)
+        if buf is not None:
+            return io.TextIOWrapper(buf, encoding="utf-8", errors="replace", line_buffering=True)
+    except Exception:
+        pass
+    return stream
 
 _MASK_PATTERNS = [
     re.compile(r"(Bearer\s)\S+", re.IGNORECASE),
@@ -41,8 +54,15 @@ def configure_logging(log_level: str = "INFO", log_dir: Path = Path("logs")) -> 
 
     masking_filter = MaskingFilter()
 
-    # Rich console handler
+    # Rich console handler — force a UTF-8-safe stream so Unicode log lines
+    # (em-dashes, arrows, check marks) don't crash on Windows cp1252 consoles.
+    rich_console = Console(
+        file=_utf8_stream(sys.stdout),
+        force_terminal=True,
+        legacy_windows=False,
+    )
     console = RichHandler(
+        console=rich_console,
         rich_tracebacks=True,
         show_path=False,
         markup=True,

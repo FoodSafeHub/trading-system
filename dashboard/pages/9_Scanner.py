@@ -5,6 +5,21 @@ import api
 
 import pandas as pd
 import streamlit as st
+from zoneinfo import ZoneInfo
+
+ET = ZoneInfo("America/New_York")
+
+
+def _fmt_et(ts) -> str:
+    """Convert any timestamp (str/datetime, naive or UTC-aware) to 'YYYY-MM-DD HH:MM:SS ET'."""
+    if ts is None or ts == "":
+        return "—"
+    try:
+        dt = pd.to_datetime(ts, utc=True)
+        return dt.tz_convert(ET).strftime("%Y-%m-%d %H:%M:%S ET")
+    except Exception:
+        return str(ts)[:19].replace("T", " ")
+
 
 st.set_page_config(page_title="Market Scanner", page_icon="🔭", layout="wide")
 st.title("🔭 Market Scanner")
@@ -26,7 +41,7 @@ def _show_candidates(candidates):
             "Universe":     c.get("universe", "—"),
             "Reason":       c.get("reason", "—"),
             "Auto-Traded":  "✅" if c.get("auto_traded") else "—",
-            "Scanned At":   str(c.get("scanned_at", ""))[:19].replace("T", " "),
+            "Scanned At":   _fmt_et(c.get("scanned_at")),
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
@@ -36,7 +51,7 @@ try:
     status = api._get("/scanner/status")
     c1, c2, c3 = st.columns(3)
     c1.metric("Scanner", "🟡 Running..." if status["running"] else "🟢 Ready")
-    c2.metric("Last Scan", status["last_scan"][:19].replace("T", " ") if status["last_scan"] else "Never")
+    c2.metric("Last Scan", _fmt_et(status["last_scan"]) if status["last_scan"] else "Never")
     c3.metric("Last Matches", status["last_matches"] or 0)
 except Exception as e:
     st.warning(f"Cannot reach scanner API: {e}")

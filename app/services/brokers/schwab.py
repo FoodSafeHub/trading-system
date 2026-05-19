@@ -327,6 +327,18 @@ class SchwabBroker(BrokerBase):
 
     def _build_order_payload(self, order: OrderRequest) -> dict:
         """Map an OrderRequest to the Schwab REST API payload format."""
+        # Schwab requires session=NORMAL during regular hours (9:30–16:00 ET) and
+        # rejects NORMAL submissions outside that window. Use SEAMLESS so the order
+        # routes to whichever session is active. MARKET orders are not eligible for
+        # extended hours; fall back to NORMAL and let Schwab queue it for next open.
+        from app.utils.time_utils import is_market_hours
+        s = self._settings
+        in_regular = is_market_hours(s.trading_start_time, s.trading_end_time, s.tz)
+        if order.order_type == "MARKET":
+            session = "NORMAL"
+        else:
+            session = "NORMAL" if in_regular else "SEAMLESS"
+
         leg = {
             "instruction": order.side,  # BUY | SELL
             "quantity": order.quantity,
@@ -337,7 +349,7 @@ class SchwabBroker(BrokerBase):
         }
         payload: dict = {
             "orderType": order.order_type,
-            "session": "NORMAL",
+            "session": session,
             "duration": order.time_in_force,
             "orderStrategyType": "SINGLE",
             "orderLegCollection": [leg],
@@ -364,10 +376,17 @@ class SchwabBroker(BrokerBase):
         return self._parse_order_response(data)
 
     async def list_orders(self, account_id: str, status: Optional[str] = None) -> List[OrderStatusResponse]:
-        account_hash = await self._get_account_hash()
-        params: dict = {}
+        # Schwab requires fromEnteredTime/toEnteredTime in ISO-8601 UTC ("...Z").
+        # Without them the endpoint returns 400. Default window: last 7 days.
+        now = datetime.now(tz=timezone.utc)
+        params: dict = {
+            "fromEnteredTime": (now - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "toEnteredTime":   now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "maxResults":      100,
+        }
         if status:
             params["status"] = status
+        account_hash = await self._get_account_hash()
         data = await self._get(f"/accounts/{account_hash}/orders", params=params)
         return [self._parse_order_response(o) for o in data]
 

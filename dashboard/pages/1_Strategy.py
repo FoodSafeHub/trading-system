@@ -104,7 +104,11 @@ if assignments:
                     api.toggle_assignment(sel_sym, enabled=True)
                     st.rerun()
         with mc2:
-            if st.button("🗑 Remove assignment", key="del_btn"):
+            confirm_del = st.checkbox(
+                f"Confirm remove {sel_sym}",
+                key=f"del_confirm_{sel_sym}",
+            )
+            if st.button("🗑 Remove assignment", key="del_btn", disabled=not confirm_del):
                 api.delete_assignment(sel_sym)
                 st.success(f"Removed assignment for {sel_sym}")
                 st.rerun()

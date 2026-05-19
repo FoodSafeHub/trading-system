@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
@@ -15,6 +17,7 @@ router = APIRouter(prefix="/scanner", tags=["scanner"])
 # Last scan summary kept in memory for instant GET without DB query
 _last_summary: ScanSummary | None = None
 _scan_running: bool = False
+_scan_lock = threading.Lock()  # protects the check-and-set of _scan_running
 
 
 @router.post("/run", response_model=ScanSummary)
@@ -25,46 +28,53 @@ async def trigger_scan(config: ScanConfig, background_tasks: BackgroundTasks):
     and results are retrievable via GET /scanner/results.
     For small universes (watchlist, custom ≤20 symbols) it runs synchronously.
     """
-    global _scan_running
-    if _scan_running:
-        raise HTTPException(status_code=409, detail="A scan is already running. Check /scanner/results.")
+    global _scan_running, _last_summary
+    # Atomic check-and-set so two concurrent POSTs can't both start a scan
+    with _scan_lock:
+        if _scan_running:
+            raise HTTPException(status_code=409, detail="A scan is already running. Check /scanner/results.")
+        _scan_running = True
+    started = True
+    try:
+        is_large = config.universe in ("sp500", "nasdaq100") or len(config.custom_symbols) > 20
 
-    is_large = config.universe in ("sp500", "nasdaq100") or len(config.custom_symbols) > 20
-
-    if is_large:
-        background_tasks.add_task(_run_scan_bg, config)
-        return ScanSummary(
-            scan_run_id="pending",
-            scanned_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
-            universe=config.universe,
-            total_scanned=0,
-            total_passed_filters=0,
-            total_matches=0,
-            top_candidates=[],
-            duration_seconds=0.0,
-        )
-    else:
+        if is_large:
+            # Hand off to background — _run_scan_bg owns the flag from here.
+            background_tasks.add_task(_run_scan_bg, config)
+            started = False  # background task will clear it
+            return ScanSummary(
+                scan_run_id="pending",
+                scanned_at=datetime.now(timezone.utc),
+                universe=config.universe,
+                total_scanned=0,
+                total_passed_filters=0,
+                total_matches=0,
+                top_candidates=[],
+                duration_seconds=0.0,
+            )
         try:
             summary = run_scan(config)
         except Exception as exc:
-            import traceback
-            logger.error("[scanner] run_scan failed: %s\n%s", exc, traceback.format_exc())
-            raise HTTPException(status_code=500, detail=str(exc))
-        global _last_summary
+            logger.exception("[scanner] run_scan failed")
+            raise HTTPException(status_code=500, detail="Scan failed. See server logs for details.")
         _last_summary = summary
         return summary
+    finally:
+        if started:
+            with _scan_lock:
+                _scan_running = False
 
 
 def _run_scan_bg(config: ScanConfig) -> None:
     global _scan_running, _last_summary
-    _scan_running = True
     try:
         _last_summary = run_scan(config)
         logger.info("[scanner] Background scan complete — %d matches", _last_summary.total_matches)
-    except Exception as e:
-        logger.error("[scanner] Background scan failed: %s", e)
+    except Exception:
+        logger.exception("[scanner] Background scan failed")
     finally:
-        _scan_running = False
+        with _scan_lock:
+            _scan_running = False
 
 
 @router.get("/results", response_model=List[ScanResultOut])

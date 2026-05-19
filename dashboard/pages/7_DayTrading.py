@@ -992,6 +992,85 @@ with tab_compare:
 # TAB 5 — Scanner
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_scanner:
+    import api as _api
+
+    # ── 🌍 Market Scanner ─────────────────────────────────────────────────────
+    st.markdown("### 🌍 Market Scanner — Ranked Day-Trade Candidates")
+    st.caption(
+        "Scans a liquid pre-market universe and ranks tickers by volume, volatility, "
+        "relative volume, gap size, and catalyst presence. Recommended strategy bucket "
+        "(gap / ORB / momentum / VWAP) is brain-aware."
+    )
+
+    mc1, mc2, mc3 = st.columns([1, 1, 2])
+    ms_max = mc1.number_input("Top N", min_value=5, max_value=50, value=20, step=5, key="ms_max")
+    ms_state = mc2.selectbox(
+        "Force market state",
+        ["auto", "TREND_UP", "TREND_DOWN", "CHOPPY", "HIGH_VOL", "NEWS_RISK"],
+        index=0, key="ms_state",
+    )
+    ms_universe = mc3.text_input(
+        "Override universe (optional, comma-separated)", value="", key="ms_universe",
+        placeholder="leave empty for default ~22 liquid mega-caps + ETFs",
+    )
+
+    if st.button("🔍 Run Market Scan", key="run_market_scan_btn", type="primary"):
+        with st.spinner("Scanning market — fetching bars, scoring, applying regime adjustments…"):
+            try:
+                ranked = _api.daytrading_scanner_watchlist(
+                    max_symbols=int(ms_max),
+                    universe=ms_universe.strip(),
+                    market_state="" if ms_state == "auto" else ms_state,
+                )
+            except Exception as e:
+                ranked = []
+                st.error(f"Market scan failed: {e}")
+
+        if not ranked:
+            st.info("No candidates passed the hard filters (volume / price / ATR).")
+        else:
+            rows = []
+            for r in ranked:
+                m = r.get("metrics", {}) or {}
+                rows.append({
+                    "Symbol": r.get("symbol", ""),
+                    "Score": round(float(r.get("score", 0.0)), 2),
+                    "Adj Score": round(float(r.get("adjusted_score", 0.0)), 2),
+                    "Bucket": r.get("recommended_strategy_bucket", "—") or "—",
+                    "Tags": ", ".join(r.get("tags", []) or []),
+                    "Price": f"${m.get('last_price', 0):.2f}" if m.get("last_price") else "—",
+                    "ATR %": f"{m.get('atr_pct', 0):.2f}%" if m.get("atr_pct") else "—",
+                    "Gap %": f"{m.get('premarket_gap_pct', 0):+.2f}%" if m.get("premarket_gap_pct") else "—",
+                    "Pre-Mkt Rel Vol": f"{m.get('premarket_rel_vol', 0):.2f}x" if m.get("premarket_rel_vol") else "—",
+                    "Avg Vol 30d": f"{int(m.get('avg_daily_volume_30d', 0)):,}" if m.get("avg_daily_volume_30d") else "—",
+                    "Catalyst": "✓" if m.get("has_catalyst") else "",
+                })
+            df_market = pd.DataFrame(rows)
+
+            def _bucket_color(row):
+                bucket = (row.get("Bucket") or "").lower()
+                color = {
+                    "gap": "rgba(255,152,0,0.18)",
+                    "orb": "rgba(38,198,218,0.18)",
+                    "momentum": "rgba(0,212,170,0.18)",
+                    "vwap": "rgba(171,71,188,0.18)",
+                }.get(bucket, "rgba(128,128,128,0.08)")
+                return [f"background-color: {color}"] * len(row)
+
+            st.dataframe(
+                df_market.style.apply(_bucket_color, axis=1),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption(
+                f"{len(df_market)} candidate(s) · "
+                f"Click a symbol from above and paste it into the per-symbol scanner below "
+                f"to see live strategy signals."
+            )
+
+    st.markdown("---")
+    st.markdown("### 🎯 Per-Symbol Strategy Scanner")
+    st.caption("Run all 5 day-trade strategies against a chosen list of symbols.")
+
     sc_input = st.text_input(
         "Symbols (comma-separated)", value=DEFAULT_SYMBOLS, key="scanner_symbols"
     )

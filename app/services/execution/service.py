@@ -116,11 +116,60 @@ class ExecutionService:
             )
             return db_order
 
-        # ── Step 5: Handle immediate fill ────────────────────────────────────
-        if status_resp.status in ("filled", "partial"):
-            self._handle_fill(db_order.id, status_resp)
+        # ── Step 5: Confirm actual broker state ─────────────────────────────
+        # Schwab returns 201 from place_order before deciding to accept/reject the
+        # order. Without a follow-up GET, our DB reports "submitted" for orders the
+        # broker immediately rejected. Poll once to capture the real status.
+        confirmed = await self._confirm_broker_status(
+            status_resp.broker_order_id, account_id, db_order.id
+        )
+        final_status = confirmed.status if confirmed else status_resp.status
+
+        # ── Step 6: Handle immediate fill ────────────────────────────────────
+        if final_status in ("filled", "partial"):
+            self._handle_fill(db_order.id, confirmed or status_resp)
 
         return db_order
+
+    async def _confirm_broker_status(
+        self, broker_order_id: Optional[str], account_id: str, order_id: int
+    ) -> Optional[OrderStatusResponse]:
+        """One-shot status poll after place_order. Updates DB to the real broker state."""
+        if not broker_order_id:
+            return None
+        try:
+            confirmed = await self.broker.get_order(broker_order_id, account_id)
+        except Exception as exc:
+            logger.warning("[exec] Status confirm failed for %s: %s", broker_order_id, exc)
+            return None
+
+        # Map broker status into our lifecycle. Anything that isn't a working state
+        # (queued/working/pending_activation) overrides "submitted".
+        broker_status = (confirmed.status or "").lower()
+        terminal = {"filled", "partial", "rejected", "cancelled", "canceled", "expired", "replaced"}
+        if broker_status in terminal:
+            local_status = "partial" if broker_status == "partial" else broker_status
+            if local_status == "canceled":
+                local_status = "cancelled"
+            reason = ""
+            if isinstance(confirmed.raw, dict):
+                reason = confirmed.raw.get("statusDescription") or ""
+            self._update_order_status(
+                order_id,
+                status=local_status,
+                error_message=reason or None,
+            )
+            _audit.log(
+                event_type=f"ORDER_{local_status.upper()}",
+                entity_type="order",
+                entity_id=order_id,
+                description=f"broker confirmed status={local_status} reason={reason or 'n/a'}",
+            )
+            logger.info(
+                "[exec] Broker confirmed status=%s for order_id=%s (%s)",
+                local_status, order_id, reason or "no reason",
+            )
+        return confirmed
 
     # ── Persistence helpers ──────────────────────────────────────────────────
 

@@ -1,25 +1,42 @@
 from __future__ import annotations
 
+import os
 import requests
 
-BASE = "https://127.0.0.1:8001"
+BASE = os.getenv("TRADING_API_BASE", "https://127.0.0.1:8001")
+
+
+def _raise_with_body(r: requests.Response) -> None:
+    """Surface the backend's detail/message in HTTP errors instead of a generic stack trace."""
+    if r.status_code < 400:
+        return
+    detail = ""
+    try:
+        body = r.json()
+        if isinstance(body, dict):
+            detail = body.get("detail") or body.get("message") or ""
+        if not detail:
+            detail = str(body)[:300]
+    except Exception:
+        detail = (r.text or "")[:300]
+    raise requests.HTTPError(f"{r.status_code} {r.reason}: {detail}", response=r)
 
 
 def _get(path: str, timeout: int = 10, **kwargs):
     r = requests.get(f"{BASE}{path}", timeout=timeout, verify=False, **kwargs)
-    r.raise_for_status()
+    _raise_with_body(r)
     return r.json()
 
 
 def _post(path: str, **kwargs):
     r = requests.post(f"{BASE}{path}", timeout=10, verify=False, **kwargs)
-    r.raise_for_status()
+    _raise_with_body(r)
     return r.json()
 
 
 def _delete(path: str, timeout: int = 10):
     r = requests.delete(f"{BASE}{path}", timeout=timeout, verify=False)
-    r.raise_for_status()
+    _raise_with_body(r)
     return r.json()
 
 
@@ -238,3 +255,15 @@ def perplexity_suitability():
 
 def perplexity_save_suitability(config: dict):
     return _post("/perplexity/suitability", json=config)
+
+# ── Day-trading market scanner ────────────────────────────────────
+
+def daytrading_scanner_watchlist(max_symbols: int = 20, universe: str = "", market_state: str = ""):
+    return _get("/daytrading/scanner/watchlist", timeout=120, params={
+        "max_symbols": max_symbols,
+        "universe": universe,
+        "market_state": market_state,
+    })
+
+def daytrading_scanner_metrics(symbol: str):
+    return _get(f"/daytrading/scanner/metrics/{symbol}", timeout=60)

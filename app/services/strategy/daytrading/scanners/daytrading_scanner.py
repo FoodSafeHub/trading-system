@@ -360,7 +360,7 @@ class DayTradingScanner:
         """
         results: list[SymbolScanResult] = []
         universe = self.load_universe()
-        logger.info("Scanner starting: %d symbols in universe", len(universe))
+        logger.info(f"Scanner starting: {len(universe)} symbols in universe")
 
         for symbol in universe:
             metrics = self.fetch_metrics(symbol)
@@ -371,8 +371,7 @@ class DayTradingScanner:
         passed = [r for r in results if not r.rejection_reason]
         rejected = [r for r in results if r.rejection_reason]
         logger.info(
-            "Scan complete: %d passed filters, %d rejected",
-            len(passed), len(rejected),
+            f"Scan complete: {len(passed)} passed filters, {len(rejected)} rejected"
         )
         for r in rejected:
             logger.debug("  SKIP %s — %s", r.symbol, r.rejection_reason)
@@ -425,7 +424,7 @@ class DayTradingScanner:
         watchlist = candidates[:cap]
 
         logger.info(
-            "Watchlist ready: %d symbols (market_state=%s)", len(watchlist), state
+            f"Watchlist ready: {len(watchlist)} symbols (market_state={state})"
         )
         return watchlist
 

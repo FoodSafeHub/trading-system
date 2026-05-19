@@ -41,3 +41,21 @@ logs/
 dist/
 build/
 *.egg-info/
+
+# TLS / secrets — never commit private keys
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# AI tooling runtime state (local only)
+.refact/
+.claude/
+
+# Generated reports / backtest output
+output/
+
+# Strategy / app generated configs (local copy of the source-of-truth)
+# Keep this commented unless you want strategies.json local-only:
+# strategies.json

@@ -77,7 +77,11 @@ try:
             if pending_ids:
                 st.markdown("**Cancel a pending order**")
                 to_cancel = st.selectbox("Select order to cancel", pending_ids, key="cancel_sel")
-                if st.button("🚫 Cancel Order", key="cancel_btn"):
+                confirm = st.checkbox(
+                    f"Confirm cancellation of order {to_cancel}",
+                    key=f"cancel_confirm_{to_cancel}",
+                )
+                if st.button("🚫 Cancel Order", key="cancel_btn", disabled=not confirm):
                     try:
                         api._post(f"/orders/{to_cancel}/cancel", {})
                         st.success(f"Cancellation sent for {to_cancel}")

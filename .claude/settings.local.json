@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python c:/Users/medagams/trading-system/scripts/debug_daytrading_strategies.py --symbols NVDA --periods 30d 60d)"
-    ]
-  }
-}

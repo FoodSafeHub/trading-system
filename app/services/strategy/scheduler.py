@@ -38,6 +38,20 @@ _override_run_bollinger: bool | None = None
 _override_run_perplexity: bool | None = None
 
 
+def _quantize_for_broker(shares: float) -> float:
+    """Round shares to a quantity the active broker will accept.
+
+    Schwab cash accounts reject fractional orders ("No trades are currently allowed")
+    unless the user has explicitly enabled Stock Slices. Paper broker accepts any qty.
+    To stay safe by default, we floor to whole shares for live brokers.
+    """
+    settings = get_settings()
+    if settings.active_broker == "paper":
+        return max(round(shares, 6), 0.001)
+    whole = int(shares)
+    return float(whole) if whole >= 1 else 0.0
+
+
 def _compute_quantity(
     symbol: str,
     entry: float,
@@ -54,8 +68,8 @@ def _compute_quantity(
     if stop is None or stop <= 0 or stop >= entry:
         # No stop — cap by max_capital_usd if given, else 1 share
         if max_capital_usd and entry > 0:
-            return max(round(max_capital_usd / entry, 6), 0.001)
-        return 1.0
+            return _quantize_for_broker(max_capital_usd / entry)
+        return _quantize_for_broker(1.0)
 
     settings = get_settings()
     # If user set a per-symbol cap, use that; otherwise use global max_position_size_usd
@@ -71,15 +85,16 @@ def _compute_quantity(
             max_account_risk_pct=settings.max_account_risk_pct,
         )
         if sz.viable and sz.shares >= 0.001:
+            qty = _quantize_for_broker(sz.shares)
             logger.info(
-                f"[scheduler] Position size {symbol}: {sz.shares:.4f} shares "
+                f"[scheduler] Position size {symbol}: raw={sz.shares:.4f} -> qty={qty} "
                 f"@ ${entry:.2f}, stop ${stop:.2f}, risk ${sz.risk_amount:.2f}, "
                 f"cap=${effective_max:.0f}"
             )
-            return sz.shares
+            return qty
     except Exception as exc:
         logger.warning(f"[scheduler] Position sizing failed for {symbol}: {exc}")
-    return 1.0
+    return _quantize_for_broker(1.0)
 
 
 def set_scheduler_system_flags(run_bollinger: bool | None, run_perplexity: bool | None) -> None:
@@ -270,6 +285,9 @@ def _run_cycle() -> None:
                 asgn_cap = next((a["max_capital_usd"] for a in assignments if a["symbol"] == symbol), None)
                 if direction == "BUY":
                     qty = _compute_quantity(symbol, entry, stop, asgn_cap)
+                    if qty <= 0:
+                        logger.info("[scheduler] BUY %s skipped — sizing produced 0 shares (cap=%s, entry=%.2f)", symbol, asgn_cap, entry)
+                        continue
                 else:
                     # SELL: use actual position size so we close the whole position
                     qty = current_positions.get(symbol, 0.0)
@@ -284,7 +302,7 @@ def _run_cycle() -> None:
                     limit_price=None,
                     stop_price=stop if direction == "BUY" else None,
                 )
-                loop.run_until_complete(svc.execute(order_req, account_id=account_id))
+                loop.run_until_complete(svc.execute(order_req, account_id=account_id, estimated_price=entry))
 
             # ── 4. Execute consensus signals ─────────────────────
             for symbol, directions in votes.items():
@@ -298,19 +316,23 @@ def _run_cycle() -> None:
                 )
                 if direction == "SELL":
                     qty = current_positions.get(symbol, 0.0)
+                    entry_p = live_prices.get(symbol) or 0.0
                     if qty <= 0:
                         logger.info("[scheduler] Consensus SELL %s skipped — no open position", symbol)
                         continue
                 else:
                     entry_p = live_prices.get(symbol) or 0.0
-                    qty = _compute_quantity(symbol, entry_p, None) if entry_p > 0 else 1.0
+                    qty = _compute_quantity(symbol, entry_p, None) if entry_p > 0 else _quantize_for_broker(1.0)
+                    if qty <= 0:
+                        logger.info("[scheduler] Consensus BUY %s skipped — sizing produced 0 shares", symbol)
+                        continue
                 order_req = OrderRequest(
                     symbol=symbol,
                     side=direction,  # type: ignore[arg-type]
                     order_type="MARKET",
                     quantity=qty,
                 )
-                loop.run_until_complete(svc.execute(order_req, account_id=account_id))
+                loop.run_until_complete(svc.execute(order_req, account_id=account_id, estimated_price=entry_p or None))
         finally:
             loop.close()
 
