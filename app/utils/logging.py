@@ -4,11 +4,25 @@ import io
 import logging
 import re
 import sys
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from rich.console import Console
 from rich.logging import RichHandler
+
+_ET = ZoneInfo("America/New_York")
+
+
+class _ETFormatter(logging.Formatter):
+    """Renders log timestamps in America/New_York (ET) regardless of host TZ."""
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        dt = datetime.fromtimestamp(record.created, tz=_ET)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.isoformat(timespec="milliseconds")
 
 
 def _utf8_stream(stream):
@@ -66,6 +80,7 @@ def configure_logging(log_level: str = "INFO", log_dir: Path = Path("logs")) -> 
         rich_tracebacks=True,
         show_path=False,
         markup=True,
+        log_time_format=lambda dt: dt.astimezone(_ET).strftime("[%H:%M:%S ET]"),
     )
     console.setLevel(log_level)
     console.addFilter(masking_filter)
@@ -78,9 +93,9 @@ def configure_logging(log_level: str = "INFO", log_dir: Path = Path("logs")) -> 
         encoding="utf-8",
     )
     file_handler.setLevel(log_level)
-    file_fmt = logging.Formatter(
+    file_fmt = _ETFormatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
+        datefmt="%Y-%m-%dT%H:%M:%S %Z",
     )
     file_handler.setFormatter(file_fmt)
     file_handler.addFilter(masking_filter)

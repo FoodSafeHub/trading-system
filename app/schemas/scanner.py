@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
+
+from app.schemas._serializers import serialize_et
 
 
 class ScanConfig(BaseModel):
@@ -34,6 +36,10 @@ class ScanResultOut(BaseModel):
     class Config:
         from_attributes = True
 
+    @field_serializer("scanned_at")
+    def _ser_scanned_at(self, dt: datetime) -> str | None:
+        return serialize_et(dt)
+
 
 class ScanSummary(BaseModel):
     scan_run_id: str
@@ -44,3 +50,7 @@ class ScanSummary(BaseModel):
     total_matches: int
     top_candidates: List[ScanResultOut]
     duration_seconds: float
+
+    @field_serializer("scanned_at")
+    def _ser_scanned_at(self, dt: datetime) -> str | None:
+        return serialize_et(dt)

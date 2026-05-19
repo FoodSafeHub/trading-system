@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator
+
+from app.schemas._serializers import serialize_et
 
 
 class OrderRequest(BaseModel):
@@ -63,3 +65,7 @@ class OrderOut(BaseModel):
     error_message: Optional[str]
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("created_at", "submitted_at", "filled_at")
+    def _ser_dt(self, dt: datetime | None) -> str | None:
+        return serialize_et(dt)

@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
+
+from app.schemas._serializers import serialize_et
 
 
 class SignalOut(BaseModel):
@@ -20,6 +22,10 @@ class SignalOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @field_serializer("created_at")
+    def _ser_created_at(self, dt: datetime) -> str | None:
+        return serialize_et(dt)
+
 
 class StrategyRunOut(BaseModel):
     id: int
@@ -32,3 +38,7 @@ class StrategyRunOut(BaseModel):
     error_message: Optional[str]
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("started_at", "completed_at")
+    def _ser_dt(self, dt: datetime | None) -> str | None:
+        return serialize_et(dt)

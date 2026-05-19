@@ -9,6 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from app.schemas.scanner import ScanConfig, ScanResultOut, ScanSummary
 from app.services.scanner.scanner_service import get_latest_results, run_scan
+from app.utils.time_utils import to_et
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,7 @@ async def get_scan_status():
     """Return whether a scan is currently running."""
     return {
         "running": _scan_running,
-        "last_scan": _last_summary.scanned_at.isoformat() if _last_summary else None,
+        "last_scan": to_et(_last_summary.scanned_at).isoformat() if _last_summary else None,
         "last_run_id": _last_summary.scan_run_id if _last_summary else None,
         "last_matches": _last_summary.total_matches if _last_summary else 0,
     }

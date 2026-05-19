@@ -4,11 +4,12 @@ from datetime import datetime, timezone
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.assignments import SymbolStrategyAssignment
+from app.schemas._serializers import serialize_et
 
 router = APIRouter(prefix="/assignments", tags=["assignments"])
 
@@ -34,6 +35,10 @@ class AssignmentOut(BaseModel):
     assigned_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("assigned_at")
+    def _ser_assigned_at(self, dt: datetime) -> str | None:
+        return serialize_et(dt)
 
 
 @router.get("", response_model=List[AssignmentOut])
