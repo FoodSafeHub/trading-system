@@ -1,11 +1,46 @@
 from __future__ import annotations
 
+import json
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
 from _theme import apply_theme
 
 import streamlit as st
 import pandas as pd
+
+
+def _derive_source(row: pd.Series) -> str:
+    """Label where an order came from.
+
+    Strategy-driven orders have signal_id populated (set by the scheduler when
+    routing a signal to the broker). Anything else is a manual entry — either
+    from the dashboard's "Place Manual Order" form or another non-strategy path.
+    """
+    if pd.notna(row.get("strategy_name")) and row.get("strategy_name"):
+        return f"Strategy: {row['strategy_name']}"
+    if pd.notna(row.get("signal_id")) and row.get("signal_id"):
+        return f"Strategy (signal #{int(row['signal_id'])})"
+    return "Manual"
+
+
+def _planned_exits(preview_json: object) -> str:
+    """Pull TP / SL from preview_json if the strategy wrote them, else em-dash."""
+    if not preview_json or not isinstance(preview_json, str):
+        return "—"
+    try:
+        pj = json.loads(preview_json)
+    except Exception:
+        return "—"
+    tp = pj.get("take_profit") or pj.get("tp") or pj.get("target_price")
+    sl = pj.get("stop_loss") or pj.get("sl") or pj.get("stop_price")
+    if tp is None and sl is None:
+        return "—"
+    parts = []
+    if tp is not None:
+        parts.append(f"TP ${float(tp):.2f}")
+    if sl is not None:
+        parts.append(f"SL ${float(sl):.2f}")
+    return " · ".join(parts)
 
 apply_theme("Orders")
 st.title("Orders")
@@ -62,12 +97,29 @@ try:
         if "status" in df.columns:
             df["status"] = df["status"].apply(_status_tag)
 
-        # Show most useful columns first
+        # Derive the two columns that disambiguate manual vs. strategy orders.
+        # Manual orders have no signal_id / no preview_json; strategy orders
+        # carry both and we surface their planned TP/SL inline.
+        df["source"] = df.apply(_derive_source, axis=1)
+        df["planned_exit"] = df["preview_json"].apply(_planned_exits) \
+            if "preview_json" in df.columns else "—"
+
+        # Show most useful columns first. Source and planned_exit go right next
+        # to status so the operator can answer "where did this come from?" and
+        # "what's the exit?" without scrolling.
         priority = ["created_at", "symbol", "side", "order_type", "quantity",
-                    "fill_price", "status", "broker_order_id"]
+                    "fill_price", "status", "source", "planned_exit",
+                    "broker_order_id"]
+        # Hide the raw JSON / numeric ID plumbing columns — they're noise in the table.
+        hidden = {"preview_json", "signal_id", "strategy_name"}
         show_cols = [c for c in priority if c in df.columns] + \
-                    [c for c in df.columns if c not in priority]
+                    [c for c in df.columns if c not in priority and c not in hidden]
         st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+        st.caption(
+            "**Source** shows whether an order came from a strategy (with the strategy name) "
+            "or was placed manually. **Planned exit** shows the TP / SL the strategy recorded; "
+            "manual orders have no planned exit because no strategy set one."
+        )
 
         # Cancel button
         if "broker_order_id" in df.columns:

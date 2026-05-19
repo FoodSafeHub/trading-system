@@ -1,23 +1,67 @@
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.orders import Order
+from app.models.signals import Signal
 from app.schemas.orders import OrderOut, OrderRequest
+from app.schemas._serializers import serialize_et
 from app.services.brokers.factory import get_broker
 from app.services.execution.service import ExecutionService
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
 
-@router.get("", response_model=List[OrderOut])
-def list_orders(status: Optional[str] = None, limit: int = 50, db: Session = Depends(get_db)):
+@router.get("")
+def list_orders(
+    status: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> List[dict[str, Any]]:
+    """Return recent orders with strategy_name joined in when signal_id is present.
+
+    We bypass response_model=List[OrderOut] here because we want the joined
+    strategy_name field on the wire so the dashboard can show a "Source" column
+    without a second round-trip per order.
+    """
     q = db.query(Order).order_by(Order.created_at.desc())
     if status:
         q = q.filter(Order.status == status)
-    return q.limit(limit).all()
+    orders = q.limit(limit).all()
+
+    # Single lookup for the strategy names — avoids N+1.
+    signal_ids = {o.signal_id for o in orders if o.signal_id is not None}
+    strategy_by_signal: dict[int, str] = {}
+    if signal_ids:
+        for sig in db.query(Signal).filter(Signal.id.in_(signal_ids)).all():
+            strategy_by_signal[sig.id] = sig.strategy_name
+
+    out: list[dict[str, Any]] = []
+    for o in orders:
+        out.append({
+            "id": o.id,
+            "broker": o.broker,
+            "broker_order_id": o.broker_order_id,
+            "symbol": o.symbol,
+            "side": o.side,
+            "order_type": o.order_type,
+            "quantity": o.quantity,
+            "limit_price": o.limit_price,
+            "stop_price": o.stop_price,
+            "status": o.status,
+            "is_paper": o.is_paper,
+            "signal_id": o.signal_id,
+            "preview_json": o.preview_json,
+            "strategy_name": strategy_by_signal.get(o.signal_id) if o.signal_id else None,
+            "created_at": serialize_et(o.created_at),
+            "submitted_at": serialize_et(o.submitted_at),
+            "filled_at": serialize_et(o.filled_at),
+            "fill_price": o.fill_price,
+            "error_message": o.error_message,
+        })
+    return out
 
 
 @router.post("/manual", response_model=Optional[OrderOut])

@@ -58,6 +58,8 @@ class OrderOut(BaseModel):
     stop_price: Optional[float]
     status: str
     is_paper: bool
+    signal_id: Optional[int] = None
+    preview_json: Optional[str] = None
     created_at: datetime
     submitted_at: Optional[datetime]
     filled_at: Optional[datetime]
