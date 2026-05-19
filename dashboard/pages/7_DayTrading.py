@@ -1042,22 +1042,28 @@ with tab_scanner:
     )
 
     # ── Filters row 2: float ─────────────────────────────────────────────────
+    # Inputs are in MILLIONS of shares to make the UX usable — entering
+    # "10000000" for 10M is error-prone (an off-by-one zero is a 10x mistake).
     f4, f5, f6 = st.columns(3)
-    ms_min_float = f4.number_input(
-        "Min float (shares, 0 = no floor)",
-        min_value=0, max_value=10_000_000_000, value=0, step=1_000_000, key="ms_min_float",
-        help="Lower bound on shares float. Low-float runners often live in the 5–50M range.",
+    ms_min_float_m = f4.number_input(
+        "Min float (millions, 0 = no floor)",
+        min_value=0.0, max_value=10_000.0, value=0.0, step=1.0, key="ms_min_float_m",
+        help="Lower bound on shares float in millions. Low-float runners typically have 5–50M shares.",
     )
-    ms_max_float = f5.number_input(
-        "Max float (shares, 0 = no cap)",
-        min_value=0, max_value=10_000_000_000, value=0, step=1_000_000, key="ms_max_float",
-        help="Upper bound on shares float. Set this to ~50M to focus on low-float candidates.",
+    ms_max_float_m = f5.number_input(
+        "Max float (millions, 0 = no cap)",
+        min_value=0.0, max_value=10_000.0, value=0.0, step=10.0, key="ms_max_float_m",
+        help="Upper bound on shares float in millions. ~50 for low-float candidates; ~500 for mid-caps.",
     )
     ms_universe_cap = f6.number_input(
         "Cap universe size (0 = all)",
         min_value=0, max_value=10_000, value=0, step=100, key="ms_universe_cap",
         help="Useful for quick test scans. 0 = scan the full ~5,800-symbol universe.",
     )
+
+    # Convert millions to absolute share counts for the API
+    ms_min_float = ms_min_float_m * 1_000_000
+    ms_max_float = ms_max_float_m * 1_000_000
 
     if st.button("Run Market Scan", key="run_market_scan_btn", type="primary"):
         with st.spinner("Scanning market — fetching bars, scoring, applying regime adjustments…"):

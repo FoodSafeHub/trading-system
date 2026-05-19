@@ -34,7 +34,6 @@ import yfinance as yf
 
 from app.services.strategy.daytrading.market_open import ET, now_et
 from app.services.strategy.daytrading.scanners.universe import (
-    float_cache_is_fresh,
     load_float_cache,
     load_universe,
     save_float_cache,
@@ -263,10 +262,14 @@ class DayTradingScanner:
             )
 
         # ── Hard filter: float ────────────────────────────────────────────────
-        # Only enforce when the float is actually known. A 0.0 float means
-        # "unknown" (yfinance returned nothing), and we'd rather keep the
-        # symbol than reject it on missing data.
-        if metrics.shares_float > 0:
+        # When the user has set a float threshold, we have to enforce it. A
+        # symbol with shares_float == 0 means "unknown" (yfinance returned
+        # nothing for it today) — we reject those rather than let them slip
+        # through unfiltered, because passing them would silently defeat the
+        # user's filter and pollute the watchlist with mega-caps.
+        if cfg.min_float or cfg.max_float:
+            if metrics.shares_float <= 0:
+                return self._reject(metrics, "float unknown")
             if cfg.min_float and metrics.shares_float < cfg.min_float:
                 return self._reject(
                     metrics,
@@ -463,21 +466,13 @@ class DayTradingScanner:
         if not needs_fetch:
             return
 
-        # If today's cache file is already fresh and these symbols are missing
-        # from it, they're probably symbols that just don't have float data —
-        # skip re-fetching to avoid wasting calls.
-        skip_remote = float_cache_is_fresh()
-        if skip_remote:
-            logger.debug(
-                "Float cache fresh; %d survivors have no cached float — leaving as unknown",
-                len(needs_fetch),
-            )
-            return
-
         logger.info("Fetching float for %d symbols", len(needs_fetch))
         new_floats: dict[str, float] = {}
-        workers = max(1, int(cfg.max_workers))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        # Keep float fetch workers low — yfinance's fast_info reuses a shared
+        # crumb token, and at >4 concurrent requests we hit 401 "Invalid Crumb"
+        # rate-limit responses that wipe out a chunk of the fetch.
+        float_workers = min(4, max(1, int(cfg.max_workers)))
+        with ThreadPoolExecutor(max_workers=float_workers) as pool:
             futures = {pool.submit(_fetch_float, sym): sym for sym in needs_fetch}
             for fut in as_completed(futures):
                 sym = futures[fut]
@@ -731,15 +726,28 @@ class DayTradingScanner:
 # ── Module-level helpers ──────────────────────────────────────────────────────
 
 def _fetch_float(symbol: str) -> float:
-    """Return the shares float for ``symbol`` via yfinance ``fast_info``.
+    """Return the shares float (or shares outstanding) for ``symbol``.
 
-    Returns 0.0 on any error or when the value is missing. We use
-    ``fast_info`` (a lighter endpoint than ``info``) and fall through to the
-    full ``info`` payload only if needed — ``info`` returns ``floatShares``
-    where ``fast_info`` does not.
+    Strategy:
+      1. Try yfinance ``fast_info.shares`` first — light, fast, reliable, and
+         survives the rate-limit / crumb-401 storms that ``.info`` runs into.
+         This returns shares outstanding, which is a close upper bound on
+         float for most stocks (float = shares out minus restricted shares;
+         the gap is small for established names).
+      2. Fall back to ``.info["floatShares"]`` for the exact figure when
+         ``fast_info`` is unavailable — slower, more likely to be rate-limited.
+      3. Return 0.0 on total failure (caller treats 0 as "unknown" and will
+         reject the symbol if a float filter is active).
     """
     try:
         t = yf.Ticker(symbol)
+        try:
+            shares = getattr(t.fast_info, "shares", None)
+            if shares and shares > 0:
+                return float(shares)
+        except Exception:
+            pass
+        # Fallback to the heavier .info endpoint
         info = t.info or {}
         val = info.get("floatShares") or info.get("sharesOutstanding")
         return float(val) if val else 0.0
