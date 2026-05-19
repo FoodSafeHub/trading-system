@@ -5,9 +5,10 @@ import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + 
 import pandas as pd
 import streamlit as st
 import api
+from _theme import apply_theme
 
-st.set_page_config(page_title="Strategy & Signals", page_icon="⚙️", layout="wide")
-st.title("⚙️ Strategy & Signals")
+apply_theme("Strategy & Signals")
+st.title("Strategy & Signals")
 
 def _load_perplexity_strategy_names() -> list[str]:
     try:
@@ -234,7 +235,7 @@ if st.button("▶ Run Now", type="primary"):
             orders_placed = result.get("orders_placed", 0)
 
             if orders_placed > 0:
-                st.success(f"✅ {orders_placed} order(s) placed.")
+                st.success(f"{orders_placed} order(s) placed.")
             else:
                 st.warning(f"No orders placed — no symbol reached consensus ({min_agree} needed).")
 

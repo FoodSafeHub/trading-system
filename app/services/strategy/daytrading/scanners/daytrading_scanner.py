@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import Any, Literal
@@ -32,22 +33,14 @@ import pandas as pd
 import yfinance as yf
 
 from app.services.strategy.daytrading.market_open import ET, now_et
+from app.services.strategy.daytrading.scanners.universe import (
+    float_cache_is_fresh,
+    load_float_cache,
+    load_universe,
+    save_float_cache,
+)
 
 logger = logging.getLogger(__name__)
-
-# ── Default symbol universe ───────────────────────────────────────────────────
-# Covers the most liquid large-caps plus ETFs that day traders watch daily.
-# The user can override this at construction time.
-_DEFAULT_UNIVERSE: list[str] = [
-    # Mega-cap tech / growth
-    "AAPL", "MSFT", "NVDA", "TSLA", "META", "AMZN", "GOOGL", "AMD",
-    # Financials + other large caps
-    "JPM", "BAC", "GS", "MS",
-    # ETFs
-    "SPY", "QQQ", "IWM", "XLK", "XLF",
-    # High-beta / momentum favourites
-    "PLTR", "COIN", "MSTR", "HOOD", "SOFI",
-]
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -60,8 +53,16 @@ class DayTradingScannerConfig:
     min_avg_volume: float = 1_000_000   # shares/day — drop thinly traded names
     min_price: float = 5.0              # skip penny stocks
     max_price: float | None = None      # None = no cap
+    min_float: float | None = None      # min shares float (None = no minimum)
+    max_float: float | None = None      # max shares float (None = no cap) — set this
+                                        # low to find low-float runners; high to focus
+                                        # on liquid large-caps
     min_atr_pct: float = 1.0            # too dead to trade intraday
     max_atr_pct: float = 8.0            # too wild (blow-up risk)
+
+    # ── Scan execution ────────────────────────────────────────────────────────
+    max_workers: int = 16               # parallel workers for fetching metrics
+    universe_max_symbols: int | None = None  # cap universe size for development; None = all
 
     # ── Pre-market activity ───────────────────────────────────────────────────
     # rel_vol = premarket_volume / avg_daily_volume_30d
@@ -109,6 +110,10 @@ class SymbolScanMetrics:
     today_open: float = 0.0
     data_quality: str = "ok"               # "ok" | "partial" | "no_data"
 
+    # Shares float — populated lazily from the daily float cache. 0.0 means
+    # the float is unknown (yfinance returned nothing for this symbol today).
+    shares_float: float = 0.0
+
     # Spread stub — replace when L1 data is available
     spread_pct: float | None = None         # None = unavailable
 
@@ -129,6 +134,7 @@ class SymbolScanMetrics:
             "prior_close": round(self.prior_close, 4),
             "today_open": round(self.today_open, 4),
             "data_quality": self.data_quality,
+            "shares_float": int(self.shares_float),
         }
 
 
@@ -179,9 +185,20 @@ class DayTradingScanner:
         cache=None,          # BarCache — reuse if already warm
     ):
         self.config = config or DayTradingScannerConfig()
-        self._universe = [s.upper() for s in (universe or _DEFAULT_UNIVERSE)]
+        if universe is None:
+            # Default: full US-listed common-stock universe (~5,800 names),
+            # cached daily by the universe loader.
+            uni = load_universe()
+            if self.config.universe_max_symbols:
+                uni = uni[: self.config.universe_max_symbols]
+            self._universe = uni
+        else:
+            self._universe = [s.upper() for s in universe]
         self._brain = brain
         self._cache = cache  # BarCache instance, or None → fetch direct
+        # Float lookup populated on first scan of the day (lazy — only the
+        # symbols that survive cheap filters need a float lookup).
+        self._float_cache: dict[str, float] = load_float_cache()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -244,6 +261,22 @@ class DayTradingScanner:
                 metrics,
                 f"avg_vol {metrics.avg_daily_volume_30d/1e6:.1f}M < min {cfg.min_avg_volume/1e6:.1f}M",
             )
+
+        # ── Hard filter: float ────────────────────────────────────────────────
+        # Only enforce when the float is actually known. A 0.0 float means
+        # "unknown" (yfinance returned nothing), and we'd rather keep the
+        # symbol than reject it on missing data.
+        if metrics.shares_float > 0:
+            if cfg.min_float and metrics.shares_float < cfg.min_float:
+                return self._reject(
+                    metrics,
+                    f"float {metrics.shares_float/1e6:.1f}M < min {cfg.min_float/1e6:.1f}M",
+                )
+            if cfg.max_float and metrics.shares_float > cfg.max_float:
+                return self._reject(
+                    metrics,
+                    f"float {metrics.shares_float/1e6:.1f}M > max {cfg.max_float/1e6:.1f}M",
+                )
 
         # ── Hard filter: ATR ──────────────────────────────────────────────────
         if metrics.atr_pct < cfg.min_atr_pct:
@@ -354,30 +387,117 @@ class DayTradingScanner:
         """
         Run the full pre-market scan:
           1. Load universe.
-          2. Fetch metrics per symbol (parallel-friendly, but sequential here).
-          3. Score each symbol.
-          4. Return top-N by score (rejected symbols excluded).
+          2. Fetch metrics per symbol in parallel.
+          3. Attach float data (daily cache; only fetched for survivors of the
+             cheap price/volume filters to keep load on yfinance manageable).
+          4. Score each symbol.
+          5. Return top-N by score (rejected symbols excluded).
         """
-        results: list[SymbolScanResult] = []
         universe = self.load_universe()
-        logger.info(f"Scanner starting: {len(universe)} symbols in universe")
+        logger.info("Scanner starting: %d symbols in universe", len(universe))
 
-        for symbol in universe:
-            metrics = self.fetch_metrics(symbol)
-            result = self.score_symbol(metrics)
-            results.append(result)
+        # ── Step 1: parallel metric fetch ─────────────────────────────────────
+        metrics_list: list[SymbolScanMetrics] = []
+        workers = max(1, int(self.config.max_workers))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(self.fetch_metrics, sym): sym for sym in universe}
+            for fut in as_completed(futures):
+                try:
+                    metrics_list.append(fut.result())
+                except Exception as e:
+                    sym = futures[fut]
+                    logger.debug("fetch_metrics worker failed for %s: %s", sym, e)
 
-        # Split passed vs rejected for logging
+        # ── Step 2: attach float for symbols that passed the cheap filters ────
+        # Float only matters if a float threshold is configured. Avoid the
+        # ~50k yfinance calls when no one asked for them.
+        cfg = self.config
+        if cfg.min_float or cfg.max_float:
+            self._attach_floats(metrics_list)
+
+        # ── Step 3: score everything ──────────────────────────────────────────
+        results = [self.score_symbol(m) for m in metrics_list]
+
         passed = [r for r in results if not r.rejection_reason]
         rejected = [r for r in results if r.rejection_reason]
         logger.info(
-            f"Scan complete: {len(passed)} passed filters, {len(rejected)} rejected"
+            "Scan complete: %d passed filters, %d rejected", len(passed), len(rejected)
         )
-        for r in rejected:
-            logger.debug("  SKIP %s — %s", r.symbol, r.rejection_reason)
 
         passed.sort(key=lambda r: r.score, reverse=True)
         return passed[:max_symbols]
+
+    def _attach_floats(self, metrics_list: list[SymbolScanMetrics]) -> None:
+        """Populate ``shares_float`` on every metric using the daily cache.
+
+        Only symbols that already cleared the cheap price + liquidity gates
+        get a yfinance lookup — this keeps the float fetch capped at a few
+        hundred calls per day even on a 5,800-symbol universe.
+
+        The cache is keyed by symbol and refreshed once per calendar day.
+        """
+        cfg = self.config
+        # First pass: stamp every metric with whatever the cache already has.
+        for m in metrics_list:
+            cached = self._float_cache.get(m.symbol)
+            if cached is not None:
+                m.shares_float = float(cached)
+
+        # Decide which symbols are worth fetching float for — only the ones
+        # that survive the cheap price/volume gates AND don't already have
+        # a fresh cached value.
+        needs_fetch: list[str] = []
+        for m in metrics_list:
+            if m.shares_float > 0:
+                continue
+            if m.data_quality == "no_data":
+                continue
+            if m.last_price < cfg.min_price:
+                continue
+            if cfg.max_price and m.last_price > cfg.max_price:
+                continue
+            if m.avg_daily_volume_30d < cfg.min_avg_volume:
+                continue
+            needs_fetch.append(m.symbol)
+
+        if not needs_fetch:
+            return
+
+        # If today's cache file is already fresh and these symbols are missing
+        # from it, they're probably symbols that just don't have float data —
+        # skip re-fetching to avoid wasting calls.
+        skip_remote = float_cache_is_fresh()
+        if skip_remote:
+            logger.debug(
+                "Float cache fresh; %d survivors have no cached float — leaving as unknown",
+                len(needs_fetch),
+            )
+            return
+
+        logger.info("Fetching float for %d symbols", len(needs_fetch))
+        new_floats: dict[str, float] = {}
+        workers = max(1, int(cfg.max_workers))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_fetch_float, sym): sym for sym in needs_fetch}
+            for fut in as_completed(futures):
+                sym = futures[fut]
+                try:
+                    val = fut.result()
+                    if val > 0:
+                        new_floats[sym] = val
+                except Exception as e:
+                    logger.debug("float fetch failed for %s: %s", sym, e)
+
+        # Merge + persist
+        self._float_cache.update(new_floats)
+        save_float_cache(self._float_cache)
+
+        # Stamp the newly fetched floats onto the metrics objects.
+        for m in metrics_list:
+            if m.shares_float == 0:
+                val = self._float_cache.get(m.symbol)
+                if val:
+                    m.shares_float = float(val)
 
     def get_intraday_watchlist(
         self,
@@ -609,6 +729,23 @@ class DayTradingScanner:
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────────
+
+def _fetch_float(symbol: str) -> float:
+    """Return the shares float for ``symbol`` via yfinance ``fast_info``.
+
+    Returns 0.0 on any error or when the value is missing. We use
+    ``fast_info`` (a lighter endpoint than ``info``) and fall through to the
+    full ``info`` payload only if needed — ``info`` returns ``floatShares``
+    where ``fast_info`` does not.
+    """
+    try:
+        t = yf.Ticker(symbol)
+        info = t.info or {}
+        val = info.get("floatShares") or info.get("sharesOutstanding")
+        return float(val) if val else 0.0
+    except Exception:
+        return 0.0
+
 
 def _compute_daily_atr(df: pd.DataFrame, period: int = 14) -> float:
     """True-range ATR on daily bars. No external dependency needed."""

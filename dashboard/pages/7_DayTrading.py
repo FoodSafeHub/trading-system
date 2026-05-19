@@ -35,8 +35,11 @@ from app.services.strategy.daytrading.runner import (
 )
 from app.services.strategy.daytrading.strategies import ALL_STRATEGIES, STRATEGY_MAP
 
-st.set_page_config(page_title="Day Trading", page_icon="⚡", layout="wide")
-st.title("⚡ Day Trading Signals")
+sys.path.insert(0, dashboard_root)
+from _theme import apply_theme  # noqa: E402
+
+apply_theme("Day Trading")
+st.title("Day Trading")
 st.caption(
     "7 intraday strategies on 5m and 15m bars. "
     "All signals expire at market close. No overnight holds."
@@ -75,17 +78,28 @@ STRATEGY_DESCRIPTIONS = {
 
 DEFAULT_SYMBOLS = "SPY,QQQ,AAPL,TSLA,NVDA,MSFT,AMZN,META"
 
-# ── Tabs ─────────────────────────────────────────────────────────────────────
-tab_signals, tab_backtest, tab_sizer, tab_compare, tab_scanner, tab_autotrader, tab_config, tab_policy = st.tabs([
-    "📡 Live Signals",
-    "🔬 Backtest",
-    "📐 Position Sizer",
-    "📊 Compare All",
-    "🔍 Scanner",
-    "🎯 Auto Trader",
-    "⚙️ Config",
-    "🛡 Symbol Policy",
+# ── Tabs (4 top-level groups → sub-tabs within) ──────────────────────────────
+#   Trade    : what an operator wants live during market hours (signals + bot)
+#   Research : tools you run before/after the session (backtests, sizing, compare)
+#   Scanner  : its own surface — pre-market + per-symbol candidate ranking
+#   Settings : configuration that rarely changes (strategy config, symbol policy)
+tab_trade, tab_research, tab_scanner, tab_settings = st.tabs([
+    "Trade",
+    "Research",
+    "Scanner",
+    "Settings",
 ])
+
+with tab_trade:
+    tab_signals, tab_autotrader = st.tabs(["Live Signals", "Auto Trader"])
+
+with tab_research:
+    tab_backtest, tab_compare, tab_sizer = st.tabs([
+        "Backtest", "Compare All", "Position Sizer",
+    ])
+
+with tab_settings:
+    tab_config, tab_policy = st.tabs(["Strategy Config", "Symbol Policy"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,11 +363,11 @@ with tab_signals:
     status = market_status()
     now_str = status.get("time_et", "")
     if status["is_open"]:
-        st.success(f"🟢 Market OPEN — {now_str}")
+        st.success(f"Market OPEN — {now_str}")
     elif is_pre_market():
-        st.info(f"🔵 PRE-MARKET — {now_str}. Live signals only generated 9:30–3:45 PM ET.")
+        st.info(f"PRE-MARKET — {now_str}. Live signals only generated 9:30–3:45 PM ET.")
     else:
-        st.warning(f"🔴 Market CLOSED — {now_str}. Showing most recent data.")
+        st.warning(f"Market CLOSED — {now_str}. Showing most recent data.")
 
     st.info(
         "Signals based on last completed 5m bar. "
@@ -373,7 +387,7 @@ with tab_signals:
         # ── Brain Status Panel ────────────────────────────────────────────────
         if brain:
             st.markdown("---")
-            st.markdown("### 🧠 Brain Status")
+            st.markdown("### Brain Status")
             ms_state = brain.get("market_state", "UNKNOWN")
             ms_conf = brain.get("state_confidence", 0)
             kill = brain.get("kill_switch", False)
@@ -403,11 +417,11 @@ with tab_signals:
                 with brow1:
                     st.markdown("**Allowed strategies:**")
                     for s in enabled:
-                        st.success(f"✅ {s}")
+                        st.success(s)
                 with brow2:
                     st.markdown("**Blocked strategies:**")
                     for s in disabled:
-                        st.error(f"❌ {s}")
+                        st.error(s)
 
             reasons = brain.get("state_reasons", [])
             if reasons:
@@ -506,7 +520,7 @@ with tab_backtest:
         _TREND_LABEL = "Strong" if _prof["trend_strength"] >= 0.6 else ("Moderate" if _prof["trend_strength"] >= 0.4 else "Weak / Mean-reverting")
 
         with st.container(border=True):
-            st.markdown(f"#### 📊 {bt_symbol} — Symbol Profile")
+            st.markdown(f"#### {bt_symbol} — Symbol Profile")
             p1, p2, p3, p4 = st.columns(4)
             p1.metric(f"{_VOL_ICON} Volatility (ATR%)", f"{_prof['volatility_pct']:.2f}%")
             p2.metric(f"{_LIQ_ICON} Liquidity", _LIQ_LABEL)
@@ -519,9 +533,9 @@ with tab_backtest:
             best = _prof.get("best_strategies", [])
             avoid = _prof.get("avoid_strategies", [])
             if best:
-                st.success(f"✅ **Recommended:** {' · '.join(best)}")
+                st.success(f"**Recommended:** {' · '.join(best)}")
             if avoid:
-                st.error(f"❌ **Not recommended:** {' · '.join(avoid)}")
+                st.error(f"**Not recommended:** {' · '.join(avoid)}")
 
             with st.expander("Full analysis notes"):
                 st.info(_prof.get("notes", ""))
@@ -734,7 +748,7 @@ with tab_backtest:
         analysis = bt_result.get("analysis", {})
         if analysis:
             st.markdown("---")
-            st.markdown("### 🧠 Trade Analyzer")
+            st.markdown("### Trade Analyzer")
 
             strengths = analysis.get("strengths", [])
             weaknesses = analysis.get("weaknesses", [])
@@ -831,7 +845,7 @@ with tab_backtest:
             comparison = cmp_data.get("comparison", {})
 
             # ── Comparison summary table ──────────────────────────────────────
-            st.markdown("### 🧠 Brain Filter — Side-by-Side Comparison")
+            st.markdown("### Brain Filter — Side-by-Side Comparison")
             st.caption("Same period, same symbol. Brain applies market state routing, risk limits, and execution checks.")
 
             if comparison:
@@ -994,12 +1008,12 @@ with tab_compare:
 with tab_scanner:
     import api as _api
 
-    # ── 🌍 Market Scanner ─────────────────────────────────────────────────────
-    st.markdown("### 🌍 Market Scanner — Ranked Day-Trade Candidates")
+    st.markdown("### Market Scanner — Ranked Day-Trade Candidates")
     st.caption(
-        "Scans a liquid pre-market universe and ranks tickers by volume, volatility, "
-        "relative volume, gap size, and catalyst presence. Recommended strategy bucket "
-        "(gap / ORB / momentum / VWAP) is brain-aware."
+        "Scans the full US-listed common-stock universe (~5,800 names from NASDAQ "
+        "Trader, refreshed daily) and ranks tickers by volume, volatility, relative "
+        "volume, gap size, and catalyst presence. Use the filters to focus on the "
+        "price and float range you actually want to trade."
     )
 
     mc1, mc2, mc3 = st.columns([1, 1, 2])
@@ -1011,16 +1025,53 @@ with tab_scanner:
     )
     ms_universe = mc3.text_input(
         "Override universe (optional, comma-separated)", value="", key="ms_universe",
-        placeholder="leave empty for default ~22 liquid mega-caps + ETFs",
+        placeholder="leave empty to scan the full US-listed universe",
     )
 
-    if st.button("🔍 Run Market Scan", key="run_market_scan_btn", type="primary"):
+    # ── Filters row 1: price + volume ────────────────────────────────────────
+    f1, f2, f3 = st.columns(3)
+    ms_min_price = f1.number_input(
+        "Min price ($)", min_value=0.0, max_value=10_000.0, value=5.0, step=1.0, key="ms_min_price",
+    )
+    ms_max_price = f2.number_input(
+        "Max price ($, 0 = no cap)", min_value=0.0, max_value=10_000.0, value=0.0, step=10.0, key="ms_max_price",
+    )
+    ms_min_vol = f3.number_input(
+        "Min avg daily volume (shares)",
+        min_value=0, max_value=500_000_000, value=1_000_000, step=100_000, key="ms_min_vol",
+    )
+
+    # ── Filters row 2: float ─────────────────────────────────────────────────
+    f4, f5, f6 = st.columns(3)
+    ms_min_float = f4.number_input(
+        "Min float (shares, 0 = no floor)",
+        min_value=0, max_value=10_000_000_000, value=0, step=1_000_000, key="ms_min_float",
+        help="Lower bound on shares float. Low-float runners often live in the 5–50M range.",
+    )
+    ms_max_float = f5.number_input(
+        "Max float (shares, 0 = no cap)",
+        min_value=0, max_value=10_000_000_000, value=0, step=1_000_000, key="ms_max_float",
+        help="Upper bound on shares float. Set this to ~50M to focus on low-float candidates.",
+    )
+    ms_universe_cap = f6.number_input(
+        "Cap universe size (0 = all)",
+        min_value=0, max_value=10_000, value=0, step=100, key="ms_universe_cap",
+        help="Useful for quick test scans. 0 = scan the full ~5,800-symbol universe.",
+    )
+
+    if st.button("Run Market Scan", key="run_market_scan_btn", type="primary"):
         with st.spinner("Scanning market — fetching bars, scoring, applying regime adjustments…"):
             try:
                 ranked = _api.daytrading_scanner_watchlist(
                     max_symbols=int(ms_max),
                     universe=ms_universe.strip(),
                     market_state="" if ms_state == "auto" else ms_state,
+                    min_price=float(ms_min_price),
+                    max_price=float(ms_max_price) if ms_max_price > 0 else None,
+                    min_avg_volume=float(ms_min_vol),
+                    min_float=float(ms_min_float) if ms_min_float > 0 else None,
+                    max_float=float(ms_max_float) if ms_max_float > 0 else None,
+                    universe_max_symbols=int(ms_universe_cap) if ms_universe_cap > 0 else None,
                 )
             except Exception as e:
                 ranked = []
@@ -1043,7 +1094,8 @@ with tab_scanner:
                     "Gap %": f"{m.get('premarket_gap_pct', 0):+.2f}%" if m.get("premarket_gap_pct") else "—",
                     "Pre-Mkt Rel Vol": f"{m.get('premarket_rel_vol', 0):.2f}x" if m.get("premarket_rel_vol") else "—",
                     "Avg Vol 30d": f"{int(m.get('avg_daily_volume_30d', 0)):,}" if m.get("avg_daily_volume_30d") else "—",
-                    "Catalyst": "✓" if m.get("has_catalyst") else "",
+                    "Float": f"{int(m.get('shares_float', 0))/1e6:.1f}M" if m.get("shares_float") else "—",
+                    "Catalyst": "yes" if m.get("has_catalyst") else "",
                 })
             df_market = pd.DataFrame(rows)
 
@@ -1068,7 +1120,7 @@ with tab_scanner:
             )
 
     st.markdown("---")
-    st.markdown("### 🎯 Per-Symbol Strategy Scanner")
+    st.markdown("### Per-Symbol Strategy Scanner")
     st.caption("Run all 5 day-trade strategies against a chosen list of symbols.")
 
     sc_input = st.text_input(
@@ -1151,7 +1203,7 @@ with tab_config:
 # TAB — 🎯 Single Stock Auto Trader
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_autotrader:
-    st.markdown("### 🎯 Single Stock Auto Trader")
+    st.markdown("### Single Stock Auto Trader")
     st.caption(
         "Pick one symbol, configure risk, and let the bot manage the full intraday trade "
         "from entry to exit — stops, trailing, partial TP, and EOD flatten included."
@@ -1223,7 +1275,7 @@ with tab_autotrader:
             st.success(f"Auto Trader started for {at_symbol} ({at_mode} mode)")
         except PolicyError as e:
             pol = get_policy(at_symbol)
-            st.error(f"🚫 **Deployment policy blocked auto-trade for {at_symbol}**")
+            st.error(f"**Deployment policy blocked auto-trade for {at_symbol}**")
             st.warning(
                 f"**Status:** {pol.badge()}  \n"
                 f"**Reason:** {pol.reason}  \n"

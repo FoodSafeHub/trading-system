@@ -1,147 +1,198 @@
+"""Operator dashboard — the single page you open when the market opens.
+
+Layout (3 zones):
+  TOP STRIP   ─ API / market / kill-switch / auto-trader status pills
+  LEFT (2/3)  ─ Today's P&L + open positions
+  RIGHT (1/3) ─ Risk budget gauge + kill switch + recent fills
+"""
 from __future__ import annotations
 
-import streamlit as st
-import pandas as pd
 import sys, os; sys.path.insert(0, os.path.dirname(__file__))
 import api
+from _theme import apply_theme, section, divider, kpi_row, pill, status_row, money
 
-st.set_page_config(page_title="Trading System", page_icon="📈", layout="wide")
-st.title("📈 Trading System — Dashboard")
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-# ── Health ────────────────────────────────────────────────────
-try:
-    h = api.health()
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Status", h["status"].upper())
-    col2.metric("Broker", h["broker"].upper())
-    col3.metric("Mode", h["mode"])
-except Exception as e:
-    st.error(f"Cannot reach API: {e}")
+import pandas as pd
+import streamlit as st
+
+ET = ZoneInfo("America/New_York")
+
+apply_theme("Trading System")
+st.title("Trading System")
+
+
+# ── Load everything once (each call is cheap & cached at the API layer) ──
+def _safe(call, default):
+    try:
+        return call()
+    except Exception:
+        return default
+
+
+health = _safe(api.health, None)
+if health is None:
+    st.error("Cannot reach the API. Is the backend running on 127.0.0.1:8001?")
     st.stop()
 
-st.divider()
+risk      = _safe(api.risk_status, {})
+accounts  = _safe(api.account_summary, [])
+positions = _safe(api.positions, [])
+orders    = _safe(api.orders, [])
+autot     = _safe(api.autotrader_status, {"running": False, "traders": {}})
 
-# ── Account ───────────────────────────────────────────────────
-st.subheader("Account")
-try:
-    accounts = api.account_summary()
+
+# ── TOP STRIP — at-a-glance state ───────────────────────────────────────
+now_et = datetime.now(tz=ET).strftime("%H:%M ET · %a %b %d")
+
+api_color    = "green" if health.get("status") == "ok" else "red"
+market_color = "green" if risk.get("market_hours_active") else "grey"
+ks_color     = "red" if risk.get("kill_switch_active") else "green"
+auto_color   = "blue" if autot.get("running") else "grey"
+
+mode_text = "LIVE" if risk.get("is_live") else "Paper"
+mode_color = "red" if risk.get("is_live") else "blue"
+
+status_row([
+    ("API",          health.get("status", "?").upper(),                                   api_color),
+    ("Market",       "OPEN" if risk.get("market_hours_active") else "CLOSED",             market_color),
+    ("Mode",         mode_text,                                                            mode_color),
+    ("Kill switch",  "ACTIVE" if risk.get("kill_switch_active") else "OFF",               ks_color),
+    ("Auto-trader",  f"ON ({len(autot.get('traders', {}))} symbols)" if autot.get("running") else "OFF", auto_color),
+    ("Clock",        now_et,                                                               "grey"),
+])
+
+divider()
+
+
+# ── ZONE 1 (LEFT 2/3) + ZONE 2 (RIGHT 1/3) ──────────────────────────────
+left, right = st.columns([2, 1])
+
+
+# ─── LEFT — P&L + positions ─────────────────────────────────────────────
+with left:
+    section("Today's P&L")
+
+    filled = [o for o in orders if o.get("status") == "filled"]
+    today_str = datetime.now(tz=ET).strftime("%Y-%m-%d")
+
+    def _is_today(o):
+        ts = o.get("created_at") or ""
+        return ts.startswith(today_str)
+
+    today_fills = [o for o in filled if _is_today(o)]
+
+    spent    = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in today_fills if o.get("side") == "BUY")
+    received = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in today_fills if o.get("side") == "SELL")
+    realised = received - spent
+
+    kpi_row([
+        ("Realised P&L (today)", money(realised)),
+        ("Fills today",          str(len(today_fills))),
+        ("Buys",                 str(sum(1 for o in today_fills if o.get("side") == "BUY"))),
+        ("Sells",                str(sum(1 for o in today_fills if o.get("side") == "SELL"))),
+    ])
+
+    # Account equity row
     if accounts:
-        acct = accounts[0]
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Equity", f"${acct['equity']:,.2f}")
-        c2.metric("Cash", f"${acct['cash']:,.2f}")
-        c3.metric("Buying Power", f"${acct['buying_power']:,.2f}")
-        c4.metric("Account", acct["account_id"])
-except Exception as e:
-    st.warning(f"Account data unavailable: {e}")
+        a = accounts[0]
+        kpi_row([
+            ("Equity",        money(a.get("equity"))),
+            ("Cash",          money(a.get("cash"))),
+            ("Buying power",  money(a.get("buying_power"))),
+            ("Account",       str(a.get("account_id", "—"))),
+        ])
 
-st.divider()
+    divider()
 
-# ── Risk Status ───────────────────────────────────────────────
-st.subheader("Risk Engine")
-try:
-    risk = api.risk_status()
+    section("Open Positions", f"{len(positions)} held" if positions else None)
+    if positions:
+        # Tidy column selection so the table is readable
+        df = pd.DataFrame(positions)
+        keep = [c for c in ["symbol", "quantity", "avg_price", "current_price",
+                            "market_value", "unrealized_pl", "unrealized_pl_pct"]
+                if c in df.columns]
+        if keep:
+            df = df[keep]
+            for col in ("avg_price", "current_price", "market_value", "unrealized_pl"):
+                if col in df.columns:
+                    df[col] = df[col].apply(lambda v: money(v) if v is not None else "—")
+            if "unrealized_pl_pct" in df.columns:
+                df["unrealized_pl_pct"] = df["unrealized_pl_pct"].apply(
+                    lambda v: f"{v:+.2f}%" if v is not None else "—"
+                )
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No open positions.")
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Market Hours", "OPEN" if risk["market_hours_active"] else "CLOSED")
-    c2.metric("Orders Today", f"{risk['orders_today']} / {risk['max_orders_per_day']}")
-    c3.metric("Daily Loss", f"${risk['daily_loss_usd']:,.2f}", delta_color="inverse",
-              delta=f"limit ${risk['max_daily_loss_usd']:,.2f}")
-    kill_label = "🔴 ACTIVE" if risk["kill_switch_active"] else "🟢 OFF"
-    c4.metric("Kill Switch", kill_label)
 
-    st.divider()
-    col_a, col_b = st.columns([1, 3])
-    with col_a:
-        if risk["kill_switch_active"]:
-            if st.button("✅ Deactivate Kill Switch", type="primary"):
+# ─── RIGHT — risk + kill switch + auto-trader controls ──────────────────
+with right:
+    section("Risk Budget")
+
+    if risk:
+        orders_used = risk.get("orders_today", 0)
+        orders_max  = risk.get("max_orders_per_day", 1)
+        loss_used   = risk.get("daily_loss_usd", 0)
+        loss_max    = risk.get("max_daily_loss_usd", 1)
+
+        order_pct = min(orders_used / max(orders_max, 1), 1.0)
+        loss_pct  = min(loss_used / max(loss_max, 1), 1.0)
+
+        st.markdown(f"**Orders today** &nbsp; {orders_used} / {orders_max}")
+        st.progress(order_pct)
+
+        st.markdown(f"**Daily loss** &nbsp; {money(loss_used)} / {money(loss_max)}")
+        st.progress(loss_pct)
+
+        # Kill switch button — surfaced here so it's one click from home
+        if risk.get("kill_switch_active"):
+            if st.button("Deactivate kill switch", type="primary", use_container_width=True, key="home_ks_off"):
                 api.set_kill_switch(False)
                 st.rerun()
         else:
-            if st.button("🛑 Activate Kill Switch", type="secondary"):
+            if st.button("Activate kill switch", type="secondary", use_container_width=True, key="home_ks_on"):
                 api.set_kill_switch(True)
                 st.rerun()
-except Exception as e:
-    st.warning(f"Risk data unavailable: {e}")
-
-st.divider()
-
-# ── P&L Summary ───────────────────────────────────────────────
-st.subheader("Trading P&L")
-try:
-    orders = api.orders()
-    filled = [o for o in orders if o.get("status") == "filled"]
-
-    if filled:
-        import json
-        total_spent   = sum(o.get("fill_price", 0) * o.get("quantity", 0)
-                            for o in filled if o.get("side") == "BUY")
-        total_received = sum(o.get("fill_price", 0) * o.get("quantity", 0)
-                             for o in filled if o.get("side") == "SELL")
-        realised_pnl  = total_received - total_spent
-        total_orders  = len(filled)
-        buy_orders    = len([o for o in filled if o.get("side") == "BUY"])
-        sell_orders   = len([o for o in filled if o.get("side") == "SELL"])
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Realised P&L",   f"${realised_pnl:,.2f}",
-                  delta_color="normal" if realised_pnl >= 0 else "inverse")
-        c2.metric("Filled Orders",  total_orders)
-        c3.metric("BUY fills",      buy_orders)
-        c4.metric("SELL fills",     sell_orders)
-
-        # Order history table
-        df = pd.DataFrame(filled)
-        keep = [c for c in ["created_at","symbol","side","quantity","fill_price","status","strategy_name"] if c in df.columns]
-        if keep:
-            df = df[keep]
-            if "fill_price" in df.columns:
-                df["fill_price"] = df["fill_price"].apply(lambda v: f"${v:,.2f}" if v else "—")
-            st.dataframe(df, use_container_width=True, hide_index=True)
     else:
-        st.info("No filled orders yet — P&L will appear here once the bot places trades during market hours.")
-except Exception as e:
-    st.warning(f"P&L data unavailable: {e}")
+        st.warning("Risk data unavailable")
 
-st.divider()
+    divider()
 
-# ── Live Quotes (Schwab real-time) ────────────────────────────
-st.subheader("Live Quotes")
-try:
-    default_symbols = "SPY,QQQ,AAPL,MSFT,NVDA"
-    symbols_input = st.text_input("Symbols (comma-separated)", value=default_symbols, key="quote_symbols")
-    if symbols_input:
-        quotes = api._get(f"/account/quotes?symbols={symbols_input.replace(' ', '')}")
-        if quotes:
-            rows = []
-            for sym, q in quotes.items():
-                bid = q.get("bid")
-                ask = q.get("ask")
-                last = q.get("last")
-                spread = round(ask - bid, 4) if bid and ask else None
-                rows.append({
-                    "Symbol": sym,
-                    "Last": f"${last:,.2f}" if last else "—",
-                    "Bid":  f"${bid:,.2f}"  if bid  else "—",
-                    "Ask":  f"${ask:,.2f}"  if ask  else "—",
-                    "Spread": f"${spread:,.4f}" if spread else "—",
-                    "Volume": f"{int(q.get('volume', 0) or 0):,}",
-                })
-            st.dataframe(rows, use_container_width=True, hide_index=True)
-        else:
-            st.info("No quote data returned.")
-except Exception as e:
-    st.warning(f"Live quotes unavailable: {e}")
-
-st.divider()
-
-# ── Positions ─────────────────────────────────────────────────
-st.subheader("Open Positions")
-try:
-    pos = api.positions()
-    if pos:
-        st.dataframe(pd.DataFrame(pos), use_container_width=True)
+    section("Auto-trader")
+    if autot.get("running"):
+        traders = autot.get("traders", {})
+        symbols = ", ".join(traders.keys()) or "—"
+        st.markdown(pill(f"ON — {len(traders)} symbol(s)", "green"), unsafe_allow_html=True)
+        st.caption(symbols)
+        if st.button("Stop (keep positions)", use_container_width=True, key="home_auto_stop"):
+            api.autotrader_stop(flatten=False)
+            st.rerun()
     else:
-        st.info("No open positions.")
-except Exception as e:
-    st.warning(f"Positions unavailable: {e}")
+        st.markdown(pill("OFF", "grey"), unsafe_allow_html=True)
+        st.caption("Start on the Day Trading page.")
+
+
+divider()
+
+
+# ── BOTTOM — recent fills (compact) ──────────────────────────────────────
+section("Recent Fills", "Last 10 across all strategies")
+
+if filled:
+    recent = sorted(filled, key=lambda o: o.get("created_at") or "", reverse=True)[:10]
+    rows = []
+    for o in recent:
+        rows.append({
+            "Time":       (o.get("created_at") or "")[11:19],
+            "Date":       (o.get("created_at") or "")[:10],
+            "Symbol":     o.get("symbol", "—"),
+            "Side":       o.get("side", "—"),
+            "Qty":        o.get("quantity", "—"),
+            "Fill":       money(o.get("fill_price")),
+            "Strategy":   o.get("strategy_name") or "—",
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+else:
+    st.info("No fills yet.")

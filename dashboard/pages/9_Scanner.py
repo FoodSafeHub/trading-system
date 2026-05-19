@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
+from _theme import apply_theme
 
 import pandas as pd
 import streamlit as st
@@ -21,8 +24,8 @@ def _fmt_et(ts) -> str:
         return str(ts)[:19].replace("T", " ")
 
 
-st.set_page_config(page_title="Market Scanner", page_icon="🔭", layout="wide")
-st.title("🔭 Market Scanner")
+apply_theme("Market Scanner")
+st.title("Market Scanner")
 st.caption("Scans a universe of stocks for strategy signals, scores them, and shows the top candidates.")
 
 
@@ -30,7 +33,7 @@ def _show_candidates(candidates):
     rows = []
     for c in candidates:
         direction = c.get("direction", "")
-        dir_label = "🟢 BUY" if direction == "BUY" else ("🔴 SELL" if direction == "SELL" else direction)
+        dir_label = direction
         rows.append({
             "Symbol":       c["symbol"],
             "Direction":    dir_label,
@@ -40,7 +43,7 @@ def _show_candidates(candidates):
             "Avg Volume":   f"{int(c['avg_volume'] or 0):,}" if c.get("avg_volume") else "—",
             "Universe":     c.get("universe", "—"),
             "Reason":       c.get("reason", "—"),
-            "Auto-Traded":  "✅" if c.get("auto_traded") else "—",
+            "Auto-Traded":  "yes" if c.get("auto_traded") else "—",
             "Scanned At":   _fmt_et(c.get("scanned_at")),
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -50,7 +53,7 @@ def _show_candidates(candidates):
 try:
     status = api._get("/scanner/status")
     c1, c2, c3 = st.columns(3)
-    c1.metric("Scanner", "🟡 Running..." if status["running"] else "🟢 Ready")
+    c1.metric("Scanner", "Running..." if status["running"] else "Ready")
     c2.metric("Last Scan", _fmt_et(status["last_scan"]) if status["last_scan"] else "Never")
     c3.metric("Last Matches", status["last_matches"] or 0)
 except Exception as e:

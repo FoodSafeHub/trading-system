@@ -98,13 +98,32 @@ def get_market_status() -> dict[str, Any]:
 @router.get("/scanner/watchlist")
 def scanner_watchlist(
     max_symbols: int = Query(20, description="Max symbols to return"),
-    universe: str = Query("", description="Comma-separated override universe; empty = default"),
+    universe: str = Query("", description="Comma-separated override universe; empty = full US-listed"),
     market_state: str = Query("", description="Force a market state (TREND_UP etc.); empty = auto"),
+    min_price: float = Query(5.0, description="Minimum last price ($)"),
+    max_price: float | None = Query(None, description="Maximum last price ($); null = no cap"),
+    min_avg_volume: float = Query(1_000_000, description="Minimum 30-day average daily volume"),
+    min_float: float | None = Query(None, description="Minimum shares float; null = no floor"),
+    max_float: float | None = Query(None, description="Maximum shares float; null = no cap"),
+    universe_max_symbols: int | None = Query(None, description="Cap total universe size; null = all (~5,800)"),
 ) -> list[dict[str, Any]]:
-    """Pre-market scanner: ranked watchlist with scores, tags, and strategy buckets."""
+    """Pre-market scanner: ranked watchlist with scores, tags, and strategy buckets.
+
+    The default universe is the full US-listed common-stock universe
+    (~5,800 names from NASDAQ Trader, refreshed daily). Use ``universe`` to
+    pass a comma-separated override.
+    """
     from app.services.strategy.daytrading.scanners import DayTradingScanner, DayTradingScannerConfig
     sym_list = [s.strip().upper() for s in universe.split(",") if s.strip()] or None
-    scanner = DayTradingScanner(config=DayTradingScannerConfig(), universe=sym_list)
+    cfg = DayTradingScannerConfig(
+        min_price=min_price,
+        max_price=max_price,
+        min_avg_volume=min_avg_volume,
+        min_float=min_float,
+        max_float=max_float,
+        universe_max_symbols=universe_max_symbols,
+    )
+    scanner = DayTradingScanner(config=cfg, universe=sym_list)
     state = market_state.strip() or None
     results = scanner.get_intraday_watchlist(max_symbols=max_symbols, market_state=state)
     return [r.to_dict() for r in results]

@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
+from _theme import apply_theme
 
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Orders", page_icon="📋", layout="wide")
-st.title("📋 Orders")
+apply_theme("Orders")
+st.title("Orders")
 
 # ══════════════════════════════════════════════════════════════
 # SECTION 1 — PLACE MANUAL ORDER
 # ══════════════════════════════════════════════════════════════
-with st.expander("➕ Place Manual Order", expanded=False):
+with st.expander("Place Manual Order", expanded=False):
     st.caption("Routed through the full risk engine — order will be blocked if kill switch is active or outside market hours.")
     with st.form("manual_order"):
         c1, c2, c3, c4, c5 = st.columns(5)

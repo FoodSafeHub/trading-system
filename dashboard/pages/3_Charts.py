@@ -5,9 +5,10 @@ import streamlit.components.v1 as components
 
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
+from _theme import apply_theme
 
-st.set_page_config(page_title="Charts", page_icon="📊", layout="wide")
-st.title("📊 Price Charts")
+apply_theme("Charts")
+st.title("Price Charts")
 
 col1, col2 = st.columns([2, 6])
 with col1:

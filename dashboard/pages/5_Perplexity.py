@@ -16,8 +16,10 @@ import pandas as pd
 
 from app.config import get_settings
 
-st.set_page_config(page_title="Perplexity Strategies", page_icon="🧠", layout="wide")
-st.title("🧠 Perplexity Swing Strategies")
+from _theme import apply_theme  # noqa: E402
+
+apply_theme("Perplexity Strategies")
+st.title("Perplexity Swing Strategies")
 st.caption(
     "8 swing trading strategies — EMA mean reversion, MA crossover, consolidation breakout, "
     "BB mean reversion, Fibonacci pullback, RSI swing reversal, Supertrend, and BB breakout. "
@@ -257,9 +259,9 @@ with tab_signals:
                 if sz:
                     st.divider()
                     if not sz["viable"]:
-                        st.warning(f"⚠️ Position sizing skipped: {sz['skip_reason']}")
+                        st.warning(f"Position sizing skipped: {sz['skip_reason']}")
                     else:
-                        st.markdown("**📐 Position Size (based on your account settings)**")
+                        st.markdown("**Position Size (based on your account settings)**")
                         s1, s2, s3, s4 = st.columns(4)
                         s1.metric("Shares to Buy",    f"{sz['shares']:,.4f}")
                         s2.metric("Position Value",   f"${sz['position_value']:,.2f}")
@@ -270,7 +272,7 @@ with tab_signals:
                               if s.get("target_price") and sz["stop_distance"] > 0 else None)
                         s4.metric("Risk:Reward", f"1 : {rr:.1f}" if rr else "—")
                         if sz["capped"]:
-                            st.caption(f"ℹ️ {sz['cap_reason']}")
+                            st.caption(sz['cap_reason'])
 
                 if s["indicators"] and direction != "HOLD":
                     with st.expander("Indicator values", expanded=False):
@@ -284,7 +286,7 @@ from app.services.strategy.perplexity.runner import PERPLEXITY_STRATEGIES as _AL
 _STRATEGY_NAMES = [s.name for s in _ALL_STRATEGIES]
 
 with tab_scanner:
-    st.subheader("🔭 Market Scanner")
+    st.subheader("Market Scanner")
     st.caption(
         "Enter any tickers you want to scan. Live prices are fetched from Schwab; "
         "historical bars (indicators) come from yfinance. Results show actionable signals ready for auto-trading."
@@ -434,7 +436,7 @@ with tab_scanner:
 # TAB 3 — POSITION SIZER
 # ══════════════════════════════════════════════════════════════
 with tab_sizer:
-    st.subheader("📐 Position Sizer")
+    st.subheader("Position Sizer")
     st.caption(
         "Enter a symbol to auto-load the current price and ATR-based stop suggestions. "
         "The system calculates shares so you risk a fixed % of your account — no guessing."
@@ -579,7 +581,7 @@ If the stop is hit you lose ~1% of your account. If the target is hit you typica
     if r:
         st.divider()
         if not r["viable"]:
-            st.error(f"❌ Cannot size this trade: {r['skip_reason']}")
+            st.error(f"Cannot size this trade: {r['skip_reason']}")
             if "too wide" in r.get("skip_reason", ""):
                 st.info("Tip: your stop is more than 20% below entry — try using a tighter stop (1× or 1.5× ATR).")
             elif "too tight" in r.get("skip_reason", ""):
@@ -609,7 +611,7 @@ If the stop is hit you lose ~1% of your account. If the target is hit you typica
                 m5.metric("Risk : Reward", "—")
 
             if r["capped"]:
-                st.warning(f"⚠️ Position capped: {r['cap_reason']}")
+                st.warning(f"Position capped: {r['cap_reason']}")
 
             st.divider()
             st.markdown("**Full breakdown**")
@@ -941,7 +943,7 @@ with tab_compare:
         wf_errors = [r for r in wf_cmp["data"] if r.get("error")]
 
         for e in wf_errors:
-            st.warning(f"⚠️ {e['strategy_name']}: {e['error']}")
+            st.warning(f"{e['strategy_name']}: {e['error']}")
 
         if wf_data:
             def _wfe_badge(wfe, label):
@@ -1406,7 +1408,7 @@ with tab_walkforward:
             return fallback
 
         if _baf_profile:
-            st.info(f"✅ Loaded saved profile for **{wf_strat} / {baf_sym}** — filter defaults pre-filled from calibration results.")
+            st.info(f"Loaded saved profile for **{wf_strat} / {baf_sym}** — filter defaults pre-filled from calibration results.")
         else:
             st.warning(f"No saved profile found for **{wf_strat} / {baf_sym}**. Run Auto-Calibrate in the Symbol Profiles tab first for best results. Using strategy defaults.")
 
@@ -1587,7 +1589,7 @@ with tab_walkforward:
 # TAB 7 — SYMBOL PROFILES
 # ══════════════════════════════════════════════════════════════
 with tab_profiles:
-    st.subheader("🎯 Per-Symbol Filter Profiles")
+    st.subheader("Per-Symbol Filter Profiles")
     st.caption(
         "Each symbol gets its own calibrated entry filters for EMA Mean Reversion. "
         "Run **Auto-Calibrate** on any symbol — it analyzes winning vs losing trades, "
@@ -1633,7 +1635,7 @@ with tab_profiles:
                 cal_result = api.perplexity_calibrate(prof_strat, cal_sym, period=cal_period,
                                                       initial_capital=cal_capital, verify_wf=cal_verify)
                 st.session_state["cal_result"] = cal_result
-                st.success(f"✅ Profile saved for {cal_sym}!")
+                st.success(f"Profile saved for {cal_sym}.")
             except Exception as e:
                 st.error(f"Calibration failed: {e}")
 
@@ -1716,9 +1718,9 @@ with tab_profiles:
                       delta_color="normal" if (ver.get("oos_cagr_after") or 0) >= (ver.get("oos_cagr_before") or 0) else "inverse")
 
             if ver.get("verified"):
-                st.success("✅ Verified — filters improve walk-forward performance. Profile is active.")
+                st.success("Verified — filters improve walk-forward performance. Profile is active.")
             else:
-                st.warning("⚠️ Filters did not clearly improve walk-forward on this symbol. "
+                st.warning("Filters did not clearly improve walk-forward on this symbol. "
                            "Profile saved but treat with caution — consider disabling individual filters.")
 
     # ── Saved profiles table ──────────────────────────────────

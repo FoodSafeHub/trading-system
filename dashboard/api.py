@@ -258,12 +258,54 @@ def perplexity_save_suitability(config: dict):
 
 # ── Day-trading market scanner ────────────────────────────────────
 
-def daytrading_scanner_watchlist(max_symbols: int = 20, universe: str = "", market_state: str = ""):
-    return _get("/daytrading/scanner/watchlist", timeout=120, params={
+def daytrading_scanner_watchlist(
+    max_symbols: int = 20,
+    universe: str = "",
+    market_state: str = "",
+    min_price: float = 5.0,
+    max_price: float | None = None,
+    min_avg_volume: float = 1_000_000,
+    min_float: float | None = None,
+    max_float: float | None = None,
+    universe_max_symbols: int | None = None,
+    timeout: int = 300,
+):
+    params: dict = {
         "max_symbols": max_symbols,
         "universe": universe,
         "market_state": market_state,
-    })
+        "min_price": min_price,
+        "min_avg_volume": min_avg_volume,
+    }
+    if max_price is not None:
+        params["max_price"] = max_price
+    if min_float is not None:
+        params["min_float"] = min_float
+    if max_float is not None:
+        params["max_float"] = max_float
+    if universe_max_symbols is not None:
+        params["universe_max_symbols"] = universe_max_symbols
+    return _get("/daytrading/scanner/watchlist", timeout=timeout, params=params)
 
 def daytrading_scanner_metrics(symbol: str):
     return _get(f"/daytrading/scanner/metrics/{symbol}", timeout=60)
+
+# ── Day-trading auto-trader switch ────────────────────────────────────
+
+def autotrader_status():
+    return _get("/daytrading/autotrader/status")
+
+def autotrader_start(config: dict):
+    return _post("/daytrading/autotrader/start", json=config)
+
+def autotrader_stop(flatten: bool = False):
+    return _post(f"/daytrading/autotrader/stop?flatten={str(flatten).lower()}")
+
+def autotrader_flatten(symbol: str | None = None):
+    path = "/daytrading/autotrader/flatten"
+    if symbol:
+        path += f"?symbol={symbol}"
+    return _post(path)
+
+def daytrading_market_status():
+    return _get("/daytrading/market-status")

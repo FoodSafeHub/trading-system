@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
+from _theme import apply_theme
 
 import plotly.graph_objects as go
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Backtest", page_icon="🔬", layout="wide")
-st.title("🔬 Strategy Backtester")
+apply_theme("Backtest")
+st.title("Strategy Backtester")
 st.caption("Simulates how a strategy would have performed on historical data — no real money involved.")
 
 # ── New strategy metadata ──────────────────────────────────────────────────────
