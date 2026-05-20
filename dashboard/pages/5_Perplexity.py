@@ -9,6 +9,7 @@ sys.path.insert(0, workspace_root)
 sys.path.insert(0, dashboard_root)
 
 import api
+import _charts as charts
 
 import plotly.graph_objects as go
 import streamlit as st
@@ -142,41 +143,17 @@ def _breakdown_tables(bd: dict):
 
 
 def _plot_equity_curve(result: dict, height: int = 380, show_markers: bool = True) -> None:
-    """Render a dark-themed equity curve from a backtest result dict."""
+    """Render the equity curve as OHLC candles + drawdown ribbon + trade markers."""
     if not result.get("equity_curve"):
         return
-    eq_df = pd.DataFrame(result["equity_curve"])
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=eq_df["date"], y=eq_df["equity"],
-        fill="tozeroy", fillcolor="rgba(0,212,170,0.08)",
-        line=dict(color="#00d4aa", width=2), name="Portfolio Value",
-    ))
-    if result.get("initial_capital"):
-        fig.add_hline(y=result["initial_capital"], line_dash="dash",
-                      line_color="rgba(255,255,255,0.3)", annotation_text="Starting Capital")
-    if show_markers and result.get("trades"):
-        buys  = [t for t in result["trades"] if t["side"] == "BUY"]
-        sells = [t for t in result["trades"] if "SELL" in t["side"]]
-        if buys:
-            bx = [t["date"] for t in buys]
-            by = [next((e["equity"] for e in result["equity_curve"] if e["date"] == d), None) for d in bx]
-            fig.add_trace(go.Scatter(x=bx, y=by, mode="markers",
-                marker=dict(symbol="triangle-up", size=10, color="#00d4aa"), name="BUY"))
-        if sells:
-            sx = [t["date"] for t in sells]
-            sy = [next((e["equity"] for e in result["equity_curve"] if e["date"] == d), None) for d in sx]
-            fig.add_trace(go.Scatter(x=sx, y=sy, mode="markers",
-                marker=dict(symbol="triangle-down", size=10, color="#ff4b4b"), name="SELL"))
-    fig.update_layout(
-        height=height, template="plotly_dark",
-        margin=dict(l=0, r=0, t=20, b=0),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        yaxis_tickprefix="$",
+    charts.render_equity_chart(
+        result["equity_curve"],
+        trades=result.get("trades", []) if show_markers else None,
+        initial_capital=result.get("initial_capital"),
+        title=f"Equity — {result.get('strategy_name', result.get('symbol', 'Backtest'))}",
+        height=max(height, 420),
+        bucket="W",
     )
-    fig.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-    fig.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
-    st.plotly_chart(fig, use_container_width=True)
 
 
 # ── Tab layout ────────────────────────────────────────────────

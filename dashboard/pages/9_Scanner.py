@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
 from _theme import apply_theme
+import _charts as charts
 
 import pandas as pd
 import streamlit as st
@@ -29,7 +30,20 @@ st.title("Market Scanner")
 st.caption("Scans a universe of stocks for strategy signals, scores them, and shows the top candidates.")
 
 
-def _show_candidates(candidates):
+_EXCHANGE_GUESS = {
+    "SPY": "AMEX", "QQQ": "NASDAQ", "IWM": "AMEX",
+}
+_NYSE_HINTS = {"JPM","BAC","GS","MS","WFC","XOM","CVX","JNJ","UNH","V","MA"}
+
+
+def _tv_symbol(sym: str) -> str:
+    s = sym.upper()
+    if s in _EXCHANGE_GUESS:
+        return f"{_EXCHANGE_GUESS[s]}:{s}"
+    return f"NYSE:{s}" if s in _NYSE_HINTS else f"NASDAQ:{s}"
+
+
+def _show_candidates(candidates, *, key_prefix: str = "cands"):
     rows = []
     for c in candidates:
         direction = c.get("direction", "")
@@ -47,6 +61,52 @@ def _show_candidates(candidates):
             "Scanned At":   _fmt_et(c.get("scanned_at")),
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # ── Inline candle drill-in for any candidate ──────────────────────────
+    if not candidates:
+        return
+    symbols = sorted({c["symbol"] for c in candidates if c.get("symbol")})
+    if not symbols:
+        return
+    st.markdown("#### Inspect a candidate on candles")
+    pick = st.selectbox(
+        "Symbol", symbols, index=0, key=f"{key_prefix}_pick",
+        help="Pulls daily OHLCV from the backend and renders candles + EMAs/VWAP/Bollinger "
+              "plus RSI and MACD panes.",
+    )
+    view = st.radio(
+        "View", ["Native candles + indicators", "TradingView mini"],
+        horizontal=True, key=f"{key_prefix}_view",
+    )
+    if view == "TradingView mini":
+        charts.tradingview_mini(_tv_symbol(pick), height=320)
+    else:
+        try:
+            payload = api.chart_data(pick, period="6mo")
+        except Exception as e:
+            st.caption(f"Could not load OHLC for {pick}: {e}")
+            return
+        if not payload or not payload.get("dates"):
+            st.caption(f"No OHLC available for {pick}.")
+            return
+
+        # Pin a marker at today's bar for the scanned direction so traders see
+        # *where* the scanner says to act.
+        cand = next((c for c in candidates if c["symbol"] == pick), {})
+        scan_trade = []
+        if cand.get("price"):
+            scan_trade.append({
+                "date":  payload["dates"][-1],
+                "side":  "BUY" if str(cand.get("direction", "")).upper() == "BUY" else "SELL",
+                "price": cand["price"],
+            })
+        charts.render_price_chart(
+            payload,
+            trades=scan_trade,
+            overlays=("ema21", "ema50", "vwap", "bb_upper", "bb_lower"),
+            include_volume=True, include_rsi=True, include_macd=True,
+            title=f"{pick} — last 6mo (scanner candidate)",
+        )
 
 
 # ── Scanner status ─────────────────────────────────────────────────────────
@@ -123,7 +183,7 @@ if run_btn:
                 )
                 if result["top_candidates"]:
                     st.subheader(f"Top {len(result['top_candidates'])} Candidates")
-                    _show_candidates(result["top_candidates"])
+                    _show_candidates(result["top_candidates"], key_prefix="run_cands")
                 else:
                     st.warning("No symbols met the signal criteria in this scan.")
         except Exception as e:
@@ -137,7 +197,7 @@ st.subheader("Recent Scan Results")
 try:
     results = api._get("/scanner/results?limit=50")
     if results:
-        _show_candidates(results)
+        _show_candidates(results, key_prefix="recent_cands")
     else:
         st.info("No scan results yet. Run a scan above or wait for the auto-scheduler (runs every 15 min during market hours).")
 except Exception as e:

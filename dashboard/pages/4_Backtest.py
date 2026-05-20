@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
 from _theme import apply_theme
+import _charts as charts
 
 import plotly.graph_objects as go
 import streamlit as st
@@ -259,59 +260,92 @@ def _render_regime_panel(trades: list, period: str) -> None:
     c3.metric("Total Trades", len(regime_trades))
 
 
-# ── Equity chart ───────────────────────────────────────────────────────────────
+# ── Equity + price-action charts ───────────────────────────────────────────────
 
-def _equity_chart(r: dict) -> None:
+def _resolve_symbol(r: dict) -> str | None:
+    """Best-effort: pull the symbol from the result dict or trades."""
+    sym = r.get("symbol") or r.get("ticker")
+    if sym:
+        return str(sym).upper()
+    trades = r.get("trades") or []
+    for t in trades:
+        if t.get("symbol"):
+            return str(t["symbol"]).upper()
+    return None
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _fetch_chart(symbol: str, period: str) -> dict | None:
+    try:
+        return api.chart_data(symbol, period=period)
+    except Exception:
+        return None
+
+
+def _equity_chart(r: dict, *, symbol: str | None = None, period: str = "1y") -> None:
     if not r.get("equity_curve"):
         return
     st.divider()
-    st.subheader("Equity Curve")
-    eq_df = pd.DataFrame(r["equity_curve"])
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=eq_df["date"], y=eq_df["equity"],
-        fill="tozeroy",
-        fillcolor="rgba(0,212,170,0.1)",
-        line=dict(color="#00d4aa", width=2),
-        name="Portfolio Value",
-    ))
-    fig.add_hline(y=r["initial_capital"], line_dash="dash",
-                  line_color="rgba(255,255,255,0.3)",
-                  annotation_text="Starting Capital")
-
-    trades = r.get("trades", [])
-    buys  = [t for t in trades if t["side"] == "BUY"]
-    sells = [t for t in trades if "SELL" in str(t["side"])]
-
-    if buys:
-        buy_dates  = [t["date"] for t in buys]
-        buy_equity = [next((e["equity"] for e in r["equity_curve"] if e["date"] == d), None) for d in buy_dates]
-        fig.add_trace(go.Scatter(
-            x=buy_dates, y=buy_equity, mode="markers",
-            marker=dict(symbol="triangle-up", size=10, color="#00d4aa"),
-            name="BUY",
-        ))
-
-    if sells:
-        sell_dates  = [t["date"] for t in sells]
-        sell_equity = [next((e["equity"] for e in r["equity_curve"] if e["date"] == d), None) for d in sell_dates]
-        fig.add_trace(go.Scatter(
-            x=sell_dates, y=sell_equity, mode="markers",
-            marker=dict(symbol="triangle-down", size=10, color="#ff4b4b"),
-            name="SELL",
-        ))
-
-    fig.update_layout(
-        height=400, template="plotly_dark",
-        margin=dict(l=0, r=0, t=20, b=0),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        yaxis_tickprefix="$",
+    st.subheader("Equity Curve — OHLC view")
+    st.caption(
+        "Equity track resampled into weekly OHLC candles with the daily mark-to-market line "
+        "behind it. Green/red triangles mark BUY/SELL fills; the lower ribbon shows running drawdown."
     )
-    fig.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-    fig.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
-    st.plotly_chart(fig, use_container_width=True)
+
+    bucket_label = st.radio(
+        "Candle aggregation",
+        ["Daily", "Weekly", "Monthly"],
+        index=1, horizontal=True, key=f"eq_bucket_{r.get('strategy_name', 'x')}",
+    )
+    bucket = {"Daily": "D", "Weekly": "W", "Monthly": "M"}[bucket_label]
+
+    charts.render_equity_chart(
+        r["equity_curve"],
+        trades=r.get("trades", []),
+        initial_capital=r.get("initial_capital"),
+        title=f"Equity — {r.get('strategy_name', '')}",
+        bucket=bucket,
+        height=480,
+    )
+
+
+def _price_action_chart(r: dict, symbol: str | None, period: str) -> None:
+    """Render the underlying price as candlesticks with trade markers + indicators."""
+    if not symbol:
+        return
+    payload = _fetch_chart(symbol, period)
+    if not payload or not payload.get("dates"):
+        st.caption(f"No OHLC data available for {symbol} — skipping price-action chart.")
+        return
+
+    st.divider()
+    st.subheader(f"Price Action — {symbol} with Trade Markers")
+    st.caption(
+        "Candlesticks show daily OHLC for the backtest window. BUY triangles sit at the fill price; "
+        "the lower panes show RSI(14) and MACD so you can read each entry in context."
+    )
+
+    overlay_choices = st.multiselect(
+        "Indicator layers",
+        options=["ema9", "ema21", "ema50", "ema200", "vwap", "bb_upper", "bb_lower", "supertrend"],
+        default=["ema21", "ema50", "vwap"],
+        format_func=lambda k: {
+            "ema9": "EMA 9", "ema21": "EMA 21", "ema50": "EMA 50", "ema200": "EMA 200",
+            "vwap": "VWAP", "bb_upper": "Bollinger ↑", "bb_lower": "Bollinger ↓",
+            "supertrend": "Supertrend",
+        }[k],
+        key=f"price_overlays_{symbol}",
+    )
+
+    charts.render_price_chart(
+        payload,
+        trades=r.get("trades", []),
+        overlays=tuple(overlay_choices),
+        include_volume=True,
+        include_rsi=True,
+        include_macd=True,
+        title=f"{symbol} — {period}",
+    )
 
 
 def _side_tag(v: str) -> str:
@@ -529,7 +563,8 @@ if mode == "Single Strategy":
 
     _render_regime_panel(r.get("trades", []), period)
     _render_filter_summary(chosen_sym)
-    _equity_chart(r)
+    _equity_chart(r, symbol=chosen_sym, period=period)
+    _price_action_chart(r, chosen_sym, period)
     _single_trades_table(r["trades"])
 
 
@@ -633,5 +668,6 @@ else:
 
     _render_regime_panel(r.get("trades", []), period)
     _render_filter_summary(chosen_sym)
-    _equity_chart(r)
+    _equity_chart(r, symbol=chosen_sym, period=period)
+    _price_action_chart(r, chosen_sym, period)
     _consensus_trades_table(r["trades"])

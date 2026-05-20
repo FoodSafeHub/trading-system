@@ -37,6 +37,7 @@ from app.services.strategy.daytrading.strategies import ALL_STRATEGIES, STRATEGY
 
 sys.path.insert(0, dashboard_root)
 from _theme import apply_theme  # noqa: E402
+import _charts as charts  # noqa: E402
 
 apply_theme("Day Trading")
 st.title("Day Trading")
@@ -181,31 +182,87 @@ def _cached_scan(symbols_str: str) -> list:
 
 
 def _equity_chart(equity_curve: list, trades: list) -> go.Figure:
+    """Equity track for day-trading backtests as OHLC candles with WIN/LOSS markers.
+
+    The runner returns a flat list of floats (one per trade close); we synthesise
+    a date axis (one trading day per step) and resample into 5-trade buckets so
+    the chart reads as proper candlesticks rather than a noisy step line.
+    """
+    if not equity_curve or len(equity_curve) < 2:
+        fig = go.Figure()
+        fig.add_annotation(text="No equity data", showarrow=False)
+        fig.update_layout(template="plotly_dark", height=320,
+                          margin=dict(l=0, r=0, t=30, b=0), title="Equity Curve")
+        return fig
+
+    # Build a synthetic date axis (1 bar per equity step). Bucket every 5 steps
+    # into an OHLC candle — the underlying daily line stays visible behind it.
+    base = pd.Timestamp.today().normalize() - pd.Timedelta(days=len(equity_curve))
+    dates = pd.date_range(base, periods=len(equity_curve), freq="D")
+    eq_series = pd.Series(equity_curve, index=dates, name="equity")
+    bucket = max(1, len(equity_curve) // 30)  # ~30 candles regardless of length
+    resampled = eq_series.resample(f"{bucket}D").ohlc().dropna()
+
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        y=equity_curve, mode="lines",
-        line=dict(color="#00d4aa", width=2),
+    fig.add_trace(go.Candlestick(
+        x=resampled.index,
+        open=resampled["open"], high=resampled["high"],
+        low=resampled["low"],   close=resampled["close"],
         name="Equity",
+        increasing=dict(line=dict(color=charts.GREEN, width=1), fillcolor=charts.GREEN),
+        decreasing=dict(line=dict(color=charts.RED,   width=1), fillcolor=charts.RED),
     ))
-    buy_x = [i for i, t in enumerate(trades) if t["direction"] == "BUY" and t["pnl"] > 0]
-    buy_y = [equity_curve[i] for i in buy_x]
-    sell_x = [i for i, t in enumerate(trades) if t["pnl"] <= 0]
-    sell_y = [equity_curve[i] for i in sell_x]
-    if buy_x:
-        fig.add_trace(go.Scatter(x=buy_x, y=buy_y, mode="markers",
-                                  marker=dict(color="#00d4aa", size=8, symbol="triangle-up"),
-                                  name="Win"))
-    if sell_x:
-        fig.add_trace(go.Scatter(x=sell_x, y=sell_y, mode="markers",
-                                  marker=dict(color="#ff4b4b", size=8, symbol="triangle-down"),
-                                  name="Loss"))
+    fig.add_trace(go.Scatter(
+        x=dates, y=equity_curve, mode="lines",
+        line=dict(color="rgba(38,166,154,0.55)", width=1.2),
+        name="Equity (per-trade)",
+        hovertemplate="$%{y:,.2f}<extra></extra>",
+    ))
+
+    win_idx  = [i for i, t in enumerate(trades) if t.get("pnl", 0) > 0]
+    loss_idx = [i for i, t in enumerate(trades) if t.get("pnl", 0) <= 0]
+    # The equity track records mark-to-market AFTER each trade closes, so the
+    # marker sits at equity_curve[i+1] (post-trade equity).
+    def _eq_at(i):
+        j = min(i + 1, len(equity_curve) - 1)
+        return equity_curve[j]
+
+    if win_idx:
+        fig.add_trace(go.Scatter(
+            x=[dates[min(i + 1, len(dates) - 1)] for i in win_idx],
+            y=[_eq_at(i) for i in win_idx],
+            mode="markers",
+            marker=dict(symbol="triangle-up", size=11, color=charts.GREEN,
+                        line=dict(color="rgba(0,0,0,0.6)", width=1)),
+            name="Winner",
+            text=[f"{trades[i].get('direction','')} +${trades[i].get('pnl',0):.2f}" for i in win_idx],
+            hovertemplate="%{text}<br>Equity $%{y:,.2f}<extra></extra>",
+        ))
+    if loss_idx:
+        fig.add_trace(go.Scatter(
+            x=[dates[min(i + 1, len(dates) - 1)] for i in loss_idx],
+            y=[_eq_at(i) for i in loss_idx],
+            mode="markers",
+            marker=dict(symbol="triangle-down", size=11, color=charts.RED,
+                        line=dict(color="rgba(0,0,0,0.6)", width=1)),
+            name="Loser",
+            text=[f"{trades[i].get('direction','')} ${trades[i].get('pnl',0):.2f}" for i in loss_idx],
+            hovertemplate="%{text}<br>Equity $%{y:,.2f}<extra></extra>",
+        ))
+
     fig.update_layout(
         template="plotly_dark",
-        height=350,
-        margin=dict(l=0, r=0, t=30, b=0),
-        showlegend=True,
-        title="Equity Curve",
+        paper_bgcolor=charts.BG, plot_bgcolor=charts.BG,
+        height=420,
+        margin=dict(l=8, r=8, t=40, b=8),
+        title=dict(text="Equity Curve — OHLC", x=0.01, y=0.97, font=dict(size=14)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1,
+                     bgcolor="rgba(0,0,0,0)"),
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
     )
+    fig.update_xaxes(gridcolor=charts.GRID, zeroline=False)
+    fig.update_yaxes(gridcolor=charts.GRID, zeroline=False, tickprefix="$")
     return fig
 
 
@@ -445,6 +502,38 @@ with tab_signals:
         m4.metric("Raw BUY",            result.get("diagnostics", {}).get("signals", {}).get("raw_buy_signals", 0))
         m5.metric("Raw SELL",           result.get("diagnostics", {}).get("signals", {}).get("raw_sell_signals", 0))
         m6.metric("Regime",             _regime_badge(regime))
+
+        # ── Intraday candlestick with signal markers ─────────────────────────
+        try:
+            intraday_df = fetch_intraday(symbol_input, interval="5m", period="5d")
+        except Exception:
+            intraday_df = None
+        if intraday_df is not None and not intraday_df.empty:
+            # Combine accepted + rejected signals so traders can see both on the chart.
+            combined_signals = []
+            for s in signals:
+                combined_signals.append({
+                    "timestamp": s.get("timestamp") or s.get("bar_time") or s.get("entry_time"),
+                    "direction": s.get("direction"),
+                    "entry_price": s.get("entry_price"),
+                })
+            for s in rejected:
+                combined_signals.append({
+                    "timestamp": s.get("timestamp") or s.get("bar_time"),
+                    "direction": s.get("direction"),
+                    "entry_price": s.get("entry_price"),
+                })
+            st.markdown("### Price Action — 5m Candles")
+            st.caption(
+                "Latest 5m bars for the symbol with accepted (and rejected) signal markers anchored "
+                "to the entry price. Read each fill in context: where in the range, what the bar shape "
+                "looked like, where VWAP sat."
+            )
+            fig_intraday = charts.intraday_candles(
+                intraday_df, signals=combined_signals,
+                title=f"{symbol_input} — 5m", height=520,
+            )
+            st.plotly_chart(fig_intraday, use_container_width=True, theme=None)
 
         # ── Pipeline diagnostics panel ────────────────────────────────────────
         diag_data = result.get("diagnostics", {})

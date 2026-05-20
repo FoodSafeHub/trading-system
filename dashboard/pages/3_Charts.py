@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
 from _theme import apply_theme
+import _charts as charts
 
 apply_theme("Charts")
 st.title("Price Charts")
@@ -15,7 +15,11 @@ with col1:
     symbol = st.text_input("Symbol", value="SPY", placeholder="AAPL, NVDA, SPY …").upper().strip() or "SPY"
 with col2:
     st.write("")
-    st.caption("Change the symbol above to update financials. To change the chart symbol without losing indicators, use the search bar **inside** the chart. Log in to TradingView inside the chart to save your indicator layout permanently.")
+    st.caption(
+        "Two engines: **TradingView** for live streaming candlesticks + drawing tools, and "
+        "**Schwab-style native candles** (Plotly) for our own indicators and recent strategy signals. "
+        "Use the search bar inside the TradingView chart to change symbol without losing studies."
+    )
 
 # ── Build watchlist: assigned symbols first, then defaults ────────
 _EXCHANGE_MAP = {
@@ -34,73 +38,88 @@ except Exception:
 def _tv_sym(sym):
     if sym in _EXCHANGE_MAP:
         return f"{_EXCHANGE_MAP[sym]}:{sym}"
-    # NYSE-listed ETFs and financials vs NASDAQ tech — best-effort default
     _nyse = {"JPM","BAC","GS","MS","WFC","XOM","CVX","JNJ","UNH","V","MA"}
     return f"NYSE:{sym}" if sym in _nyse else f"NASDAQ:{sym}"
 
 _assigned_tv  = [_tv_sym(s) for s in _assigned_syms]
 _extra        = [s for s in _DEFAULT_WATCHLIST if not any(s.endswith(f":{sym}") for sym in _assigned_syms)]
 _watchlist    = _assigned_tv + _extra
-_watchlist_js = str(_watchlist).replace("'", '"')
 
-# ── TradingView Advanced Chart ────────────────────────────────────
-import json as _json
+tv_tab, native_tab = st.tabs(["TradingView Advanced", "Native Candles + Signals"])
 
-_tv_config = _json.dumps({
-    "autosize": True,
-    "symbol": "SPY",
-    "interval": "D",
-    "timezone": "America/New_York",
-    "theme": "dark",
-    "style": "1",
-    "locale": "en",
-    "backgroundColor": "rgba(19,23,34,1)",
-    "gridColor": "rgba(255,255,255,0.06)",
-    "hide_top_toolbar": False,
-    "hide_legend": False,
-    "range": "YTD",
-    "allow_symbol_change": True,
-    "save_image": True,
-    "watchlist": _watchlist,
-    "studies": [
-        {"name": "Moving Average Exponential", "override": {"length": 9,   "linecolor": "#26C6DA", "linewidth": 1}},
-        {"name": "Moving Average Exponential", "override": {"length": 21,  "linecolor": "#FF9800", "linewidth": 1}},
-        {"name": "Moving Average Exponential", "override": {"length": 50,  "linecolor": "#AB47BC", "linewidth": 1}},
-        {"name": "Moving Average Exponential", "override": {"length": 200, "linecolor": "#EF5350", "linewidth": 2}},
-        {"name": "Bollinger Bands",            "override": {"length": 20, "mult": 2}},
-        {"name": "VWAP",                       "override": {}},
-        {"name": "Supertrend",                 "override": {"Factor": 3, "ATR Length": 10}},
-        {"name": "Relative Strength Index",    "override": {"length": 14}},
-        {"name": "MACD",                       "override": {"fast length": 12, "slow length": 26, "signal smoothing": 9}},
-        {"name": "Stochastic RSI",             "override": {}},
-        {"name": "Average True Range",         "override": {"length": 14}},
-        {"name": "On Balance Volume",          "override": {}},
-        {"name": "Volume",                     "override": {}},
-    ],
-    "support_host": "https://www.tradingview.com",
-})
+with tv_tab:
+    tv_symbol = _tv_sym(symbol)
+    charts.tradingview_embed(tv_symbol, interval="D", watchlist=_watchlist, height=820)
 
-components.html(f"""<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <style>html,body{{margin:0;padding:0;height:100%;overflow:hidden;background:transparent;}}</style>
-</head>
-<body>
-  <div class="tradingview-widget-container" style="height:860px;width:100%">
-    <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%"></div>
-    <div class="tradingview-widget-copyright">
-      <a href="https://www.tradingview.com/" rel="noopener nofollow" target="_blank">
-        <span class="blue-text">Track all markets on TradingView</span>
-      </a>
-    </div>
-  </div>
-  <script type="text/javascript"
-    src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
-  {_tv_config}
-  </script>
-</body>
-</html>""", height=880, scrolling=False)
+with native_tab:
+    nc1, nc2, nc3 = st.columns([1.5, 1.5, 5])
+    with nc1:
+        nc_period = st.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
+    with nc2:
+        overlay_keys = st.multiselect(
+            "Indicator overlays",
+            options=["ema9", "ema21", "ema50", "ema200", "vwap",
+                     "bb_upper", "bb_lower", "bb_middle", "supertrend",
+                     "sma50", "sma200"],
+            default=["ema21", "ema50", "vwap", "bb_upper", "bb_lower"],
+            format_func=lambda k: {
+                "ema9": "EMA 9", "ema21": "EMA 21", "ema50": "EMA 50", "ema200": "EMA 200",
+                "vwap": "VWAP",
+                "bb_upper": "Bollinger ↑", "bb_lower": "Bollinger ↓", "bb_middle": "Bollinger mid",
+                "supertrend": "Supertrend",
+                "sma50": "SMA 50", "sma200": "SMA 200",
+            }[k],
+        )
+    with nc3:
+        st.caption(
+            "Loads OHLCV from our backend `/strategy/chart/{symbol}` and renders a multi-pane "
+            "candle stack — Price + Volume + RSI(14) + MACD. Recent strategy signals (if available) "
+            "are overlaid as ▲/▼ markers on the candle at the fill price."
+        )
+
+    with st.spinner(f"Loading {symbol} OHLCV…"):
+        try:
+            payload = api.chart_data(symbol, period=nc_period)
+        except Exception as e:
+            st.error(f"Could not load chart data: {e}")
+            payload = None
+
+    if payload and payload.get("dates"):
+        # Pull recent strategy signals for this symbol so traders can read each
+        # fill on the candle — falls back silently if none exist yet.
+        recent_signals: list[dict] = []
+        try:
+            sigs = api.signals() or []
+            for s in sigs:
+                if str(s.get("symbol", "")).upper() != symbol:
+                    continue
+                d = (s.get("ts") or s.get("timestamp") or s.get("created_at") or "")[:10]
+                if not d:
+                    continue
+                recent_signals.append({
+                    "date":  d,
+                    "side":  str(s.get("direction") or s.get("side") or "").upper(),
+                    "price": s.get("price") or s.get("entry_price") or s.get("close") or None,
+                })
+            # If we don't have a price, anchor to that day's close.
+            close_by_date = dict(zip(payload["dates"], payload["close"]))
+            for r in recent_signals:
+                if r["price"] is None:
+                    r["price"] = close_by_date.get(r["date"])
+        except Exception:
+            recent_signals = []
+
+        charts.render_price_chart(
+            payload,
+            trades=recent_signals,
+            overlays=tuple(overlay_keys),
+            include_volume=True,
+            include_rsi=True,
+            include_macd=True,
+            title=f"{symbol} — {nc_period}",
+        )
+    else:
+        st.caption(f"No OHLC data available for {symbol}.")
 
 # ── Financials ────────────────────────────────────────────────────
 st.divider()
