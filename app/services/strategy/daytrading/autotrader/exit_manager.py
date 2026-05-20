@@ -91,6 +91,35 @@ _STRATEGY_PROFILES: dict[str, dict] = {
         "min_bars_before_fade_exit": 2,
         "quick_profit_r_bonus": 0.0,
     },
+    # ── Candlestick-pattern momentum strategies: structure-based exits ─────────
+    # These strategies don't rely on VWAP/EMA9 fade. Instead we trail with a
+    # Chandelier ATR stop and exit on a confirmed structure break (close beyond
+    # the most recent swing). The exit_manager applies that via
+    # _check_structure_break_exit() below.
+    "EngulfingVolumeSurge": {
+        "min_bars_before_fade_exit": 3,
+        "quick_profit_r_bonus": 0.0,
+        "use_structure_exit": True,
+        "chandelier_atr_mult": 2.5,
+    },
+    "NarrowRangeBreakout": {
+        "min_bars_before_fade_exit": 3,
+        "quick_profit_r_bonus": 0.0,
+        "use_structure_exit": True,
+        "chandelier_atr_mult": 3.0,    # NR setups need room to develop
+    },
+    "ThreeBarPush": {
+        "min_bars_before_fade_exit": 2,
+        "quick_profit_r_bonus": 0.0,
+        "use_structure_exit": True,
+        "chandelier_atr_mult": 2.5,
+    },
+    "HammerShootingStar": {
+        "min_bars_before_fade_exit": 2,
+        "quick_profit_r_bonus": 0.0,
+        "use_structure_exit": True,
+        "chandelier_atr_mult": 2.0,    # reversal pattern; keep stop tighter
+    },
 }
 
 
@@ -317,6 +346,14 @@ class ExitManager:
                 urgency="medium",
             )
 
+        # ── 7b. Structure-aware exit for pattern-based momentum strategies ────
+        if strat_profile.get("use_structure_exit") and self._hold_bars >= min_bars_before_fade:
+            struct = self._check_structure_break_exit(
+                tsm, df_5m, close, strat_profile.get("chandelier_atr_mult", 2.5)
+            )
+            if struct is not None:
+                return struct
+
         # ── 8. Momentum fade (regime-aware, confirmation required) ────────────
         if self.use_momentum_exit and self._hold_bars >= min_bars_before_fade:
             fade_signals_needed = profile.get("fade_signals_needed", 2)
@@ -344,6 +381,88 @@ class ExitManager:
             reason=f"Holding +{r_multiple:.2f}R [{market_state_str}] bars={self._hold_bars}",
             urgency="low",
         )
+
+    # ── Structure-aware exit (Chandelier ATR + swing break) ──────────────────
+
+    def _check_structure_break_exit(
+        self,
+        tsm: TradeStateMachine,
+        df_5m: pd.DataFrame,
+        close: float,
+        chandelier_atr_mult: float,
+    ) -> ExitDecision | None:
+        """Tiered exit for candlestick-pattern momentum strategies.
+
+        Combines two stop logics:
+          * Chandelier trailing stop — ``highest high since entry − N×ATR``
+            (or lowest low + N×ATR for shorts). Ratchets in our favor only.
+          * Structure break — close beyond the most recent confirmed swing
+            low/high. The pattern that justified the trade is broken.
+
+        Either trips a FULL_EXIT. If neither trips but the Chandelier stop has
+        moved better than the current TSM stop, returns MOVE_STOP so the trail
+        keeps tightening.
+        """
+        from app.services.strategy.candle_patterns import (
+            evaluate_tiered_exit_long, evaluate_tiered_exit_short,
+        )
+
+        if df_5m is None or df_5m.empty or self._hold_bars < 2:
+            return None
+
+        entry = tsm.entry_price
+        side = tsm.side
+
+        if side == "LONG":
+            decision = evaluate_tiered_exit_long(
+                df_5m,
+                entry_price=entry,
+                bars_since_entry=self._hold_bars,
+                atr_mult=chandelier_atr_mult,
+                structure_lookback=20,
+            )
+            if decision.should_exit:
+                return ExitDecision(
+                    action="FULL_EXIT",
+                    reason=decision.reason,
+                    exit_price=close,
+                    urgency="medium",
+                )
+            # Trail tighter if Chandelier moved in our favor.
+            if decision.stop_price and decision.stop_price > tsm.current_stop:
+                return ExitDecision(
+                    action="MOVE_STOP",
+                    reason=f"Chandelier trail: stop -> {decision.stop_price:.2f}",
+                    new_stop=round(decision.stop_price, 4),
+                    urgency="low",
+                )
+            return None
+
+        if side == "SHORT":
+            decision = evaluate_tiered_exit_short(
+                df_5m,
+                entry_price=entry,
+                bars_since_entry=self._hold_bars,
+                atr_mult=chandelier_atr_mult,
+                structure_lookback=20,
+            )
+            if decision.should_exit:
+                return ExitDecision(
+                    action="FULL_EXIT",
+                    reason=decision.reason,
+                    exit_price=close,
+                    urgency="medium",
+                )
+            if decision.stop_price and decision.stop_price < tsm.current_stop:
+                return ExitDecision(
+                    action="MOVE_STOP",
+                    reason=f"Chandelier trail: stop -> {decision.stop_price:.2f}",
+                    new_stop=round(decision.stop_price, 4),
+                    urgency="low",
+                )
+            return None
+
+        return None
 
     # ── Confirmed momentum fade ───────────────────────────────────────────────
 

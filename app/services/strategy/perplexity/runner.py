@@ -23,6 +23,12 @@ from app.services.strategy.perplexity.strategies import (
     SupertrendSwing,
     BollingerBandBreakout,
 )
+from app.services.strategy.perplexity.momentum_strategies import (
+    PerpEngulfingVolumeSurge,
+    PerpNarrowRangeBreakout,
+    PerpThreeBarPush,
+    PerpHammerShootingStar,
+)
 
 PERPLEXITY_STRATEGIES: List[PerplexityStrategy] = [
     EmaMeanReversionUptrend(),
@@ -33,6 +39,10 @@ PERPLEXITY_STRATEGIES: List[PerplexityStrategy] = [
     RsiSwingReversal(),
     SupertrendSwing(),
     BollingerBandBreakout(),
+    PerpEngulfingVolumeSurge(),
+    PerpNarrowRangeBreakout(),
+    PerpThreeBarPush(),
+    PerpHammerShootingStar(),
 ]
 
 
