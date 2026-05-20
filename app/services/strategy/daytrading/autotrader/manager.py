@@ -50,6 +50,12 @@ class AutoTraderConfig:
     initial_capital: float = 10_000.0
     broker_name: str = "paper"                 # paper | alpaca
 
+    # Entry-path mode: keep legacy by default so existing flips behave identically.
+    # "native_strategy" delegates to strategy.generate_signals() — see
+    # NativeStrategyEntry for the supported strategy list.
+    entry_mode: str = "legacy_entry_decider"   # legacy_entry_decider | native_strategy
+    native_strategies: list[str] | None = None
+
     # Filled by the manager after start():
     started_at_et: str | None = None
     started_by_market_state: str | None = None
@@ -122,6 +128,8 @@ class AutoTraderManager:
                     max_trades_per_day=config.max_trades_per_day,
                     max_consecutive_losses=config.max_consecutive_losses,
                     initial_capital=config.initial_capital,
+                    entry_mode=config.entry_mode,
+                    native_strategies=config.native_strategies,
                 )
                 try:
                     trader.start()
@@ -251,6 +259,8 @@ def _config_as_dict(cfg: AutoTraderConfig) -> dict[str, Any]:
         "max_consecutive_losses": cfg.max_consecutive_losses,
         "initial_capital": cfg.initial_capital,
         "broker_name": cfg.broker_name,
+        "entry_mode": cfg.entry_mode,
+        "native_strategies": cfg.native_strategies,
         "started_at_et": cfg.started_at_et,
     }
 

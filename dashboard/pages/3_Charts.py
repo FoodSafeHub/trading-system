@@ -6,6 +6,7 @@ import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + 
 import api
 from _theme import apply_theme
 import _charts as charts
+import _lightweight_chart as lwc
 
 apply_theme("Charts")
 st.title("Price Charts")
@@ -45,7 +46,9 @@ _assigned_tv  = [_tv_sym(s) for s in _assigned_syms]
 _extra        = [s for s in _DEFAULT_WATCHLIST if not any(s.endswith(f":{sym}") for sym in _assigned_syms)]
 _watchlist    = _assigned_tv + _extra
 
-tv_tab, native_tab = st.tabs(["TradingView Advanced", "Native Candles + Signals"])
+tv_tab, native_tab, live_tab = st.tabs(
+    ["TradingView Advanced", "Native Candles + Signals", "Strategy Live (backend overlays)"]
+)
 
 with tv_tab:
     tv_symbol = _tv_sym(symbol)
@@ -120,6 +123,153 @@ with native_tab:
         )
     else:
         st.caption(f"No OHLC data available for {symbol}.")
+
+# ── Live strategy chart (lightweight-charts + backend overlays/markers) ──
+with live_tab:
+    st.caption(
+        "Live candlestick chart powered by TradingView's lightweight-charts. "
+        "**All overlays, markers, stops, and targets are computed by the backend** — "
+        "this tab is a renderer, not a decision engine. Click any ▲/▼/✕ marker "
+        "to see the strategy's entry/stop/target and the explanation (or rejection reason)."
+    )
+
+    lc1, lc2, lc3, lc4 = st.columns([1.2, 1.2, 3.2, 1.4])
+    with lc1:
+        tf = st.selectbox("Timeframe", ["1m", "5m", "15m"], index=1, key="live_tf")
+    with lc2:
+        refresh_secs = st.selectbox(
+            "Refresh", [0, 5, 10, 30, 60],
+            index=2,  # default 10s
+            format_func=lambda s: "off" if s == 0 else f"{s}s",
+            key="live_refresh",
+        )
+    with lc3:
+        try:
+            avail = [s["name"] for s in api.chart_strategies()]
+        except Exception:
+            avail = []
+        strat_filter = st.multiselect(
+            "Strategy filter (empty = all)",
+            options=avail, default=[], key="live_strats",
+        )
+    with lc4:
+        st.write("")
+        if st.button("Refresh now", key="live_refresh_btn"):
+            st.rerun()
+
+    if tf == "1m":
+        st.markdown(
+            '<span style="background:#3a3526;color:#ffca28;border:1px solid #ffca28;'
+            'padding:2px 8px;border-radius:10px;font-size:11px">'
+            'signals computed on 5m / 15m</span>'
+            '<span style="opacity:.65;margin-left:8px;font-size:12px">'
+            'Candles render at 1m; markers anchor to the 1m bar containing each '
+            'strategy signal.</span>',
+            unsafe_allow_html=True,
+        )
+
+    ov1, ov2, ov3 = st.columns([3, 1.2, 1.2])
+    with ov1:
+        overlays_on = st.multiselect(
+            "Overlays",
+            options=["ema9", "ema21", "ema50", "vwap", "bb_upper", "bb_middle",
+                     "bb_lower", "supertrend"],
+            default=["ema9", "ema21", "vwap", "bb_upper", "bb_lower"],
+            format_func=lambda k: {
+                "ema9": "EMA 9", "ema21": "EMA 21", "ema50": "EMA 50",
+                "vwap": "VWAP",
+                "bb_upper": "BB Upper", "bb_middle": "BB Mid", "bb_lower": "BB Lower",
+                "supertrend": "Supertrend",
+            }[k],
+            key="live_overlays",
+        )
+    with ov2:
+        show_trades = st.checkbox("Show trades", value=True, key="live_show_trades")
+    with ov3:
+        show_rejected = st.checkbox("Show rejected", value=True, key="live_show_rej")
+
+    strat_arg = ",".join(strat_filter) if strat_filter else "all"
+    with st.spinner(f"Loading {symbol} {tf} chart…"):
+        try:
+            live_payload = api.intraday_chart(
+                symbol, timeframe=tf, strategies=strat_arg,
+                include_rejected=show_rejected,
+            )
+        except Exception as e:
+            st.error(f"Live chart fetch failed: {e}")
+            live_payload = None
+
+    if live_payload:
+        rgm = live_payload.get("regime") or "—"
+        mkt = (live_payload.get("market_status") or {}).get("session_label", "—")
+        diag = live_payload.get("diagnostics") or {}
+        data_src = live_payload.get("data_source") or "—"
+        fb_anchored = int(live_payload.get("fallback_anchored") or 0)
+        mt1, mt2, mt3, mt4, mt5 = st.columns(5)
+        mt1.metric("Symbol", live_payload.get("symbol", symbol))
+        mt2.metric("Regime", rgm)
+        mt3.metric("Accepted", len(live_payload.get("markers") or []))
+        mt4.metric("Rejected", len(live_payload.get("rejected_markers") or []))
+        mt5.metric("Data", data_src, delta=f"{fb_anchored} fallback" if fb_anchored else None,
+                   delta_color="inverse" if fb_anchored else "off")
+
+        if live_payload.get("policy_blocked"):
+            st.warning(f"Policy blocked: {live_payload.get('policy_reason') or '—'}")
+        if live_payload.get("warning"):
+            st.info(live_payload["warning"])
+        if fb_anchored:
+            st.warning(
+                f"{fb_anchored} marker(s) had an unparseable `signal_time` and were "
+                "anchored to the latest bar. Check rows flagged `anchor_fallback` below."
+            )
+
+        lwc.render_strategy_chart(
+            live_payload,
+            overlays_enabled=overlays_on,
+            show_trades=show_trades,
+            show_rejected=show_rejected,
+            show_levels=True,
+            height=720,
+        )
+
+        # ── Explainability table: all markers in a sortable list ──
+        rows = []
+        for m in (live_payload.get("markers") or []):
+            rows.append({**m, "status": "ACCEPTED"})
+        for m in (live_payload.get("rejected_markers") or []):
+            rows.append({**m, "status": "REJECTED"})
+        if rows:
+            import pandas as _pd
+            df_rows = _pd.DataFrame(rows)
+            keep = [c for c in ["status", "strategy", "side", "timeframe", "regime",
+                                 "entry_price", "stop_price", "target_price",
+                                 "confidence", "r_multiple", "anchor_fallback", "reason"]
+                    if c in df_rows.columns]
+            st.dataframe(df_rows[keep], use_container_width=True, hide_index=True)
+        else:
+            st.caption("No signals yet for this symbol/timeframe.")
+
+        if diag and diag.get("root_cause"):
+            with st.expander("Pipeline diagnostics", expanded=False):
+                st.write(diag.get("root_cause"))
+                for step in diag.get("diagnosis_steps", []):
+                    st.text(f"· {step}")
+    else:
+        st.caption("No live payload available yet.")
+
+    # Poll → just trigger another Streamlit rerun on the chosen interval.
+    if refresh_secs and refresh_secs > 0:
+        try:
+            from streamlit_autorefresh import st_autorefresh  # type: ignore
+            st_autorefresh(interval=refresh_secs * 1000, key="live_chart_autorefresh")
+        except Exception:
+            # streamlit-autorefresh is optional; if missing, fall back to a
+            # plain meta refresh so the page still polls.
+            import streamlit.components.v1 as _components
+            _components.html(
+                f"<meta http-equiv='refresh' content='{refresh_secs}'>",
+                height=0,
+            )
 
 # ── Financials ────────────────────────────────────────────────────
 st.divider()

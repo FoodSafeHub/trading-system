@@ -191,6 +191,22 @@ class AutoTraderStartRequest(BaseModel):
     max_consecutive_losses: int = Field(3, ge=1, le=10)
     initial_capital: float = Field(10_000.0, gt=0)
     broker_name: Literal["paper", "alpaca"] = "paper"
+    entry_mode: Literal["legacy_entry_decider", "native_strategy"] = Field(
+        "legacy_entry_decider",
+        description=(
+            "Entry-path mode. 'legacy_entry_decider' uses the composite scoring "
+            "filter (default, current behavior). 'native_strategy' delegates to "
+            "the same generate_signals() logic used in backtest for the audited "
+            "strategies (BollingerMomentum, SupertrendTrend, EMAMomentum, ORBBreakout)."
+        ),
+    )
+    native_strategies: list[str] | None = Field(
+        None,
+        description=(
+            "Optional override for which strategies run when entry_mode="
+            "'native_strategy'. Defaults to the audited 4-strategy set."
+        ),
+    )
     force: bool = Field(False, description="Arm even if outside regular trading hours")
 
 
@@ -208,6 +224,8 @@ def autotrader_start(req: AutoTraderStartRequest) -> dict[str, Any]:
         max_consecutive_losses=req.max_consecutive_losses,
         initial_capital=req.initial_capital,
         broker_name=req.broker_name,
+        entry_mode=req.entry_mode,
+        native_strategies=req.native_strategies,
     )
     try:
         return get_manager().flip_on(cfg, force=req.force)

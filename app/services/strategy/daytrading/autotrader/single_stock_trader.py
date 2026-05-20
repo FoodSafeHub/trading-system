@@ -26,6 +26,10 @@ import pandas as pd
 
 from app.services.strategy.daytrading.autotrader.entry_decider import EntryDecider
 from app.services.strategy.daytrading.autotrader.exit_manager import ExitManager
+from app.services.strategy.daytrading.autotrader.native_entry import (
+    NativeStrategyEntry,
+    SUPPORTED_NATIVE_STRATEGIES,
+)
 from app.services.strategy.daytrading.autotrader.position_manager import PositionManager, TrailMode
 from app.services.strategy.daytrading.autotrader.trade_state import (
     State, TradeRecord, TradeStateMachine,
@@ -78,6 +82,8 @@ class SingleStockTrader:
         max_consecutive_losses: int = 3,
         initial_capital: float = 10_000.0,
         on_trade_update: Callable[[dict], None] | None = None,
+        entry_mode: str = "legacy_entry_decider",
+        native_strategies: list[str] | None = None,
     ):
         self.symbol = symbol.upper()
         self._broker = broker
@@ -85,11 +91,24 @@ class SingleStockTrader:
         self.initial_capital = initial_capital
         self.on_trade_update = on_trade_update  # callback for UI updates
 
+        # Entry-path mode: "legacy_entry_decider" (default, unchanged behavior)
+        # or "native_strategy" (delegate to strategy.generate_signals).
+        if entry_mode not in ("legacy_entry_decider", "native_strategy"):
+            raise ValueError(
+                f"entry_mode must be 'legacy_entry_decider' or 'native_strategy', got {entry_mode!r}"
+            )
+        self.entry_mode = entry_mode
+
         # Core components
         self.tsm = TradeStateMachine()
         self.entry_decider = EntryDecider(
             direction_mode=direction_mode,
             risk_per_trade_pct=risk_per_trade_pct,
+        )
+        self.native_entry = NativeStrategyEntry(
+            direction_mode=direction_mode,
+            risk_per_trade_pct=risk_per_trade_pct,
+            native_strategies=native_strategies or list(SUPPORTED_NATIVE_STRATEGIES),
         )
         self.position_manager = PositionManager(
             partial_tp=partial_tp,
@@ -210,6 +229,8 @@ class SingleStockTrader:
                 "trades_today": tsm.trades_today,
                 "consecutive_losses": tsm.consecutive_losses,
                 "strategy": tsm.strategy or "—",
+                "entry_mode": self.entry_mode,
+                "native_strategies": list(self.native_entry.native_strategies),
                 "market_state": self._last_market_state_str,
                 "management_profile": _describe_management_profile(
                     self._last_market_state_str, tsm.strategy or ""
@@ -343,7 +364,11 @@ class SingleStockTrader:
             return
 
         # ── Entry decision ─────────────────────────────────────────────────────
-        decision = self.entry_decider.decide(
+        # Dispatch on entry_mode: legacy_entry_decider keeps current behavior;
+        # native_strategy delegates to strategy.generate_signals() so a named
+        # strategy in live trading means the same thing as in backtest.
+        decider = self.native_entry if self.entry_mode == "native_strategy" else self.entry_decider
+        decision = decider.decide(
             symbol=self.symbol,
             df_1m=self._df_1m if self._df_1m is not None else pd.DataFrame(),
             df_5m=self._df_5m,
@@ -352,9 +377,22 @@ class SingleStockTrader:
             account_equity=self.initial_capital + self.tsm.daily_pnl,
         )
 
+        # Diagnostics: tag every decision with the mode that produced it so the
+        # decision_log and UI panel can compare native vs legacy behavior.
+        if isinstance(decision.checks, dict):
+            decision.checks.setdefault("entry_mode", self.entry_mode)
+            decision.checks.setdefault(
+                "strategy_source",
+                "native" if self.entry_mode == "native_strategy" else "legacy_scoring",
+            )
+
         if not decision.is_tradeable:
             self._last_no_trade_reason = decision.entry_reason
-            self._log("NO_TRADE", decision.entry_reason, "debug")
+            self._log(
+                "NO_TRADE",
+                f"[{self.entry_mode}] {decision.entry_reason}",
+                "debug",
+            )
             return
 
         # ── Compute position size ──────────────────────────────────────────────

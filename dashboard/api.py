@@ -101,6 +101,24 @@ def update_scheduler_config(run_bollinger: bool | None = None, run_perplexity: b
 def chart_data(symbol: str, period: str = "3mo"):
     return _get(f"/strategy/chart/{symbol}", params={"period": period})
 
+
+def intraday_chart(symbol: str, timeframe: str = "5m", strategies: str = "all",
+                   include_rejected: bool = True):
+    """Unified live-chart payload: candles + backend overlays + accepted/rejected markers."""
+    return _get(
+        f"/chart/intraday/{symbol}",
+        params={
+            "timeframe": timeframe,
+            "strategies": strategies,
+            "include_rejected": str(include_rejected).lower(),
+        },
+        timeout=30,
+    )
+
+
+def chart_strategies():
+    return _get("/chart/strategies")
+
 def list_assignments():
     return _get("/assignments")
 
