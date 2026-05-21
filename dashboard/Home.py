@@ -1,9 +1,12 @@
 """Operator dashboard — the single page you open when the market opens.
 
-Layout (3 zones):
+Layout:
   TOP STRIP   ─ API / market / kill-switch / auto-trader status pills
-  LEFT (2/3)  ─ Today's P&L + open positions
-  RIGHT (1/3) ─ Risk budget gauge + kill switch + recent fills
+  RIGHT RAIL  ─ Risk budget gauge + kill switch + auto-trader controls
+  PER BROKER  ─ One tab per broker. Each tab shows that broker's P&L,
+                equity / cash / buying-power KPIs, and open positions in a
+                roomy 2-up layout so labels and values don't truncate.
+  BOTTOM      ─ Recent fills across brokers, with broker + strategy columns
 """
 from __future__ import annotations
 
@@ -11,6 +14,7 @@ import sys, os; sys.path.insert(0, os.path.dirname(__file__))
 import api
 from _theme import apply_theme, section, divider, kpi_row, pill, status_row, money
 
+from collections import defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -66,65 +70,148 @@ status_row([
 divider()
 
 
-# ── ZONE 1 (LEFT 2/3) + ZONE 2 (RIGHT 1/3) ──────────────────────────────
-left, right = st.columns([2, 1])
+# ── Helpers to group state by broker ────────────────────────────────────
+def _broker_of_order(o: dict) -> str:
+    """Map raw broker tag to a presentation label.
+
+    Multi-broker mode stamps Order.broker as "multi:schwab+webull" because the
+    fan-out adapter owns the call. The dashboard wants per-leg attribution, so
+    we keep "multi:..." rows in a single bucket labelled by the prefix.
+    """
+    b = (o.get("broker") or "").lower()
+    if not b:
+        return "unknown"
+    if b.startswith("multi:"):
+        return b
+    return b
 
 
-# ─── LEFT — P&L + positions ─────────────────────────────────────────────
-with left:
-    section("Today's P&L")
+today_str = datetime.now(tz=ET).strftime("%Y-%m-%d")
+filled = [o for o in orders if o.get("status") == "filled"]
 
-    filled = [o for o in orders if o.get("status") == "filled"]
-    today_str = datetime.now(tz=ET).strftime("%Y-%m-%d")
 
-    def _is_today(o):
-        ts = o.get("created_at") or ""
-        return ts.startswith(today_str)
+def _is_today(o):
+    ts = o.get("created_at") or ""
+    return ts.startswith(today_str)
 
-    today_fills = [o for o in filled if _is_today(o)]
 
-    spent    = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in today_fills if o.get("side") == "BUY")
-    received = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in today_fills if o.get("side") == "SELL")
+today_fills = [o for o in filled if _is_today(o)]
+
+# Group accounts and positions by broker tag.
+accounts_by_broker: dict[str, list[dict]] = defaultdict(list)
+for a in accounts:
+    accounts_by_broker[(a.get("broker") or "unknown").lower()].append(a)
+
+positions_by_broker: dict[str, list[dict]] = defaultdict(list)
+for p in positions:
+    positions_by_broker[(p.get("broker") or "unknown").lower()].append(p)
+
+# Order the broker columns deterministically: Schwab first, then Webull, then
+# anything else (paper / unknown). New brokers slot in automatically because
+# we union the keys from accounts and positions.
+KNOWN_ORDER = ["schwab", "webull", "paper"]
+seen = set(accounts_by_broker) | set(positions_by_broker)
+broker_keys = [b for b in KNOWN_ORDER if b in seen] + sorted(seen - set(KNOWN_ORDER))
+
+
+# ── BROKER ZONE (left, full width) + RIGHT RAIL ─────────────────────────
+broker_area, right = st.columns([2, 1])
+
+
+PRETTY_BROKER = {
+    "schwab": "Schwab",
+    "webull": "Webull",
+    "paper":  "Paper",
+}
+
+
+def _broker_label(b: str) -> str:
+    if b in PRETTY_BROKER:
+        return PRETTY_BROKER[b]
+    if b.startswith("multi:"):
+        return "Multi (" + b[len("multi:"):] + ")"
+    return b.capitalize() if b else "Unknown"
+
+
+def _render_broker_block(broker: str) -> None:
+    accts_here = accounts_by_broker.get(broker, [])
+    positions_here = positions_by_broker.get(broker, [])
+    fills_here = [o for o in today_fills if _broker_of_order(o) == broker]
+
+    spent    = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in fills_here if o.get("side") == "BUY")
+    received = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in fills_here if o.get("side") == "SELL")
     realised = received - spent
 
-    kpi_row([
-        ("Realised P&L (today)", money(realised)),
-        ("Fills today",          str(len(today_fills))),
-        ("Buys",                 str(sum(1 for o in today_fills if o.get("side") == "BUY"))),
-        ("Sells",                str(sum(1 for o in today_fills if o.get("side") == "SELL"))),
-    ])
-
-    # Account equity row
-    if accounts:
-        a = accounts[0]
+    # ── Row 1: account snapshot (Equity / Cash / Buying power / Account) ──
+    if accts_here:
+        eq   = sum(a.get("equity")       or 0 for a in accts_here) or None
+        cash = sum(a.get("cash")         or 0 for a in accts_here) or None
+        bp   = sum(a.get("buying_power") or 0 for a in accts_here) or None
+        acct_ids = [str(a.get("account_id") or "") for a in accts_here if a.get("account_id")]
+        acct_label = ", ".join(acct_ids) or "—"
+        # Wide layout: 4 columns in the broker_area (which is 2/3 of the page)
+        # gives ~200px per cell, enough that values like "$2,659.11" and
+        # account ids don't truncate. Account id is rendered separately below
+        # so the 4 KPI cells stay roomy.
         kpi_row([
-            ("Equity",        money(a.get("equity"))),
-            ("Cash",          money(a.get("cash"))),
-            ("Buying power",  money(a.get("buying_power"))),
-            ("Account",       str(a.get("account_id", "—"))),
+            ("Equity",        money(eq)),
+            ("Cash",          money(cash)),
+            ("Buying power",  money(bp)),
+            ("Realised P&L",  money(realised)),
+        ])
+        st.caption(f"Account {acct_label} · {len(fills_here)} fills today "
+                   f"({sum(1 for o in fills_here if o.get('side')=='BUY')} buys, "
+                   f"{sum(1 for o in fills_here if o.get('side')=='SELL')} sells)")
+    else:
+        st.warning(
+            f"No account data for **{_broker_label(broker)}** — broker may be "
+            "unauthenticated, or the API hasn't been restarted since the "
+            "multi-broker changes. Restart with `start.bat` to refresh."
+        )
+        # Still surface today's fills even if accounts are missing.
+        kpi_row([
+            ("Realised P&L (today)", money(realised)),
+            ("Fills",                str(len(fills_here))),
+            ("Buys",                 str(sum(1 for o in fills_here if o.get("side") == "BUY"))),
+            ("Sells",                str(sum(1 for o in fills_here if o.get("side") == "SELL"))),
         ])
 
-    divider()
-
-    section("Open Positions", f"{len(positions)} held" if positions else None)
-    if positions:
-        # Tidy column selection so the table is readable
-        df = pd.DataFrame(positions)
-        keep = [c for c in ["symbol", "quantity", "avg_price", "current_price",
-                            "market_value", "unrealized_pl", "unrealized_pl_pct"]
+    # ── Row 2: open positions table ───────────────────────────────────────
+    if positions_here:
+        df = pd.DataFrame(positions_here)
+        keep = [c for c in ["symbol", "quantity", "average_cost", "current_price",
+                            "market_value", "unrealized_pnl"]
                 if c in df.columns]
         if keep:
             df = df[keep]
-            for col in ("avg_price", "current_price", "market_value", "unrealized_pl"):
+            rename = {
+                "symbol":         "Symbol",
+                "quantity":       "Qty",
+                "average_cost":   "Avg cost",
+                "current_price":  "Last",
+                "market_value":   "Value",
+                "unrealized_pnl": "Unrealised P&L",
+            }
+            for col in ("average_cost", "current_price", "market_value", "unrealized_pnl"):
                 if col in df.columns:
                     df[col] = df[col].apply(lambda v: money(v) if v is not None else "—")
-            if "unrealized_pl_pct" in df.columns:
-                df["unrealized_pl_pct"] = df["unrealized_pl_pct"].apply(
-                    lambda v: f"{v:+.2f}%" if v is not None else "—"
-                )
+            df = df.rename(columns=rename)
         st.dataframe(df, use_container_width=True, hide_index=True)
     else:
-        st.info("No open positions.")
+        st.caption("No open positions.")
+
+
+with broker_area:
+    section("By broker")
+    if not broker_keys:
+        st.info("No broker data yet — once accounts authenticate they'll appear here.")
+    else:
+        # Tabs keep each broker on the full broker_area width so KPI labels
+        # and values never overlap, no matter how many brokers are wired up.
+        tabs = st.tabs([_broker_label(b) for b in broker_keys])
+        for tab, broker in zip(tabs, broker_keys):
+            with tab:
+                _render_broker_block(broker)
 
 
 # ─── RIGHT — risk + kill switch + auto-trader controls ──────────────────
@@ -177,16 +264,17 @@ with right:
 divider()
 
 
-# ── BOTTOM — recent fills (compact) ──────────────────────────────────────
-section("Recent Fills", "Last 10 across all strategies")
+# ── BOTTOM — recent fills across brokers (unified, with Broker column) ───
+section("Recent Fills", "Last 15 across brokers and strategies")
 
 if filled:
-    recent = sorted(filled, key=lambda o: o.get("created_at") or "", reverse=True)[:10]
+    recent = sorted(filled, key=lambda o: o.get("created_at") or "", reverse=True)[:15]
     rows = []
     for o in recent:
         rows.append({
             "Time":       (o.get("created_at") or "")[11:19],
             "Date":       (o.get("created_at") or "")[:10],
+            "Broker":     _broker_label((o.get("broker") or "").lower()),
             "Symbol":     o.get("symbol", "—"),
             "Side":       o.get("side", "—"),
             "Qty":        o.get("quantity", "—"),

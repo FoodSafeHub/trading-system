@@ -22,8 +22,14 @@ async def get_positions(account_id: str = ""):
     accounts = await broker.get_accounts()
     if not accounts:
         raise HTTPException(status_code=404, detail="No accounts found")
-    acct_id = account_id or accounts[0].account_id
-    return await broker.get_positions(acct_id)
+    # If account_id is empty and we're on MultiBroker, get_positions("") fans
+    # out across every broker and returns positions tagged with their broker.
+    # On a single broker, we still need to pass the resolved account_id.
+    if account_id:
+        return await broker.get_positions(account_id)
+    if getattr(broker, "name", "").startswith("multi:"):
+        return await broker.get_positions("")
+    return await broker.get_positions(accounts[0].account_id)
 
 
 @router.get("/quotes", response_model=dict)

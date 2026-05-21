@@ -6,9 +6,14 @@ import pandas as pd
 import streamlit as st
 import api
 from _theme import apply_theme
+from _broker_routing import render_broker_routing_toggle
 
 apply_theme("Strategy & Signals")
 st.title("Strategy & Signals")
+
+# Broker-routing toggle: where live orders get sent. Mirrors the Day Trading
+# page — autoscheduled assignments fire through whichever broker is selected.
+render_broker_routing_toggle(key_suffix="strategy")
 
 
 # ────────────────────────────────────────────────────────────────

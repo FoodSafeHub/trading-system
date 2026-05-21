@@ -35,16 +35,9 @@ _composer.py at commit on main, 2026-05):
 """
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import logging
-import socket
 import time
-import uuid
-from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import quote
 
 import pandas as pd
 import requests
@@ -195,63 +188,15 @@ def _fetch_public(symbol: str, interval: str, period: str) -> pd.DataFrame:
 
 _SIGNED_HOST = "api.webull.com"
 _SIGNED_URI = "/market-data/bars"
-_SIGNED_VERSION = "v1"
-
-
-def _webull_uuid() -> str:
-    """UUID5 nonce — matches the SDK's get_uuid() helper."""
-    name = socket.gethostname() + str(uuid.uuid1())
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, name))
-
-
-def _iso8601_utc_now() -> str:
-    """ISO-8601 UTC timestamp without microseconds (matches SDK FORMAT_ISO_8601)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _build_signed_headers(app_key: str, app_secret: str, query: dict[str, str]) -> dict[str, str]:
-    """Construct Webull OpenAPI signed headers per the official Python SDK.
-
-    Signature recipe (see module docstring for the full recipe):
-      string_to_sign = quote(URI + "&" + sorted_kv_join(lower(headers) | query))
-      signature      = base64(HMAC-SHA1(string_to_sign, app_secret + "&"))
-    """
-    sign_headers = {
-        "x-app-key": app_key,
-        "x-timestamp": _iso8601_utc_now(),
-        "x-signature-version": "1.0",
-        "x-signature-algorithm": "HMAC-SHA1",
-        "x-signature-nonce": _webull_uuid(),
-        "Host": _SIGNED_HOST,
-    }
-
-    # Merge headers (already lowercase) + query params; collisions concat with '&'
-    merged: dict[str, str] = {}
-    for k, v in sign_headers.items():
-        merged[k.lower()] = v
-    for k, v in query.items():
-        existing = merged.get(k)
-        merged[k] = (str(existing) + "&" + str(v)) if existing is not None else str(v)
-
-    # Sorted k=v joined by &
-    sorted_kv = "&".join(f"{k}={merged[k]}" for k in sorted(merged.keys()))
-    string_to_sign = _SIGNED_URI + "&" + sorted_kv
-    # GET has no body → no body_string suffix
-    encoded = quote(string_to_sign, safe="")
-
-    sig = hmac.new(
-        (app_secret + "&").encode("utf-8"),
-        encoded.encode("utf-8"),
-        hashlib.sha1,
-    ).digest()
-    signature = base64.standard_b64encode(sig).decode("ascii").strip()
-
-    # Return the wire headers — drop the synthetic Host (requests sets it),
-    # and add x-version + x-signature.
-    wire = {k: v for k, v in sign_headers.items() if k != "Host"}
-    wire["x-version"] = _SIGNED_VERSION
-    wire["x-signature"] = signature
-    return wire
+    """Wrapper around the shared Webull signing helper, fixed to the bars URI."""
+    from app.services.brokers.webull_signing import build_signed_headers
+    return build_signed_headers(
+        app_key=app_key, app_secret=app_secret,
+        host=_SIGNED_HOST, uri=_SIGNED_URI, query=query,
+    )
 
 
 def _parse_signed_bars(payload: Any) -> pd.DataFrame:

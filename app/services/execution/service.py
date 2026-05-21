@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.config import get_settings
 from app.db import SessionLocal
 from app.models.executions import Execution
 from app.models.orders import Order, OrderPreview
@@ -67,6 +68,22 @@ class ExecutionService:
         if risk_result.warnings:
             for w in risk_result.warnings:
                 logger.warning("[exec] Risk warning: %s", w)
+
+        # ── Step 1b: Buying-power preflight ─────────────────────────────────
+        # Hits the broker once per BUY to confirm we actually have capital,
+        # because the static max_position_size_usd in risk/engine.py doesn't
+        # know what's currently committed at the broker. Disabled via config
+        # or when the broker can't answer (we err toward letting the order
+        # through and let the broker reject it — the dashboard surfaces that).
+        bp_block = await self._buying_power_preflight(order_req, account_id, estimated_price)
+        if bp_block is not None:
+            logger.warning("[exec] Buying-power BLOCKED: %s", bp_block)
+            _audit.log(
+                event_type="BUYING_POWER_BLOCKED",
+                description=f"{order_req.side} {order_req.symbol} blocked: {bp_block}",
+                metadata={"order": order_req.model_dump(mode="json")},
+            )
+            return None
 
         # ── Step 2: Persist order record (pending) ──────────────────────────
         db_order = self._persist_order(order_req, signal_id, status="pending")
@@ -130,6 +147,72 @@ class ExecutionService:
             self._handle_fill(db_order.id, confirmed or status_resp)
 
         return db_order
+
+    async def _buying_power_preflight(
+        self,
+        order_req: OrderRequest,
+        account_id: str,
+        estimated_price: Optional[float],
+    ) -> Optional[str]:
+        """Return a blocking reason string if the broker doesn't have enough
+        buying power to cover this BUY; return None to allow.
+
+        SELLs are skipped (they free capital). Disabled when
+        settings.buying_power_check_enabled is False, or when the broker
+        can't return a usable buying_power figure — in those cases we fall
+        through and let the broker itself reject the order.
+        """
+        settings = get_settings()
+        if not settings.buying_power_check_enabled:
+            return None
+        if order_req.side != "BUY":
+            return None
+
+        # Need a price to compute order value. Use limit_price for LIMIT,
+        # estimated_price (passed by scheduler/autotrader) otherwise.
+        price = order_req.limit_price or estimated_price
+        if not price or price <= 0:
+            logger.debug("[exec] Buying-power preflight skipped — no usable price")
+            return None
+        order_value = float(price) * float(order_req.quantity)
+        buffer = float(settings.buying_power_min_buffer_usd or 0.0)
+        needed = order_value + buffer
+
+        try:
+            accounts = await self.broker.get_accounts()
+        except Exception as exc:
+            logger.warning("[exec] Buying-power preflight: get_accounts failed (%s) — allowing order through", exc)
+            return None
+
+        # Pick the matching account by id when supplied; otherwise sum all
+        # accounts returned. MultiBroker fans out get_accounts, so for a
+        # "both" routing the available pool is the sum of Schwab + Webull
+        # buying power. That matches the fact that place_order also fans
+        # out — each leg consumes its own broker's capital.
+        if account_id:
+            target = [a for a in accounts if a.account_id == account_id]
+            if not target:
+                target = accounts  # fallback: id didn't match (multi-broker case)
+        else:
+            target = accounts
+        bp_total = 0.0
+        any_known = False
+        for a in target:
+            if a.buying_power is None:
+                continue
+            any_known = True
+            bp_total += float(a.buying_power)
+        if not any_known:
+            logger.debug("[exec] Buying-power preflight skipped — broker returned no figure")
+            return None
+
+        if bp_total < needed:
+            return (
+                f"insufficient buying power: need ${needed:,.2f} "
+                f"(order ${order_value:,.2f} + buffer ${buffer:,.2f}) "
+                f"but have ${bp_total:,.2f}"
+            )
+        return None
 
     async def _confirm_broker_status(
         self, broker_order_id: Optional[str], account_id: str, order_id: int

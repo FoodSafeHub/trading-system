@@ -16,6 +16,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import get_settings
 from app.db import SessionLocal
+from app.models.signals import Signal
 from app.services.brokers.factory import get_broker
 from app.services.execution.service import ExecutionService
 from app.services.market_data.provider import get_ohlcv, get_price_series
@@ -36,6 +37,38 @@ _running = False
 # None means "fall back to .env / config.py value".
 _override_run_bollinger: bool | None = None
 _override_run_perplexity: bool | None = None
+
+
+def _persist_signal(
+    symbol: str,
+    direction: str,
+    strategy_label: str,
+    entry: float | None,
+) -> int | None:
+    """Write a Signal row so the resulting Order can join back to a strategy name.
+
+    Without this, app/api/routes/orders.py:35-39 has no signal_id to look up
+    and the dashboard's Recent Fills shows Strategy "—". The label may be
+    prefixed (e.g. "perplexity:my_strategy") — we keep the prefix so the
+    dashboard surfaces the originating system as well as the strategy.
+    """
+    try:
+        with SessionLocal() as db:
+            sig = Signal(
+                strategy_name=strategy_label[:128],
+                symbol=symbol.upper(),
+                direction=direction,
+                strength=1.0,
+                price_at_signal=entry,
+                acted_on=True,
+            )
+            db.add(sig)
+            db.commit()
+            db.refresh(sig)
+            return sig.id
+    except Exception as exc:
+        logger.warning("[scheduler] Could not persist Signal row for %s/%s: %s", symbol, strategy_label, exc)
+        return None
 
 
 def _quantize_for_broker(shares: float) -> float:
@@ -311,7 +344,13 @@ def _run_cycle() -> None:
                     stop_price=stop if direction == "BUY" else None,
                     source="scheduler",
                 )
-                loop.run_until_complete(svc.execute(order_req, account_id=account_id, estimated_price=entry))
+                sig_id = _persist_signal(symbol, direction, label, entry)
+                loop.run_until_complete(svc.execute(
+                    order_req,
+                    account_id=account_id,
+                    signal_id=sig_id,
+                    estimated_price=entry,
+                ))
 
             # ── 4. Execute consensus signals ─────────────────────
             for symbol, directions in votes.items():
@@ -346,7 +385,16 @@ def _run_cycle() -> None:
                     quantity=qty,
                     source="scheduler",
                 )
-                loop.run_until_complete(svc.execute(order_req, account_id=account_id, estimated_price=entry_p or None))
+                # Strategy name is the consensus group — prefix + agreeing list
+                # so Recent Fills tells you which strategies voted to enter.
+                consensus_label = "consensus:" + "+".join(agreeing) if agreeing else "consensus"
+                sig_id = _persist_signal(symbol, direction, consensus_label, entry_p or None)
+                loop.run_until_complete(svc.execute(
+                    order_req,
+                    account_id=account_id,
+                    signal_id=sig_id,
+                    estimated_price=entry_p or None,
+                ))
         finally:
             loop.close()
 

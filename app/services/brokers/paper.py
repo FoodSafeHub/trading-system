@@ -62,6 +62,8 @@ class PaperBroker(BrokerBase):
                     (p.get("current_price", p["average_cost"]) - p["average_cost"]) * p["quantity"]
                     if p.get("current_price") else None
                 ),
+                broker="paper",
+                account_id=account_id or "PAPER-001",
             )
             for sym, p in _paper_positions.items()
             if p["quantity"] > 0

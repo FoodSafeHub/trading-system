@@ -7,6 +7,8 @@ from fastapi import APIRouter, HTTPException
 from collections import defaultdict
 
 from app.config import get_settings
+from app.db import SessionLocal
+from app.models.signals import Signal
 from app.schemas.orders import OrderRequest
 from app.services.brokers.factory import get_broker
 from app.services.execution.service import ExecutionService
@@ -103,7 +105,24 @@ async def run_strategy_cycle():
                     quantity=qty,
                     source="scheduler",
                 )
-                order = await svc.execute(order_req, account_id=account_id)
+                # Stamp a Signal row so Recent Fills can render the strategy name.
+                sig_id: int | None = None
+                try:
+                    with SessionLocal() as db:
+                        sig = Signal(
+                            strategy_name=("consensus:" + "+".join(agreeing))[:128],
+                            symbol=symbol.upper(),
+                            direction=direction,
+                            strength=1.0,
+                            acted_on=True,
+                        )
+                        db.add(sig)
+                        db.commit()
+                        db.refresh(sig)
+                        sig_id = sig.id
+                except Exception:
+                    sig_id = None
+                order = await svc.execute(order_req, account_id=account_id, signal_id=sig_id)
                 orders_placed[(symbol, direction)] = order.status if order else "risk_blocked"
 
     # ── Step 3: annotate results with consensus info ─────────

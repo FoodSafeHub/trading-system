@@ -289,7 +289,26 @@ def _auto_trade_top(candidate: dict, scan_run_id: str, scanned_at: datetime) -> 
         accounts = loop.run_until_complete(broker.get_accounts())
         account_id = accounts[0].account_id if accounts else ""
         svc = ExecutionService(broker)
-        loop.run_until_complete(svc.execute(order_req, account_id=account_id))
+        # Stamp a Signal row so Recent Fills can show the strategy that fired.
+        sig_id: int | None = None
+        try:
+            from app.models.signals import Signal
+            with SessionLocal() as db:
+                sig = Signal(
+                    strategy_name=("scanner:" + (candidate.get("strategy_name") or "top"))[:128],
+                    symbol=symbol.upper(),
+                    direction=direction,
+                    strength=1.0,
+                    price_at_signal=price or None,
+                    acted_on=True,
+                )
+                db.add(sig)
+                db.commit()
+                db.refresh(sig)
+                sig_id = sig.id
+        except Exception:
+            sig_id = None
+        loop.run_until_complete(svc.execute(order_req, account_id=account_id, signal_id=sig_id))
         loop.close()
 
         # Mark as auto-traded

@@ -53,10 +53,49 @@ class MultiBroker(BrokerBase):
                 logger.warning("[multi-broker] %s refresh failed: %s", b.name, r)
 
     async def get_accounts(self) -> List[AccountSummary]:
-        return await self._primary.get_accounts()
+        """Fan out — concatenate accounts from every broker so the dashboard
+        can show per-broker equity/cash side-by-side. A failure at one broker
+        does not blank out the others.
+        """
+        results = await asyncio.gather(
+            *(b.get_accounts() for b in self._brokers), return_exceptions=True
+        )
+        out: List[AccountSummary] = []
+        for b, r in zip(self._brokers, results):
+            if isinstance(r, Exception):
+                logger.warning("[multi-broker] %s get_accounts failed: %s", b.name, r)
+                continue
+            out.extend(r)
+        return out
 
-    async def get_positions(self, account_id: str) -> List[Position]:
-        return await self._primary.get_positions(account_id)
+    async def get_positions(self, account_id: str = "") -> List[Position]:
+        """Fan out — pull each broker's first account and concatenate positions,
+        tagged by broker so callers can group. When `account_id` is supplied it
+        is forwarded only to the broker that owns it; brokers whose first
+        account doesn't match are skipped silently.
+        """
+        async def _for_broker(b: BrokerBase) -> List[Position]:
+            try:
+                accts = await b.get_accounts()
+            except Exception as exc:
+                logger.warning("[multi-broker] %s get_accounts failed: %s", b.name, exc)
+                return []
+            if not accts:
+                return []
+            acct_id = accts[0].account_id
+            if account_id and account_id != acct_id:
+                return []
+            try:
+                return await b.get_positions(acct_id)
+            except Exception as exc:
+                logger.warning("[multi-broker] %s get_positions failed: %s", b.name, exc)
+                return []
+
+        results = await asyncio.gather(*(_for_broker(b) for b in self._brokers))
+        out: List[Position] = []
+        for rows in results:
+            out.extend(rows)
+        return out
 
     async def get_quotes(self, symbols: List[str]) -> Dict[str, Quote]:
         return await self._primary.get_quotes(symbols)

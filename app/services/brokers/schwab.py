@@ -266,6 +266,8 @@ class SchwabBroker(BrokerBase):
                 current_price=p.get("marketValue") / p["longQuantity"] if p.get("longQuantity") else None,
                 market_value=p.get("marketValue"),
                 unrealized_pnl=p.get("unrealizedProfitOrLoss"),
+                broker="schwab",
+                account_id=account_id,
             )
             for p in raw_positions
         ]

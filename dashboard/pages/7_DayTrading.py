@@ -38,6 +38,8 @@ from app.services.strategy.daytrading.strategies import ALL_STRATEGIES, STRATEGY
 sys.path.insert(0, dashboard_root)
 from _theme import apply_theme  # noqa: E402
 import _charts as charts  # noqa: E402
+import api  # noqa: E402
+from _broker_routing import render_broker_routing_toggle  # noqa: E402
 
 apply_theme("Day Trading")
 st.title("Day Trading")
@@ -70,52 +72,7 @@ except Exception:
 
 # Broker-routing toggle: where live orders get sent. "Both" fans out to
 # Schwab + Webull. Webull execution is scaffolded (not yet implemented).
-try:
-    _routing_resp = api.settings_get_trade_routing() or {}
-    _current_routing = _routing_resp.get("trade_routing", "auto")
-    _routing_labels = {
-        "auto": "Auto (use active_broker)",
-        "schwab": "Schwab only",
-        "webull": "Webull only",
-        "both": "Both (Schwab + Webull)",
-        "paper": "Paper",
-    }
-    _options = ["auto", "schwab", "webull", "both", "paper"]
-    _idx = _options.index(_current_routing) if _current_routing in _options else 0
-    _cols = st.columns([3, 2])
-    with _cols[0]:
-        _picked = st.radio(
-            "Broker routing",
-            options=_options,
-            index=_idx,
-            format_func=lambda v: _routing_labels.get(v, v),
-            horizontal=True,
-            key="trade_routing_radio",
-            help=(
-                "Where live orders are sent. 'Both' fans out to Schwab + Webull. "
-                "Webull live trading is not yet implemented — selecting Webull or "
-                "Both will currently fail at the Webull leg."
-            ),
-        )
-    with _cols[1]:
-        _eff = _routing_resp.get("effective_brokers", [])
-        st.markdown(
-            f"<div style='padding-top:1.6em;color:#888;font-size:0.85em;'>"
-            f"Routes to: <b>{', '.join(_eff) or '—'}</b></div>",
-            unsafe_allow_html=True,
-        )
-    if _picked != _current_routing:
-        try:
-            api.settings_set_trade_routing(_picked)
-            st.success(f"Broker routing -> {_picked}")
-            st.rerun()
-        except Exception as _e:
-            st.error(f"Failed to update broker routing: {_e}")
-except Exception as _e:
-    st.warning(
-        f"Broker-routing toggle unavailable: {_e}. "
-        "Restart the FastAPI backend to pick up the /settings route."
-    )
+render_broker_routing_toggle(key_suffix="daytrading")
 
 STRATEGY_DESCRIPTIONS = {
     "ORBBreakout": (

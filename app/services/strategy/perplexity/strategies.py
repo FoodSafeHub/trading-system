@@ -828,44 +828,44 @@ class SupertrendSwing(PerplexityStrategy):
 
     def _supertrend(self, df: pd.DataFrame, period: int, multiplier: float):
         """Compute Supertrend; returns (direction_series, st_line_series).
-        direction: +1 = bullish (price above line), -1 = bearish."""
-        high  = df["High"]
-        low   = df["Low"]
-        close = df["Close"]
-        hl2   = (high + low) / 2
-        atr   = _atr_series(df, period)
+        direction: +1 = bullish (price above line), -1 = bearish.
+
+        Uses numpy arrays inside the carry-forward loop. The original pandas
+        ``.iloc[i] = ...`` version was ~100x slower and made a 10y backtest
+        take ~110s — every bar of the backtest recomputed the whole series.
+        """
+        import numpy as np
+        high  = df["High"].to_numpy()
+        low   = df["Low"].to_numpy()
+        close = df["Close"].to_numpy()
+        hl2   = (high + low) / 2.0
+        atr   = _atr_series(df, period).to_numpy()
         basic_upper = hl2 + multiplier * atr
         basic_lower = hl2 - multiplier * atr
 
         n = len(df)
         final_upper = basic_upper.copy()
         final_lower = basic_lower.copy()
-        direction   = pd.Series(1, index=df.index)
+        direction   = np.ones(n, dtype=np.int64)
 
         for i in range(1, n):
-            # Upper band
-            if basic_upper.iloc[i] < final_upper.iloc[i - 1] or close.iloc[i - 1] > final_upper.iloc[i - 1]:
-                final_upper.iloc[i] = basic_upper.iloc[i]
+            if basic_upper[i] < final_upper[i - 1] or close[i - 1] > final_upper[i - 1]:
+                final_upper[i] = basic_upper[i]
             else:
-                final_upper.iloc[i] = final_upper.iloc[i - 1]
-            # Lower band
-            if basic_lower.iloc[i] > final_lower.iloc[i - 1] or close.iloc[i - 1] < final_lower.iloc[i - 1]:
-                final_lower.iloc[i] = basic_lower.iloc[i]
+                final_upper[i] = final_upper[i - 1]
+            if basic_lower[i] > final_lower[i - 1] or close[i - 1] < final_lower[i - 1]:
+                final_lower[i] = basic_lower[i]
             else:
-                final_lower.iloc[i] = final_lower.iloc[i - 1]
-            # Direction
-            if close.iloc[i] > final_upper.iloc[i - 1]:
-                direction.iloc[i] = 1
-            elif close.iloc[i] < final_lower.iloc[i - 1]:
-                direction.iloc[i] = -1
+                final_lower[i] = final_lower[i - 1]
+            if close[i] > final_upper[i - 1]:
+                direction[i] = 1
+            elif close[i] < final_lower[i - 1]:
+                direction[i] = -1
             else:
-                direction.iloc[i] = direction.iloc[i - 1]
+                direction[i] = direction[i - 1]
 
-        st_line = pd.Series(index=df.index, dtype=float)
-        for i in range(n):
-            st_line.iloc[i] = final_lower.iloc[i] if direction.iloc[i] == 1 else final_upper.iloc[i]
-
-        return direction, st_line
+        st_line_arr = np.where(direction == 1, final_lower, final_upper)
+        return pd.Series(direction, index=df.index), pd.Series(st_line_arr, index=df.index)
 
     def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None, **kwargs) -> PerplexitySignal:
         cfg = self.config

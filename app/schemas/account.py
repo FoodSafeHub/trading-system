@@ -22,6 +22,8 @@ class Position(BaseModel):
     current_price: Optional[float] = None
     market_value: Optional[float] = None
     unrealized_pnl: Optional[float] = None
+    broker: Optional[str] = None
+    account_id: Optional[str] = None
 
 
 class Quote(BaseModel):

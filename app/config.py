@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     trading_end_time: str = "16:00"
     trading_timezone: str = "America/New_York"
 
+    # ── Buying-power preflight ───────────────────────────────
+    # When enabled, BUY orders are rejected if the broker's reported
+    # buying_power is less than (order_value + buying_power_min_buffer_usd).
+    # SELL orders skip the check (they free capital, not consume it).
+    buying_power_check_enabled: bool = True
+    buying_power_min_buffer_usd: float = 0.0
+
     # ── Scheduler ────────────────────────────────────────────
     # Interval for the daily-candle strategy cycle (Bollinger + Perplexity).
     # Day-trading has its own intraday loop (autotrader/manager.py) and is
