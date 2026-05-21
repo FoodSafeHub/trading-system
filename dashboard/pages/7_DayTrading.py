@@ -111,8 +111,11 @@ try:
             st.rerun()
         except Exception as _e:
             st.error(f"Failed to update broker routing: {_e}")
-except Exception:
-    pass
+except Exception as _e:
+    st.warning(
+        f"Broker-routing toggle unavailable: {_e}. "
+        "Restart the FastAPI backend to pick up the /settings route."
+    )
 
 STRATEGY_DESCRIPTIONS = {
     "ORBBreakout": (
