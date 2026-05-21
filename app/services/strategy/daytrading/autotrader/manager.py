@@ -206,6 +206,32 @@ class AutoTraderManager:
                     results[sym] = f"error: {e}"
             return results
 
+    def decision_summary(
+        self, symbol: str | None = None, limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate native-vs-legacy decision data across active traders.
+
+        symbol=None aggregates every running trader; otherwise restricts to
+        the named one. `limit` caps how many recent decision_log entries each
+        trader looks at.
+        """
+        with self._lock:
+            if symbol:
+                t = self._traders.get(symbol.upper())
+                if not t:
+                    return {"error": "not_running", "symbol": symbol.upper()}
+                return {
+                    "now_et": now_et().isoformat(),
+                    "symbols": {symbol.upper(): t.decision_summary(limit=limit)},
+                }
+            return {
+                "now_et": now_et().isoformat(),
+                "symbols": {
+                    sym: t.decision_summary(limit=limit)
+                    for sym, t in self._traders.items()
+                },
+            }
+
     def status(self) -> dict[str, Any]:
         """Snapshot of every active trader plus manager-level config."""
         with self._lock:

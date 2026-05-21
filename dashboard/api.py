@@ -327,3 +327,11 @@ def autotrader_flatten(symbol: str | None = None):
 
 def daytrading_market_status():
     return _get("/daytrading/market-status")
+
+def autotrader_decision_summary(symbol: str | None = None, limit: int | None = None):
+    params: dict = {}
+    if symbol:
+        params["symbol"] = symbol
+    if limit:
+        params["limit"] = limit
+    return _get("/daytrading/autotrader/decision-summary", params=params)

@@ -251,6 +251,134 @@ class SingleStockTrader:
                 "session_trades": [t.to_dict() for t in tsm.session_trades],
             }
 
+    def decision_summary(self, limit: int | None = None) -> dict[str, Any]:
+        """Aggregate the recent decision_log into a native-vs-legacy report.
+
+        Read-only — touches no execution state, just the existing log entries
+        written by `_log(... checks=decision.checks)`. Each FLAT cycle records
+        ONE entry whose `checks.entry_mode` is the live mode and whose
+        `checks.shadow` is what the OTHER mode would have done.
+
+        The summary classifies each cycle into one of four agreement buckets:
+          - both_tradeable     : live tradeable AND shadow tradeable
+          - native_only        : only the native side tradeable
+          - legacy_only        : only the legacy side tradeable
+          - neither_tradeable  : both said NO_TRADE
+
+        It also aggregates the native rejection-category histogram, top
+        legacy low-score reason snippets, the native winning-strategy
+        frequency, and a chronological list of disagreement cycles for
+        targeted chart review.
+
+        Parameters
+        ----------
+        limit : int | None
+            Look at only the most-recent N decision_log entries. None = all.
+        """
+        with self._lock:
+            log = list(self._decision_log)
+        if limit is not None and limit > 0:
+            log = log[-limit:]
+
+        # Only entries that actually represent an entry-evaluation cycle.
+        cycles = [e for e in log if e.get("event") in ("NO_TRADE",) or str(e.get("event", "")).startswith("ENTRY")]
+
+        total = len(cycles)
+        native_tradeable = 0
+        legacy_tradeable = 0
+        both = 0
+        native_only = 0
+        legacy_only = 0
+        neither = 0
+        native_strategy_count: dict[str, int] = {}
+        native_reject_categories: dict[str, int] = {}
+        native_gate_counts: dict[str, int] = {}
+        legacy_low_score_counts: dict[str, int] = {}
+        disagreements: list[dict[str, Any]] = []
+
+        for entry in cycles:
+            checks = entry.get("checks") or {}
+            if not isinstance(checks, dict):
+                continue
+            live_mode = checks.get("entry_mode")
+            event = str(entry.get("event", ""))
+            live_tradeable = event.startswith("ENTRY")
+
+            shadow = checks.get("shadow") or {}
+            shadow_tradeable = bool(shadow.get("tradeable", False))
+
+            # Map live + shadow to native/legacy tradeability.
+            if live_mode == "native_strategy":
+                native_now = live_tradeable
+                legacy_now = shadow_tradeable
+            else:
+                native_now = shadow_tradeable
+                legacy_now = live_tradeable
+
+            native_tradeable += int(native_now)
+            legacy_tradeable += int(legacy_now)
+            if native_now and legacy_now:
+                both += 1
+            elif native_now and not legacy_now:
+                native_only += 1
+            elif legacy_now and not native_now:
+                legacy_only += 1
+            else:
+                neither += 1
+
+            # Native rejection-category histogram (from whichever side native was on).
+            native_checks = checks if live_mode == "native_strategy" else (shadow.get("checks") or {})
+            if isinstance(native_checks, dict):
+                gate = native_checks.get("gate")
+                if gate:
+                    native_gate_counts[gate] = native_gate_counts.get(gate, 0) + 1
+                cats = native_checks.get("native_rejection_categories") or {}
+                if isinstance(cats, dict):
+                    for cat in cats.values():
+                        native_reject_categories[cat] = native_reject_categories.get(cat, 0) + 1
+                winner = native_checks.get("winning_strategy")
+                if winner:
+                    native_strategy_count[winner] = native_strategy_count.get(winner, 0) + 1
+
+            # Legacy "low score" reason histogram. Legacy NO_TRADE reasons look
+            # like "Long score 0.28 < min 0.45; Short score 0.12 < min 0.45".
+            legacy_checks = checks if live_mode == "legacy_entry_decider" else (shadow.get("checks") or {})
+            legacy_reason = entry.get("reason") if live_mode == "legacy_entry_decider" else shadow.get("reason")
+            if isinstance(legacy_reason, str) and not (legacy_now):
+                token = _classify_legacy_reason(legacy_reason)
+                if token:
+                    legacy_low_score_counts[token] = legacy_low_score_counts.get(token, 0) + 1
+
+            # Track disagreement cycles for review.
+            if (native_now and not legacy_now) or (legacy_now and not native_now):
+                disagreements.append({
+                    "time": entry.get("time"),
+                    "side_traded": "native" if native_now else "legacy",
+                    "native_chosen_strategy": (native_checks or {}).get("winning_strategy"),
+                    "live_reason": entry.get("reason"),
+                    "shadow_reason": shadow.get("reason"),
+                })
+
+        return {
+            "symbol": self.symbol,
+            "entry_mode_live": self.entry_mode,
+            "cycles_observed": total,
+            "native_tradeable": native_tradeable,
+            "legacy_tradeable": legacy_tradeable,
+            "agreement": {
+                "both_tradeable": both,
+                "native_only": native_only,
+                "legacy_only": legacy_only,
+                "neither_tradeable": neither,
+            },
+            "native_rejection_categories": _sorted_hist(native_reject_categories),
+            "native_gate_counts": _sorted_hist(native_gate_counts),
+            "native_winning_strategy_freq": _sorted_hist(native_strategy_count),
+            "legacy_low_score_reasons": _sorted_hist(legacy_low_score_counts),
+            "disagreements": disagreements[-20:],   # cap for response size
+            "disagreement_count": len(disagreements),
+        }
+
     def on_new_bar(self, timeframe: str, df: pd.DataFrame) -> None:
         """
         Called externally when a new bar is available.
@@ -386,12 +514,20 @@ class SingleStockTrader:
                 "native" if self.entry_mode == "native_strategy" else "legacy_scoring",
             )
 
+        # Shadow run the OTHER mode read-only so the decision log shows what
+        # native would have done while legacy is live (or vice versa). Never
+        # executes — just populates checks["shadow"].
+        shadow = self._shadow_decide()
+        if shadow is not None and isinstance(decision.checks, dict):
+            decision.checks["shadow"] = shadow
+
         if not decision.is_tradeable:
             self._last_no_trade_reason = decision.entry_reason
             self._log(
                 "NO_TRADE",
                 f"[{self.entry_mode}] {decision.entry_reason}",
                 "debug",
+                checks=decision.checks if isinstance(decision.checks, dict) else None,
             )
             return
 
@@ -430,10 +566,11 @@ class SingleStockTrader:
 
         self._log(
             f"ENTRY {side}",
-            f"{decision.entry_reason} | qty={qty:.0f} entry={filled_price:.2f} "
+            f"[{self.entry_mode}] {decision.entry_reason} | qty={qty:.0f} entry={filled_price:.2f} "
             f"stop={decision.stop_price:.2f} target={decision.target_price:.2f} "
             f"conf={decision.confidence:.2f}",
             "info",
+            checks=decision.checks if isinstance(decision.checks, dict) else None,
         )
         self._notify_update()
 
@@ -559,16 +696,30 @@ class SingleStockTrader:
             return float(self._df_1m["Close"].iloc[-1])
         return 0.0
 
-    def _log(self, event: str, reason: str, level: str = "info") -> None:
-        """Append a structured decision log entry."""
+    def _log(
+        self,
+        event: str,
+        reason: str,
+        level: str = "info",
+        checks: dict | None = None,
+    ) -> None:
+        """Append a structured decision log entry.
+
+        When `checks` is provided (typically `decision.checks`), it lands in the
+        log entry so the status endpoint can show legacy_scoring vs native
+        comparisons (long_score/short_score for legacy, native_rejections and
+        winning_strategy for native, plus shadow snapshot of the other mode).
+        """
         now = now_et().strftime("%H:%M:%S")
-        entry = {
+        entry: dict[str, Any] = {
             "time": now,
             "event": event,
             "symbol": self.symbol,
             "state": self.tsm.state.value,
             "reason": reason,
         }
+        if checks:
+            entry["checks"] = checks
         self._decision_log.append(entry)
         if len(self._decision_log) > 200:
             self._decision_log = self._decision_log[-200:]
@@ -576,12 +727,86 @@ class SingleStockTrader:
         log_fn = getattr(logger, level if level in ("info", "warning", "error", "debug") else "info")
         log_fn("[%s] %s %s — %s", now, event, self.symbol, reason)
 
+    def _shadow_decide(self) -> dict | None:
+        """Run the inactive decider read-only for diagnostic comparison.
+
+        Returns a compact dict (not a full EntryDecision) so the decision log
+        stays small. Never executes — purely informational. Errors are swallowed
+        so a shadow failure can't block the live path.
+        """
+        try:
+            other = self.entry_decider if self.entry_mode == "native_strategy" else self.native_entry
+            other_mode_name = (
+                "legacy_entry_decider" if self.entry_mode == "native_strategy" else "native_strategy"
+            )
+            shadow = other.decide(
+                symbol=self.symbol,
+                df_1m=self._df_1m if self._df_1m is not None else pd.DataFrame(),
+                df_5m=self._df_5m,
+                df_15m=self._df_15m if self._df_15m is not None else pd.DataFrame(),
+                market_state=self._market_state,
+                account_equity=self.initial_capital + self.tsm.daily_pnl,
+            )
+            return {
+                "mode": other_mode_name,
+                "action": shadow.action,
+                "tradeable": shadow.is_tradeable,
+                "confidence": round(shadow.confidence, 3),
+                "chosen_strategy": shadow.chosen_strategy,
+                "reason": shadow.entry_reason,
+                "stop_price": shadow.stop_price,
+                "target_price": shadow.target_price,
+                "checks": shadow.checks if isinstance(shadow.checks, dict) else {},
+            }
+        except Exception as e:
+            logger.debug("[shadow] decide failed: %s", e)
+            return {"mode": "shadow", "error": f"{type(e).__name__}: {e}"}
+
     def _notify_update(self) -> None:
         if self.on_trade_update:
             try:
                 self.on_trade_update(self.get_status())
             except Exception:
                 pass
+
+
+def _sorted_hist(counts: dict[str, int]) -> list[dict[str, Any]]:
+    """Return a histogram dict as a sorted list of {category, count} for
+    deterministic JSON output. Empty input → empty list."""
+    return [
+        {"category": k, "count": v}
+        for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+
+def _classify_legacy_reason(reason: str) -> str | None:
+    """Bucket free-text legacy NO_TRADE reasons into stable category tokens.
+
+    Mirrors the strings EntryDecider.decide() emits. Returns None when the
+    reason doesn't match a known bucket so noise stays out of the histogram.
+    """
+    r = reason.lower()
+    if "too late in day" in r:
+        return "late_entry_window"
+    if "long score" in r and "short score" in r:
+        return "both_scores_below_min"
+    if "long score" in r:
+        return "long_score_below_min"
+    if "short score" in r:
+        return "short_score_below_min"
+    if "r:r" in r and "minimum" in r:
+        return "rr_below_min"
+    if "too extended" in r:
+        return "price_too_extended"
+    if "news_risk" in r:
+        return "news_risk"
+    if "stop" in r and "not below entry" in r:
+        return "invalid_stop"
+    if "insufficient" in r:
+        return "insufficient_bars"
+    if "invalid stop" in r:
+        return "invalid_stop_target"
+    return None
 
 
 def _describe_management_profile(market_state: str, strategy: str) -> str:

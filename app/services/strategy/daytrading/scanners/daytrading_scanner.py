@@ -148,6 +148,16 @@ class SymbolScanResult:
     metrics: SymbolScanMetrics
     rejection_reason: str = ""              # empty string = passed all filters
 
+    # ── Native-signal pre-check fields (populated only for top-K) ─────────────
+    # Empty / None when the pre-check did not run on this symbol (deep in the
+    # tail) or when no audited strategy accepted at the current bar.
+    native_signal_active: bool = False
+    active_native_strategies: list[str] = field(default_factory=list)
+    best_native_strategy: str | None = None
+    best_native_side: str | None = None            # "BUY" | "SELL" | None
+    best_native_confidence: float | None = None
+    native_precheck_ran: bool = False              # True if we executed the pre-check
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "symbol": self.symbol,
@@ -157,6 +167,15 @@ class SymbolScanResult:
             "recommended_strategy_bucket": self.recommended_strategy_bucket,
             "metrics": self.metrics.to_dict(),
             "rejection_reason": self.rejection_reason,
+            "native_signal_active": self.native_signal_active,
+            "active_native_strategies": list(self.active_native_strategies),
+            "best_native_strategy": self.best_native_strategy,
+            "best_native_side": self.best_native_side,
+            "best_native_confidence": (
+                round(self.best_native_confidence, 3)
+                if self.best_native_confidence is not None else None
+            ),
+            "native_precheck_ran": self.native_precheck_ran,
         }
 
 
@@ -498,6 +517,9 @@ class DayTradingScanner:
         self,
         max_symbols: int = 20,
         market_state: str | None = None,
+        *,
+        run_native_precheck: bool = True,
+        precheck_top_k: int = 10,
     ) -> list[SymbolScanResult]:
         """
         Brain-aware wrapper around scan().
@@ -510,6 +532,17 @@ class DayTradingScanner:
           - NEWS_RISK: caps the watchlist at 5 names regardless of max_symbols.
 
         If no brain is available, returns the raw scan() output.
+
+        Parameters
+        ----------
+        run_native_precheck : when True (default), runs the audited 4-strategy
+            generate_signals() check on the top ``precheck_top_k`` candidates
+            and promotes any with native_signal_active=True to the front of
+            the watchlist. The check is bounded (10 yfinance fetches by
+            default), so the cost is fixed regardless of universe size.
+        precheck_top_k : how many post-regime top candidates the pre-check
+            runs on. Default 10. Set to 0 to disable equivalent to
+            run_native_precheck=False.
         """
         candidates = self.scan(max_symbols=max_symbols * 3)  # over-fetch, then trim
         if not candidates:
@@ -521,8 +554,14 @@ class DayTradingScanner:
             state = self._resolve_market_state()
 
         if state is None:
-            # No brain / no state — return raw top-N
-            return candidates[:max_symbols]
+            # No brain / no state — still run pre-check on the raw top-K.
+            watchlist = candidates[:max_symbols]
+            if run_native_precheck and precheck_top_k > 0:
+                self._apply_native_precheck(
+                    watchlist, market_state=None, top_k=precheck_top_k,
+                )
+                watchlist.sort(key=_precheck_sort_key, reverse=True)
+            return watchlist
 
         # Apply regime adjustment multipliers
         multipliers = _regime_strategy_multipliers(state)
@@ -538,10 +577,50 @@ class DayTradingScanner:
         cap = 5 if state == "NEWS_RISK" else max_symbols
         watchlist = candidates[:cap]
 
+        # ── Native-signal pre-check on the top-K ──────────────────────────────
+        # Promotes "signaling right now" candidates above "looks good today but
+        # nothing is firing." Sorted score is preserved as the tiebreaker.
+        if run_native_precheck and precheck_top_k > 0:
+            self._apply_native_precheck(
+                watchlist, market_state=state, top_k=precheck_top_k,
+            )
+            watchlist.sort(key=_precheck_sort_key, reverse=True)
+
         logger.info(
             f"Watchlist ready: {len(watchlist)} symbols (market_state={state})"
         )
         return watchlist
+
+    def _apply_native_precheck(
+        self,
+        watchlist: list["SymbolScanResult"],
+        market_state: str | None,
+        top_k: int,
+    ) -> None:
+        """Run native_precheck on the top-K of `watchlist` and stamp results in place."""
+        # Lazy import: keeps the scanner module's import surface unchanged and
+        # avoids paying for autotrader/strategy imports when precheck is off.
+        from app.services.strategy.daytrading.scanners.native_precheck import (
+            run_native_precheck,
+        )
+
+        top = watchlist[:top_k]
+        if not top:
+            return
+        results = run_native_precheck(
+            symbols=[r.symbol for r in top],
+            market_state=market_state,
+        )
+        for r in top:
+            check = results.get(r.symbol)
+            r.native_precheck_ran = True
+            if check is None:
+                continue
+            r.native_signal_active = check.native_signal_active
+            r.active_native_strategies = list(check.active_native_strategies)
+            r.best_native_strategy = check.best_native_strategy
+            r.best_native_side = check.best_native_side
+            r.best_native_confidence = check.best_native_confidence
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -886,6 +965,18 @@ def _pick_bucket(
     if "VWAP" in tag_set or "gap_fade_candidate" in tag_set:
         return "VWAP"
     return "ORB"
+
+
+def _precheck_sort_key(r: "SymbolScanResult") -> tuple[int, float, float]:
+    """Sort key that promotes native_signal_active=True ahead of inactive picks.
+
+    Within each tier, ties are broken by best_native_confidence (when present)
+    and finally by adjusted_score. Used with reverse=True so higher tiers and
+    higher numerics come first.
+    """
+    tier = 1 if r.native_signal_active else 0
+    conf = r.best_native_confidence if r.best_native_confidence is not None else 0.0
+    return (tier, conf, r.adjusted_score)
 
 
 def _regime_strategy_multipliers(state: str) -> dict[str, float]:

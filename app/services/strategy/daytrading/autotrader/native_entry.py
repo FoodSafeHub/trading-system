@@ -117,12 +117,14 @@ class NativeStrategyEntry:
             return _no_trade(
                 "Too late in day — no new entries after 15:15 ET",
                 entry_mode="native_strategy",
+                extra_checks={"gate": "late_entry_window"},
             )
 
         if df_5m is None or len(df_5m) < 15:
             return _no_trade(
                 "Insufficient 5m bar history",
                 entry_mode="native_strategy",
+                extra_checks={"gate": "insufficient_bars"},
             )
 
         brain_state = market_state.state if market_state else "UNKNOWN"
@@ -130,7 +132,7 @@ class NativeStrategyEntry:
             return _no_trade(
                 "Market is NEWS_RISK — no entries during catalyst events",
                 entry_mode="native_strategy",
-                extra_checks={"state": brain_state},
+                extra_checks={"gate": "news_risk", "state": brain_state},
             )
 
         regime = map_brain_state_to_regime(brain_state)
@@ -139,7 +141,8 @@ class NativeStrategyEntry:
 
         # ── Run each native strategy ──────────────────────────────────────
         accepted: list[DayTradeSignal] = []
-        rejections: dict[str, str] = {}
+        rejections: dict[str, str] = {}      # human-readable per-strategy reason
+        categories: dict[str, str] = {}      # stable category code for aggregation
 
         df_15m_safe = df_15m if df_15m is not None else pd.DataFrame()
 
@@ -155,6 +158,7 @@ class NativeStrategyEntry:
                 )
             except Exception as e:
                 rejections[sname] = f"exception: {type(e).__name__}: {e}"
+                categories[sname] = "exception"
                 logger.warning(
                     "[native_entry] %s.generate_signals raised: %s", sname, e,
                 )
@@ -162,6 +166,7 @@ class NativeStrategyEntry:
 
             if not sigs:
                 rejections[sname] = "no signal at current bar"
+                categories[sname] = "no_signal"
                 continue
 
             # Strategies may return historical signals; we only act on the
@@ -183,6 +188,7 @@ class NativeStrategyEntry:
                         rejections[sname] = (
                             f"stale signal ({delta:.0f}s old)"
                         )
+                        categories[sname] = "stale"
                         continue
                 except Exception:
                     pass  # if comparison fails, accept the signal
@@ -190,24 +196,29 @@ class NativeStrategyEntry:
             direction = (sig.direction or "").upper()
             if direction == "BUY" and not can_long:
                 rejections[sname] = "BUY signal but direction_mode disallows longs"
+                categories[sname] = "direction_disallowed"
                 continue
             if direction == "SELL" and not can_short:
                 rejections[sname] = "SELL signal but direction_mode disallows shorts"
+                categories[sname] = "direction_disallowed"
                 continue
             if direction not in ("BUY", "SELL"):
                 rejections[sname] = f"unexpected direction '{direction}'"
+                categories[sname] = "bad_direction"
                 continue
 
             if sig.confidence < self.min_confidence:
                 rejections[sname] = (
                     f"confidence {sig.confidence:.2f} < min {self.min_confidence}"
                 )
+                categories[sname] = "low_confidence"
                 continue
 
             if sig.r_multiple and sig.r_multiple < self.min_rr:
                 rejections[sname] = (
                     f"R:R {sig.r_multiple:.2f} < min {self.min_rr}"
                 )
+                categories[sname] = "low_rr"
                 continue
 
             accepted.append(sig)
@@ -218,10 +229,12 @@ class NativeStrategyEntry:
                 "No native strategy accepted at current bar",
                 entry_mode="native_strategy",
                 extra_checks={
+                    "gate": "no_accepted_signal",
                     "state": brain_state,
                     "regime_mapped": regime,
                     "native_candidates_considered": list(self.native_strategies),
                     "native_rejections": rejections,
+                    "native_rejection_categories": categories,
                 },
             )
 
@@ -233,7 +246,11 @@ class NativeStrategyEntry:
             return _no_trade(
                 f"{winner.strategy}: invalid stop/target prices",
                 entry_mode="native_strategy",
-                extra_checks={"native_rejections": rejections},
+                extra_checks={
+                    "gate": "invalid_stop_target",
+                    "native_rejections": rejections,
+                    "native_rejection_categories": categories,
+                },
             )
 
         if action == "BUY":
@@ -248,7 +265,11 @@ class NativeStrategyEntry:
                 f"{winner.strategy}: stop {winner.stop_price:.2f} on wrong side of entry "
                 f"{winner.entry_price:.2f} for {action}",
                 entry_mode="native_strategy",
-                extra_checks={"native_rejections": rejections},
+                extra_checks={
+                    "gate": "invalid_risk",
+                    "native_rejections": rejections,
+                    "native_rejection_categories": categories,
+                },
             )
 
         rr = reward / risk if risk > 0 else 0.0
@@ -273,6 +294,7 @@ class NativeStrategyEntry:
                 for s in accepted
             ],
             "native_rejections": rejections,
+            "native_rejection_categories": categories,
             "rr": round(rr, 2),
         }
 

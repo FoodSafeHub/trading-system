@@ -412,12 +412,15 @@ class EntryDecider:
 
         # ── Bollinger squeeze breakdown (short) ───────────────────────────────
         bb_lower = ind.get("bb_lower", 0)
+        bb_squeeze = ind.get("bb_squeeze", False)
         if bb_lower > 0 and close < bb_lower and bb_squeeze:
             score += 0.08
             reasons.append(f"BB squeeze breakdown below {bb_lower:.2f}")
             strategy = "BollingerMomentum"
 
         # ── Supertrend pullback (short) ────────────────────────────────────────
+        st_line = ind.get("st_line", 0)
+        st_dir  = ind.get("st_dir", 0)
         if st_line > 0 and st_dir == -1 and state in (TREND_DOWN,):
             dist_to_st = st_line - close
             atr_val = ind.get("atr", 1)
