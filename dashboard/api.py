@@ -357,3 +357,11 @@ def autotrader_decision_summary(symbol: str | None = None, limit: int | None = N
     if limit:
         params["limit"] = limit
     return _get("/daytrading/autotrader/decision-summary", params=params)
+
+
+def settings_get_trade_routing():
+    return _get("/settings/trade-routing")
+
+
+def settings_set_trade_routing(value: str):
+    return _post("/settings/trade-routing", json={"trade_routing": value})

@@ -30,6 +30,10 @@ class Settings(BaseSettings):
 
     # ── Broker ───────────────────────────────────────────────
     active_broker: Literal["paper", "schwab", "webull"] = "paper"
+    # Multi-broker trade routing. When "auto", falls back to active_broker
+    # (backwards compatible). When "schwab"/"webull", routes there only.
+    # When "both", fans out every order to Schwab AND Webull.
+    trade_routing: Literal["auto", "paper", "schwab", "webull", "both"] = "auto"
 
     # Schwab
     schwab_client_id: str = ""
@@ -58,7 +62,11 @@ class Settings(BaseSettings):
     trading_timezone: str = "America/New_York"
 
     # ── Scheduler ────────────────────────────────────────────
-    scheduler_interval_seconds: int = 60
+    # Interval for the daily-candle strategy cycle (Bollinger + Perplexity).
+    # Day-trading has its own intraday loop (autotrader/manager.py) and is
+    # NOT driven by this scheduler. Daily strategies don't benefit from
+    # sub-hour ticks — hourly is plenty and avoids needless yfinance calls.
+    scheduler_interval_seconds: int = 3600
     scheduler_enabled: bool = True
     # Which strategy systems participate in the auto-scheduler cycle.
     # Both can be enabled at the same time.

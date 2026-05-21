@@ -93,6 +93,9 @@ _TD_OUTPUTSIZE = {
 
 def _fetch_twelvedata(symbol: str, interval: str, period: str) -> pd.DataFrame:
     """Fetch intraday bars from Twelve Data REST API. Returns empty DataFrame on failure."""
+    from app.services.strategy.daytrading.data_providers import td_breaker
+    if td_breaker.is_tripped():
+        return pd.DataFrame()
     try:
         from app.config import get_settings
         api_key = get_settings().twelve_data_api_key
@@ -119,7 +122,9 @@ def _fetch_twelvedata(symbol: str, interval: str, period: str) -> pd.DataFrame:
         data = resp.json()
 
         if data.get("status") == "error" or "values" not in data:
-            logger.warning("[twelvedata] %s %s: %s", symbol, interval, data.get("message", "no values"))
+            msg = data.get("message", "no values") or "no values"
+            td_breaker.note_response_text(msg)
+            logger.warning("[twelvedata] %s %s: %s", symbol, interval, msg)
             return pd.DataFrame()
 
         records = data["values"]

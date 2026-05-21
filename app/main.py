@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import account, assignments, backtest, chart, daytrading, health, orders, perplexity, risk, scanner, signals, strategy, schwab_auth
+from app.api.routes import account, assignments, backtest, chart, daytrading, health, orders, perplexity, risk, scanner, settings as settings_routes, signals, strategy, schwab_auth
 from app.config import get_settings
 from app.db import init_db
 from app.services.strategy.scheduler import start_scheduler, stop_scheduler
@@ -77,6 +77,7 @@ app.include_router(assignments.router)
 app.include_router(scanner.router)
 app.include_router(daytrading.router, prefix="/daytrading")
 app.include_router(chart.router)
+app.include_router(settings_routes.router)
 
 # ── Static files ─────────────────────────────────────────────
 try:

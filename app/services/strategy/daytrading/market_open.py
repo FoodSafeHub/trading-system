@@ -26,6 +26,9 @@ def _fetch_twelvedata_raw(symbol: str, interval: str, period: str) -> pd.DataFra
     """Twelve Data tier only — empty DF on any failure. Internal helper."""
     _TD_MAP = {"1m": "1min", "5m": "5min", "15m": "15min", "1d": "1day"}
     _SIZE_MAP = {"1d": 390, "2d": 780, "5d": 500, "60d": 800}
+    from app.services.strategy.daytrading.data_providers import td_breaker
+    if td_breaker.is_tripped():
+        return pd.DataFrame()
     try:
         from app.config import get_settings
         api_key = get_settings().twelve_data_api_key
@@ -46,7 +49,9 @@ def _fetch_twelvedata_raw(symbol: str, interval: str, period: str) -> pd.DataFra
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") == "error" or "values" not in data:
-            _log.debug("[twelvedata] %s %s: %s", symbol, interval, data.get("message", ""))
+            msg = data.get("message", "") or ""
+            td_breaker.note_response_text(msg)
+            _log.debug("[twelvedata] %s %s: %s", symbol, interval, msg)
             return pd.DataFrame()
         df = pd.DataFrame(data["values"])
         df["datetime"] = pd.to_datetime(df["datetime"])
