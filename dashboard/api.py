@@ -28,8 +28,8 @@ def _get(path: str, timeout: int = 10, **kwargs):
     return r.json()
 
 
-def _post(path: str, **kwargs):
-    r = requests.post(f"{BASE}{path}", timeout=10, verify=False, **kwargs)
+def _post(path: str, timeout: int = 10, **kwargs):
+    r = requests.post(f"{BASE}{path}", timeout=timeout, verify=False, **kwargs)
     _raise_with_body(r)
     return r.json()
 
@@ -286,7 +286,9 @@ def daytrading_scanner_watchlist(
     min_float: float | None = None,
     max_float: float | None = None,
     universe_max_symbols: int | None = None,
-    timeout: int = 300,
+    run_native_precheck: bool | None = None,
+    precheck_top_k: int | None = None,
+    timeout: int = 600,
 ):
     params: dict = {
         "max_symbols": max_symbols,
@@ -303,10 +305,27 @@ def daytrading_scanner_watchlist(
         params["max_float"] = max_float
     if universe_max_symbols is not None:
         params["universe_max_symbols"] = universe_max_symbols
+    if run_native_precheck is not None:
+        # FastAPI's bool query parser accepts "true"/"false" strings
+        params["run_native_precheck"] = str(run_native_precheck).lower()
+    if precheck_top_k is not None:
+        params["precheck_top_k"] = precheck_top_k
     return _get("/daytrading/scanner/watchlist", timeout=timeout, params=params)
 
 def daytrading_scanner_metrics(symbol: str):
     return _get(f"/daytrading/scanner/metrics/{symbol}", timeout=60)
+
+def autotrader_start_from_scanner(config: dict, timeout: int = 300):
+    """POST /daytrading/autotrader/start-from-scanner.
+
+    Pass any subset of: max_symbols, allowed_buckets, direction_mode, trail_mode,
+    partial_tp, risk_per_trade_pct, max_daily_loss_pct, max_trades_per_day,
+    max_consecutive_losses, initial_capital, broker_name, entry_mode,
+    native_strategies, market_state, min_score, require_native_signal,
+    prefer_native_signal, min_best_native_confidence, precheck_top_k, force.
+    Backend defaults are sensible — most calls just need max_symbols.
+    """
+    return _post("/daytrading/autotrader/start-from-scanner", json=config, timeout=timeout)
 
 # ── Day-trading auto-trader switch ────────────────────────────────────
 
@@ -327,6 +346,9 @@ def autotrader_flatten(symbol: str | None = None):
 
 def daytrading_market_status():
     return _get("/daytrading/market-status")
+
+def daytrading_data_source_status():
+    return _get("/daytrading/data-source-status")
 
 def autotrader_decision_summary(symbol: str | None = None, limit: int | None = None):
     params: dict = {}

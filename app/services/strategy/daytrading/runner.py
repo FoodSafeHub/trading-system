@@ -38,11 +38,40 @@ logger = logging.getLogger(__name__)
 
 _FIRST_HOUR_END = _time(10, 30)   # signals/bars at or before this are "first hour"
 
+# Process-level provider counters. Tracks how many fetch_intraday() calls each
+# provider has served since the API process started. Read by the dashboard
+# provider-health badge via /daytrading/data-source-status. Cleared on restart.
+_PROVIDER_COUNTERS: dict[str, int] = {
+    "twelvedata": 0,
+    "webull": 0,
+    "yfinance": 0,
+    "empty": 0,
+}
+
+
+def get_provider_stats() -> dict[str, Any]:
+    """Snapshot of provider usage since process start. Returns total + per-provider counts."""
+    total = sum(_PROVIDER_COUNTERS.values())
+    served = total - _PROVIDER_COUNTERS["empty"]
+    # Last-used = provider with most recent successful serve. We approximate via
+    # "primary" = the most-used non-empty provider in this session.
+    primary = max(
+        (p for p in ("twelvedata", "webull", "yfinance")),
+        key=lambda p: _PROVIDER_COUNTERS[p],
+    ) if served > 0 else None
+    return {
+        "counters": dict(_PROVIDER_COUNTERS),
+        "total_calls": total,
+        "served_calls": served,
+        "empty_calls": _PROVIDER_COUNTERS["empty"],
+        "primary_provider": primary,
+    }
+
 # Module-level brain singleton
 _brain = DayTradingBrain()
 
 
-# Twelve Data interval map: yfinance-style → Twelve Data format
+# Twelve Data interval map: yfinance-style -> Twelve Data format
 _TD_INTERVAL_MAP = {
     "1m": "1min",
     "5m": "5min",
@@ -52,7 +81,7 @@ _TD_INTERVAL_MAP = {
     "1d": "1day",
 }
 
-# period string → approximate outputsize (number of bars to request)
+# period string -> approximate outputsize (number of bars to request)
 _TD_OUTPUTSIZE = {
     "1d":  390,    # 1 trading day of 1m bars
     "2d":  780,
@@ -109,7 +138,7 @@ def _fetch_twelvedata(symbol: str, interval: str, period: str) -> pd.DataFrame:
         else:
             df.index = df.index.tz_convert(ET)
 
-        logger.info("[twelvedata] %s %s %s → %d bars", symbol, interval, period, len(df))
+        logger.info("[twelvedata] %s %s %s -> %d bars", symbol, interval, period, len(df))
         return df
 
     except Exception as e:
@@ -136,25 +165,46 @@ def fetch_intraday(
     period: str = "5d",
     diag: PipelineDiagnostics | None = None,
 ) -> pd.DataFrame:
-    """Download intraday bars. Uses Twelve Data for intraday intervals, falls back to yfinance."""
+    """Download intraday bars. Provider chain: Twelve Data -> Webull -> yfinance."""
     df = pd.DataFrame()
+    source = "yfinance"
 
-    # Try Twelve Data first for intraday intervals
+    # 1) Twelve Data — primary for intraday intervals
     if interval in _TD_INTERVAL_MAP and interval != "1d":
         df = _fetch_twelvedata(symbol, interval, period)
+        if not df.empty:
+            source = "twelvedata"
 
-    # Fall back to yfinance if Twelve Data returned nothing
+    # 2) Webull — first fallback (covers TD rate-limit, auth error, region gate)
     if df.empty:
-        source = "yfinance"
+        from app.services.strategy.daytrading.data_providers.webull_md import fetch_webull
+        wb = fetch_webull(symbol, interval, period)
+        if not wb.empty:
+            logger.info("[fallback] TD -> Webull for %s %s %s (%d bars)",
+                        symbol, interval, period, len(wb))
+            df = wb
+            source = "webull"
+
+    # 3) yfinance — second fallback
+    if df.empty:
+        logger.info("[fallback] Webull -> yfinance for %s %s %s",
+                    symbol, interval, period)
         df = yf.download(symbol, period=period, interval=interval, progress=False)
         if df.empty:
             if diag is not None:
-                diag.data_warning = f"No data for {symbol} {interval} {period} (tried Twelve Data + yfinance)"
+                diag.data_warning = (
+                    f"No data for {symbol} {interval} {period} "
+                    f"(tried Twelve Data + Webull + yfinance)"
+                )
             logger.warning("fetch_intraday: 0 bars for %s %s %s", symbol, interval, period)
+            _PROVIDER_COUNTERS["empty"] += 1
             return df
         df = _normalise_df(df)
-    else:
-        source = "twelvedata"
+        source = "yfinance"
+
+    # Attach provider attribution so downstream callers can read df.attrs["source"]
+    df.attrs["source"] = source
+    _PROVIDER_COUNTERS[source] = _PROVIDER_COUNTERS.get(source, 0) + 1
 
     if diag is not None and interval == "5m":
         mh = df.between_time("09:30", "16:00")
@@ -164,7 +214,7 @@ def fetch_intraday(
         diag.latest_bar = str(df.index[-1]) if not df.empty else ""
         diag.timezone = str(df.index.tzinfo)
         logger.info(
-            "fetch_intraday [%s]: %s %s %s → %d bars (%d mkt-hrs) [%s .. %s]",
+            "fetch_intraday [%s]: %s %s %s -> %d bars (%d mkt-hrs) [%s .. %s]",
             source, symbol, interval, period, len(df), len(mh),
             diag.earliest_bar[:16], diag.latest_bar[:16],
         )
@@ -258,7 +308,7 @@ def run_signals(
 
         generated = len(raw_signals) - before
         logger.debug(
-            "run_signals: %s strategy=%s regime=%s → %d raw signals",
+            "run_signals: %s strategy=%s regime=%s -> %d raw signals",
             symbol, strategy.name, regime, generated,
         )
 
@@ -532,7 +582,7 @@ def run_backtest(
 
         if day_raw:
             logger.debug(
-                "run_backtest: %s %s regime=%s → %d raw signals",
+                "run_backtest: %s %s regime=%s -> %d raw signals",
                 symbol, date, regime, len(day_raw),
             )
 
@@ -655,7 +705,7 @@ def run_backtest(
     diag.strategies_run = [strategy_name]
     diag.accepted_signals = diag.raw_signals_generated   # backtest has no brain filter
     logger.info(
-        "run_backtest: %s %s → days=%d skip_short=%d skip_regime=%d "
+        "run_backtest: %s %s -> days=%d skip_short=%d skip_regime=%d "
         "raw=%d trades_opened=%d trades_closed=%d skip_no_bars=%d",
         symbol, strategy_name,
         diag.trading_days_found, diag.trading_days_skipped_short, diag.days_skipped_by_regime,
@@ -1073,7 +1123,7 @@ def run_backtest_with_brain(
             local_brain._last_market_state = ms
             local_brain._last_routing = routing
 
-            # Map brain state → legacy regime string for strategy.generate_signals compat
+            # Map brain state -> legacy regime string for strategy.generate_signals compat
             if ms.state == TREND_UP:
                 regime = "BULL_OPEN"
             elif ms.state == TREND_DOWN:

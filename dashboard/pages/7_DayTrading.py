@@ -46,6 +46,28 @@ st.caption(
     "All signals expire at market close. No overnight holds."
 )
 
+# Provider-health badge: shows which market-data provider has served the most
+# bar requests in this API session. Helps spot when TD has been exhausted and
+# the fallback chain (Webull -> yfinance) is doing the work.
+try:
+    _ds = api.daytrading_data_source_status() or {}
+    _status = _ds.get("status", "idle")
+    _label = _ds.get("label", "unknown")
+    _counters = _ds.get("counters", {}) or {}
+    _color = {"ok": "green", "degraded": "orange", "idle": "gray"}.get(_status, "gray")
+    _detail = (
+        f"TD: {_counters.get('twelvedata', 0)} · "
+        f"Webull: {_counters.get('webull', 0)} · "
+        f"yfinance: {_counters.get('yfinance', 0)}"
+    )
+    st.markdown(
+        f":{_color}-background[**Data: {_label}**] &nbsp; "
+        f"<span style='color:#888;font-size:0.85em;'>{_detail}</span>",
+        unsafe_allow_html=True,
+    )
+except Exception:
+    pass
+
 STRATEGY_DESCRIPTIONS = {
     "ORBBreakout": (
         "Opening Range Breakout — price breaks above/below the first 15m range "
@@ -1227,7 +1249,23 @@ with tab_scanner:
     ms_min_float = ms_min_float_m * 1_000_000
     ms_max_float = ms_max_float_m * 1_000_000
 
+    # ── Native precheck controls ─────────────────────────────────────────────
+    # The pre-check runs the 4 audited strategies (BollingerMomentum,
+    # SupertrendTrend, EMAMomentum, ORBBreakout) on the top-K of the scanner
+    # output, so rows with native_signal_active=True are "firing right now."
+    pc1, pc2 = st.columns(2)
+    ms_run_precheck = pc1.checkbox(
+        "Run native pre-check on top-K", value=True, key="ms_run_precheck",
+        help="Adds ~10–20s. Flags scanner rows whose audited strategies have an accepted signal at the current bar.",
+    )
+    ms_precheck_top_k = pc2.number_input(
+        "Precheck top-K", min_value=0, max_value=50, value=10, step=1,
+        key="ms_precheck_top_k",
+        help="How many top-ranked candidates the pre-check runs on. 0 disables.",
+    )
+
     if st.button("Run Market Scan", key="run_market_scan_btn", type="primary"):
+        scan_failed = False
         with st.spinner("Scanning market — fetching bars, scoring, applying regime adjustments…"):
             try:
                 ranked = _api.daytrading_scanner_watchlist(
@@ -1240,19 +1278,51 @@ with tab_scanner:
                     min_float=float(ms_min_float) if ms_min_float > 0 else None,
                     max_float=float(ms_max_float) if ms_max_float > 0 else None,
                     universe_max_symbols=int(ms_universe_cap) if ms_universe_cap > 0 else None,
+                    run_native_precheck=bool(ms_run_precheck),
+                    precheck_top_k=int(ms_precheck_top_k),
                 )
             except Exception as e:
                 ranked = []
-                st.error(f"Market scan failed: {e}")
+                scan_failed = True
+                msg = str(e)
+                if "timed out" in msg.lower() or "timeout" in msg.lower():
+                    st.error(
+                        "Market scan timed out. The full ~5,800-symbol universe with "
+                        "no cap can exceed the 10-min HTTP window. Try one of:\n\n"
+                        "• Set **Cap universe size** to 500–1500 for a fast scan.\n"
+                        "• Use an **Override universe** (comma-separated tickers) to "
+                        "limit the work.\n"
+                        "• Turn off **Run native pre-check on top-K** for the first "
+                        "scan, then re-enable it once the list is narrowed."
+                    )
+                else:
+                    st.error(f"Market scan failed: {e}")
 
-        if not ranked:
+        # Stash the latest scan in session_state so the Start-from-Scanner
+        # button below stays useful after the next rerun.
+        st.session_state["_ms_last_ranked"] = ranked
+
+        if not ranked and not scan_failed:
             st.info("No candidates passed the hard filters (volume / price / ATR).")
+        elif not ranked:
+            # scan_failed branch — error already shown above; skip the
+            # misleading "no candidates passed" info banner.
+            pass
         else:
             rows = []
+            any_precheck_ran = False
             for r in ranked:
                 m = r.get("metrics", {}) or {}
+                precheck_ran = bool(r.get("native_precheck_ran", False))
+                any_precheck_ran = any_precheck_ran or precheck_ran
+                signal_active = bool(r.get("native_signal_active", False))
+                conf = r.get("best_native_confidence")
                 rows.append({
                     "Symbol": r.get("symbol", ""),
+                    "Signal?": "🟢" if signal_active else ("·" if precheck_ran else "—"),
+                    "Native Strategy": r.get("best_native_strategy") or "—",
+                    "Side": r.get("best_native_side") or "—",
+                    "Native Conf": f"{conf:.2f}" if isinstance(conf, (int, float)) else "—",
                     "Score": round(float(r.get("score", 0.0)), 2),
                     "Adj Score": round(float(r.get("adjusted_score", 0.0)), 2),
                     "Bucket": r.get("recommended_strategy_bucket", "—") or "—",
@@ -1266,6 +1336,14 @@ with tab_scanner:
                     "Catalyst": "yes" if m.get("has_catalyst") else "",
                 })
             df_market = pd.DataFrame(rows)
+
+            # Drop the precheck columns when nothing was actually checked —
+            # otherwise the four extra "—" columns just clutter the table.
+            if not any_precheck_ran:
+                df_market = df_market.drop(
+                    columns=["Signal?", "Native Strategy", "Side", "Native Conf"],
+                    errors="ignore",
+                )
 
             def _bucket_color(row):
                 bucket = (row.get("Bucket") or "").lower()
@@ -1281,11 +1359,78 @@ with tab_scanner:
                 df_market.style.apply(_bucket_color, axis=1),
                 use_container_width=True, hide_index=True,
             )
+            n_active = sum(1 for r in ranked if r.get("native_signal_active"))
             st.caption(
-                f"{len(df_market)} candidate(s) · "
-                f"Click a symbol from above and paste it into the per-symbol scanner below "
-                f"to see live strategy signals."
+                f"{len(df_market)} candidate(s)"
+                + (f" · {n_active} with active native signal" if any_precheck_ran else "")
+                + " · Click a symbol from above and paste it into the per-symbol "
+                  "scanner below to see live strategy signals."
             )
+
+    # ── Start AutoTrader from scanner ────────────────────────────────────────
+    # Reuses the most-recent scan stashed in session_state. The backend
+    # re-runs the scanner internally (the cached UI list is just so the
+    # button stays visible across reruns) and arms the autotrader with the
+    # same selection policy.
+    last_ranked = st.session_state.get("_ms_last_ranked") or []
+    st.markdown("---")
+    st.markdown("#### Arm AutoTrader from these candidates")
+    sb1, sb2, sb3, sb4 = st.columns(4)
+    sfs_max = sb1.number_input(
+        "Symbols to arm", min_value=1, max_value=20, value=5, step=1, key="sfs_max",
+    )
+    sfs_dir = sb2.selectbox(
+        "Direction", ["long_only", "short_only", "both"], index=0, key="sfs_dir",
+    )
+    sfs_require_signal = sb3.checkbox(
+        "Require active native signal", value=True, key="sfs_require_signal",
+        help="When on, only arm symbols whose pre-check found a firing audited strategy.",
+    )
+    sfs_min_conf = sb4.number_input(
+        "Min native confidence (0 = off)",
+        min_value=0.0, max_value=1.0, value=0.0, step=0.05, key="sfs_min_conf",
+    )
+    sfs_force = st.checkbox(
+        "Force outside RTH", value=False, key="sfs_force",
+        help="Arm even if the market is closed (paper trader will idle until 9:30 ET).",
+    )
+
+    if st.button(
+        "🚀 Start AutoTrader from Scanner",
+        key="start_from_scanner_btn",
+        disabled=not last_ranked,
+        help="Runs the scanner again on the backend, then arms the autotrader with the top picks.",
+    ):
+        body = {
+            "max_symbols": int(sfs_max),
+            "direction_mode": sfs_dir,
+            "broker_name": "paper",
+            "entry_mode": "native_strategy",
+            "require_native_signal": bool(sfs_require_signal),
+            "prefer_native_signal": True,
+            "force": bool(sfs_force),
+        }
+        if sfs_min_conf > 0:
+            body["min_best_native_confidence"] = float(sfs_min_conf)
+        with st.spinner("Re-running scanner on backend and arming autotrader…"):
+            try:
+                result = _api.autotrader_start_from_scanner(body)
+                st.success(
+                    f"Armed: {', '.join(result.get('selected_symbols', [])) or '—'} "
+                    f"(market_state={result.get('market_state', '—')})"
+                )
+                with st.expander("Scanner summary"):
+                    st.dataframe(
+                        pd.DataFrame(result.get("scanner_summary", [])),
+                        use_container_width=True, hide_index=True,
+                    )
+                with st.expander("Raw autotrader response"):
+                    st.json(result.get("autotrader", {}))
+            except Exception as e:
+                st.error(f"Start from scanner failed: {e}")
+
+    if not last_ranked:
+        st.caption("Run a market scan first to enable this button.")
 
     st.markdown("---")
     st.markdown("### Per-Symbol Strategy Scanner")

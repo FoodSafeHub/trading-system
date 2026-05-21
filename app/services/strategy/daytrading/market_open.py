@@ -22,11 +22,8 @@ from zoneinfo import ZoneInfo
 ET = ZoneInfo("America/New_York")
 
 
-def _td_fetch(symbol: str, interval: str, period: str) -> pd.DataFrame:
-    """
-    Fetch intraday bars from Twelve Data. Returns empty DataFrame on failure.
-    interval: "1m","5m","15m"  period: "1d","2d","5d","60d"
-    """
+def _fetch_twelvedata_raw(symbol: str, interval: str, period: str) -> pd.DataFrame:
+    """Twelve Data tier only — empty DF on any failure. Internal helper."""
     _TD_MAP = {"1m": "1min", "5m": "5min", "15m": "15min", "1d": "1day"}
     _SIZE_MAP = {"1d": 390, "2d": 780, "5d": 500, "60d": 800}
     try:
@@ -67,6 +64,51 @@ def _td_fetch(symbol: str, interval: str, period: str) -> pd.DataFrame:
     except Exception as e:
         _log.debug("[twelvedata] fetch failed %s %s: %s", symbol, interval, e)
         return pd.DataFrame()
+
+
+def _td_fetch(symbol: str, interval: str, period: str) -> pd.DataFrame:
+    """Provider-routed bar fetch: Twelve Data -> Webull -> yfinance.
+
+    Name kept as ``_td_fetch`` for backwards compatibility with the scanner
+    and premarket-volume helpers that import it. Returns an OHLCV DataFrame
+    in ET tz with ``df.attrs["source"]`` set to the provider that served it,
+    or an empty DataFrame if all three providers fail.
+
+    interval: "1m","5m","15m","1d"   period: "1d","2d","5d","60d"
+    """
+    # 1) Twelve Data
+    df = _fetch_twelvedata_raw(symbol, interval, period)
+    if not df.empty:
+        df.attrs["source"] = "twelvedata"
+        return df
+
+    # 2) Webull
+    try:
+        from app.services.strategy.daytrading.data_providers.webull_md import fetch_webull
+        wb = fetch_webull(symbol, interval, period)
+    except Exception as e:
+        _log.debug("[webull] import/fetch failed %s %s: %s", symbol, interval, e)
+        wb = pd.DataFrame()
+    if not wb.empty:
+        _log.info("[fallback] TD -> Webull for %s %s %s (%d bars)",
+                  symbol, interval, period, len(wb))
+        wb.attrs["source"] = "webull"
+        return wb
+
+    # 3) yfinance
+    try:
+        import yfinance as _yf
+        yf_df = _yf.download(symbol, period=period, interval=interval, progress=False)
+    except Exception as e:
+        _log.debug("[yfinance] download failed %s %s: %s", symbol, interval, e)
+        return pd.DataFrame()
+    if yf_df is None or yf_df.empty:
+        return pd.DataFrame()
+    yf_df = _normalise_yf(yf_df)
+    _log.info("[fallback] Webull -> yfinance for %s %s %s (%d bars)",
+              symbol, interval, period, len(yf_df))
+    yf_df.attrs["source"] = "yfinance"
+    return yf_df
 
 
 def _normalise_yf(df: pd.DataFrame) -> pd.DataFrame:
@@ -276,9 +318,9 @@ def get_premarket_gap(symbol: str, open_price: float | None = None) -> dict:
 
     Gap % = (today_open - prior_close) / prior_close * 100
     Classification:
-      > +1.0% → "up_gap"
-      < -1.0% → "down_gap"
-      else    → "normal"
+      > +1.0% -> "up_gap"
+      < -1.0% -> "down_gap"
+      else    -> "normal"
 
     If open_price is None, fetches today's first 5m bar open from yfinance.
     Returns dict: {gap_pct, gap_type, open_price, prior_close, symbol}

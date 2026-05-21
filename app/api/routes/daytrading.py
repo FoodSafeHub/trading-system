@@ -14,6 +14,7 @@ from app.services.strategy.daytrading.market_open import (
     market_status,
 )
 from app.services.strategy.daytrading.runner import (
+    get_provider_stats,
     get_session_symbols,
     run_backtest,
     run_backtest_all,
@@ -49,6 +50,31 @@ def list_strategies() -> list[dict[str, Any]]:
         }
         for s in ALL_STRATEGIES
     ]
+
+
+@router.get("/data-source-status")
+def data_source_status() -> dict[str, Any]:
+    """Snapshot of bar-fetch provider usage since this API process started.
+
+    Used by the Day Trading dashboard's provider-health badge. Counters reset
+    on every API restart — this is a session-scoped view, not a historical
+    audit. Read from the in-memory dict in ``runner._PROVIDER_COUNTERS``.
+    """
+    stats = get_provider_stats()
+    primary = stats["primary_provider"]
+    if primary == "twelvedata":
+        status = "ok"
+        label = "Twelve Data"
+    elif primary == "webull":
+        status = "degraded"
+        label = "Webull (TD fallback)"
+    elif primary == "yfinance":
+        status = "degraded"
+        label = "yfinance (both upstreams failed)"
+    else:
+        status = "idle"
+        label = "no fetches yet"
+    return {**stats, "status": status, "label": label}
 
 
 @router.get("/backtest/{strategy}/{symbol}")
