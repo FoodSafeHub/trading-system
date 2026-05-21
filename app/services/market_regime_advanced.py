@@ -81,7 +81,7 @@ class RegimeSnapshot:
 
 # ── Cache (5 minutes) ─────────────────────────────────────────────────────────
 _CACHE: dict[str, tuple[datetime, RegimeSnapshot]] = {}
-_CACHE_TTL = timedelta(minutes=5)
+_CACHE_TTL = timedelta(hours=1)  # daily-bar regime — no need to refresh every 5 min
 
 
 def _cached(key: str) -> Optional[RegimeSnapshot]:
@@ -112,22 +112,27 @@ def _fetch_vix() -> Optional[float]:
         return None
 
 
+_breadth_cache: tuple[datetime, Optional[float]] | None = None
+
+
 def _fetch_breadth_pct() -> Optional[float]:
     """% of S&P 500 stocks above their 50-DMA.
 
-    Proxy via ``$SPXA50R`` (S&P 500 stocks above 50-DMA). yfinance carries it
-    as ``%5ESPXA50R`` on some mirrors and not others — fall back to comparing
-    a handful of mega-caps to their own 50-DMAs if the index isn't reachable.
-    """
-    try:
-        df = get_ohlcv("^SPXA50R", period="2mo", interval="1d")
-        if not df.empty and not pd.isna(df["Close"].iloc[-1]):
-            return float(df["Close"].iloc[-1])
-    except Exception:
-        pass
+    Uses a 10-mega-cap sample as a breadth proxy. The official ``^SPXA50R``
+    ticker was previously tried first but yfinance no longer serves it —
+    every cold call wasted ~1s on a 404, then ran the same fallback anyway.
 
-    # Fallback breadth proxy — sample 10 mega-caps and count how many are above
-    # their own 50-DMA. Crude but correlated with the official figure.
+    Result cached for 1 hour at function level. Daily-bar strategies don't
+    need fresher than that, and the surrounding RegimeSnapshot already has
+    its own cache — this second layer keeps backtests fast even when the
+    snapshot cache is bypassed.
+    """
+    global _breadth_cache
+    if _breadth_cache is not None:
+        ts, val = _breadth_cache
+        if datetime.utcnow() - ts < timedelta(hours=1):
+            return val
+
     sample = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "JPM", "XOM", "UNH", "V"]
     above = total = 0
     for sym in sample:
@@ -142,9 +147,9 @@ def _fetch_breadth_pct() -> Optional[float]:
                 above += 1
         except Exception:
             continue
-    if total == 0:
-        return None
-    return (above / total) * 100.0
+    result = (above / total) * 100.0 if total > 0 else None
+    _breadth_cache = (datetime.utcnow(), result)
+    return result
 
 
 def get_momentum_regime(*, refresh: bool = False) -> RegimeSnapshot:
