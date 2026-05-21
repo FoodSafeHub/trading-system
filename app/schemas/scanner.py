@@ -15,6 +15,9 @@ class ScanConfig(BaseModel):
     min_avg_volume: float = 500_000.0
     top_n: int = 5
     auto_trade_top: bool = False
+    # When auto-trading, only act on signals in this direction.
+    # ANY keeps the old behavior (top candidate fires regardless of side).
+    auto_trade_direction: Literal["ANY", "BUY", "SELL"] = "ANY"
     batch_size: int = 20
 
 

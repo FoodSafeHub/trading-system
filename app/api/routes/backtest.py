@@ -157,6 +157,53 @@ def list_consensus_symbols(new_only: bool = False):
     ]
 
 
+@router.get("/custom-consensus/{symbol}")
+def backtest_custom_consensus(
+    symbol: str,
+    min_agreement: int = 2,
+    period: str = "1y",
+    initial_capital: float = 100000.0,
+):
+    """Consensus backtest for an arbitrary symbol using all 5 new strategy types.
+
+    This is what the scanner runs under the hood, so a candidate flagged on the
+    scanner page (e.g. BRK-B_Pullback_EMA50) can be re-tested here with the same
+    factory defaults. Falls back to the regular /consensus endpoint when the
+    symbol has explicit configs in strategies.json.
+    """
+    from app.services.scanner.scanner_service import _make_generic_configs
+    sym = symbol.upper().strip()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    configs = _make_generic_configs(sym)
+    try:
+        result = run_consensus_backtest(sym, configs, min_agreement, period, initial_capital)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {
+        "symbol": result.symbol,
+        "period": result.period,
+        "min_agreement": result.min_agreement,
+        "strategies_used": result.strategies_used,
+        "start_date": result.start_date,
+        "end_date": result.end_date,
+        "initial_capital": result.initial_capital,
+        "final_capital": result.final_capital,
+        "total_pnl": result.total_pnl,
+        "total_return_pct": result.total_return_pct,
+        "total_trades": result.total_trades,
+        "winning_trades": result.winning_trades,
+        "losing_trades": result.losing_trades,
+        "win_rate_pct": result.win_rate_pct,
+        "max_drawdown_pct": result.max_drawdown_pct,
+        "sharpe_ratio": result.sharpe_ratio,
+        "equity_curve": result.equity_curve,
+        "trades": result.trades,
+    }
+
+
 @router.get("/strategies")
 def list_backtest_strategies(new_only: bool = False):
     """

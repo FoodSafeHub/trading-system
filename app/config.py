@@ -115,6 +115,9 @@ class Settings(BaseSettings):
     # ── API ──────────────────────────────────────────────────
     api_host: str = "127.0.0.1"
     api_port: int = 8000
+    # Shared bearer token. Dashboard sends Authorization: Bearer <token>.
+    # Empty string disables the check (back-compat for unconfigured installs).
+    api_bearer_token: str = ""
 
     # ── Derived ──────────────────────────────────────────────
     @property

@@ -879,6 +879,66 @@ with tab_compare:
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+        # ── Promote to autotrade ───────────────────────────────────────────
+        # Any strategy in this comparison can be promoted to the assignments
+        # table, which is what the live scheduler reads when deciding what to
+        # fire. Picks system="perplexity" because that's the system this tab
+        # ran the backtests under.
+        promotable = [r for r in cmp if not r.get("error")]
+        if promotable:
+            st.markdown("##### Promote a strategy to auto-trade")
+            st.caption(
+                "Picks the strategy/symbol pair the live scheduler should use for this ticker. "
+                "Notifications will fire on every BUY/SELL signal from this symbol once promoted."
+            )
+            p1, p2, p3, p4 = st.columns([3, 2, 2, 2])
+            with p1:
+                names = [r["strategy_name"] for r in promotable]
+                best_name = best["strategy_name"] if valid else names[0]
+                pick = st.selectbox(
+                    "Strategy to promote",
+                    names,
+                    index=names.index(best_name) if best_name in names else 0,
+                    key=f"px_promote_pick_{cmp_symbol}",
+                    help="Defaults to the recommended winner. Override if you want a "
+                         "different one (e.g. higher win-rate but lower return).",
+                )
+            with p2:
+                cap_str = st.text_input(
+                    "Max capital ($)", value="",
+                    placeholder="optional",
+                    key=f"px_promote_cap_{cmp_symbol}",
+                    help="Leave blank to use the global account cap.",
+                )
+            with p3:
+                enabled = st.checkbox("Enabled", value=True, key=f"px_promote_en_{cmp_symbol}")
+            with p4:
+                st.write("")
+                st.write("")
+                go_btn = st.button("Promote", type="primary",
+                                    use_container_width=True,
+                                    key=f"px_promote_btn_{cmp_symbol}")
+            if go_btn:
+                try:
+                    cap_val: float | None = None
+                    if cap_str.strip():
+                        cap_val = float(cap_str.strip())
+                    api.upsert_assignment(
+                        symbol=cmp_symbol,
+                        system="perplexity",
+                        strategy_name=pick,
+                        enabled=enabled,
+                        notes=f"Promoted from Compare All ({cmp_period})",
+                        max_capital_usd=cap_val,
+                    )
+                    st.success(
+                        f"Assigned **{pick}** to **{cmp_symbol}** "
+                        f"(perplexity, enabled={enabled}). "
+                        "BUY/SELL signals on this symbol will now create notifications."
+                    )
+                except Exception as exc:
+                    st.error(f"Promote failed: {exc}")
+
         # Bar chart of returns
         if valid:
             best_name = best["strategy_name"]

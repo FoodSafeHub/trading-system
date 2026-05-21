@@ -51,7 +51,7 @@ class SchwabBroker(BrokerBase):
 
     # ── Auth ────────────────────────────────────────────────────────────────
 
-    def get_authorization_url(self) -> str:
+    def get_authorization_url(self, state: str | None = None) -> str:
         """Return the URL the user must visit to authorize the app."""
         params = {
             "client_id": self._settings.schwab_client_id,
@@ -59,6 +59,8 @@ class SchwabBroker(BrokerBase):
             "response_type": "code",
             "scope": "PlaceTrades AccountAccess MarketData",
         }
+        if state:
+            params["state"] = state
         return f"{SCHWAB_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
     async def exchange_code_for_tokens(self, authorization_code: str) -> None:

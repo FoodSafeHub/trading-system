@@ -24,6 +24,11 @@ APScheduler>=3.10.4
 # ── Logging ───────────────────────────────────────────────────
 rich>=13.7.0
 
+# ── Windows desktop notifications (toast) ─────────────────────
+# Used by app.services.notifications.bus to surface BUY/SELL signals
+# on assigned symbols. Soft-imported, so the API still runs without it.
+winotify>=1.1.0; sys_platform == "win32"
+
 # ── Testing ───────────────────────────────────────────────────
 pytest>=8.2.0
 pytest-asyncio>=0.23.0

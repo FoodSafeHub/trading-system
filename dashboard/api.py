@@ -6,6 +6,45 @@ import requests
 BASE = os.getenv("TRADING_API_BASE", "https://127.0.0.1:8001")
 
 
+def _load_bearer_token() -> str:
+    """Read API_BEARER_TOKEN from env, falling back to .env file.
+
+    Streamlit doesn't auto-load .env, so we parse it ourselves on first import.
+    Keeps the dashboard usable without forcing the user to export the var.
+    """
+    tok = os.getenv("API_BEARER_TOKEN", "")
+    if tok:
+        return tok
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env_path = os.path.join(here, ".env")
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("API_BEARER_TOKEN="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+_BEARER = _load_bearer_token()
+
+
+def _headers() -> dict:
+    return {"Authorization": f"Bearer {_BEARER}"} if _BEARER else {}
+
+
+def _merge_headers(kwargs: dict) -> dict:
+    """Merge the bearer header into caller-provided headers without clobbering."""
+    extra = kwargs.pop("headers", None) or {}
+    merged = _headers()
+    merged.update(extra)
+    if merged:
+        kwargs["headers"] = merged
+    return kwargs
+
+
 def _raise_with_body(r: requests.Response) -> None:
     """Surface the backend's detail/message in HTTP errors instead of a generic stack trace."""
     if r.status_code < 400:
@@ -23,19 +62,22 @@ def _raise_with_body(r: requests.Response) -> None:
 
 
 def _get(path: str, timeout: int = 10, **kwargs):
+    kwargs = _merge_headers(kwargs)
     r = requests.get(f"{BASE}{path}", timeout=timeout, verify=False, **kwargs)
     _raise_with_body(r)
     return r.json()
 
 
 def _post(path: str, timeout: int = 10, **kwargs):
+    kwargs = _merge_headers(kwargs)
     r = requests.post(f"{BASE}{path}", timeout=timeout, verify=False, **kwargs)
     _raise_with_body(r)
     return r.json()
 
 
-def _delete(path: str, timeout: int = 10):
-    r = requests.delete(f"{BASE}{path}", timeout=timeout, verify=False)
+def _delete(path: str, timeout: int = 10, **kwargs):
+    kwargs = _merge_headers(kwargs)
+    r = requests.delete(f"{BASE}{path}", timeout=timeout, verify=False, **kwargs)
     _raise_with_body(r)
     return r.json()
 
@@ -94,7 +136,7 @@ def update_scheduler_config(run_bollinger: bool | None = None, run_perplexity: b
         params["run_bollinger"] = str(run_bollinger).lower()
     if run_perplexity is not None:
         params["run_perplexity"] = str(run_perplexity).lower()
-    r = requests.post(f"{BASE}/strategy/scheduler/config", params=params, timeout=10, verify=False)
+    r = requests.post(f"{BASE}/strategy/scheduler/config", params=params, timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
 
@@ -129,19 +171,19 @@ def upsert_assignment(symbol: str, system: str, strategy_name: str, enabled: boo
                                        "notes": notes, "max_capital_usd": max_capital_usd})
 
 def toggle_assignment(symbol: str, enabled: bool):
-    r = requests.patch(f"{BASE}/assignments/{symbol}/toggle", params={"enabled": str(enabled).lower()}, timeout=10, verify=False)
+    r = requests.patch(f"{BASE}/assignments/{symbol}/toggle", params={"enabled": str(enabled).lower()}, timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
 
 def set_assignment_cap(symbol: str, max_capital_usd: float | None):
     r = requests.patch(f"{BASE}/assignments/{symbol}/cap",
                        params={"max_capital_usd": max_capital_usd if max_capital_usd else ""},
-                       timeout=10, verify=False)
+                       timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
 
 def delete_assignment(symbol: str):
-    r = requests.delete(f"{BASE}/assignments/{symbol}", timeout=10, verify=False)
+    r = requests.delete(f"{BASE}/assignments/{symbol}", timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
 
@@ -161,7 +203,7 @@ def perplexity_strategies():
 
 def perplexity_toggle_strategy(name: str, enabled: bool):
     r = requests.post(f"{BASE}/perplexity/strategies/{name}/toggle",
-                      params={"enabled": str(enabled).lower()}, timeout=10, verify=False)
+                      params={"enabled": str(enabled).lower()}, timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
 
@@ -365,3 +407,35 @@ def settings_get_trade_routing():
 
 def settings_set_trade_routing(value: str):
     return _post("/settings/trade-routing", json={"trade_routing": value})
+
+
+def notifications_list(limit: int = 50, unread_only: bool = False):
+    return _get(f"/notifications?limit={limit}&unread_only={str(unread_only).lower()}")
+
+
+def notifications_unread_count():
+    return _get("/notifications/unread-count")
+
+
+def notifications_mark_read(notification_id: int):
+    return _post(f"/notifications/{notification_id}/read")
+
+
+def notifications_mark_all_read():
+    return _post("/notifications/mark-all-read")
+
+
+def notifications_delete(notification_id: int):
+    return _delete(f"/notifications/{notification_id}")
+
+
+def backtest_custom_consensus(symbol: str, min_agreement: int = 2,
+                              period: str = "1y", initial_capital: float = 100_000.0,
+                              timeout: int = 120):
+    """Consensus backtest on an arbitrary symbol using the 5 scanner strategies."""
+    return _get(
+        f"/backtest/custom-consensus/{symbol}",
+        params={"min_agreement": min_agreement, "period": period,
+                "initial_capital": initial_capital},
+        timeout=timeout,
+    )

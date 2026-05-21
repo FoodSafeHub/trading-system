@@ -431,10 +431,12 @@ def _consensus_trades_table(trades: list) -> None:
 _render_recommendation_overview()
 mode = st.radio(
     "Backtest Mode",
-    ["Single Strategy", "Consensus Mode"],
+    ["Single Strategy", "Consensus Mode", "Custom Symbol"],
     horizontal=True,
     help="Single: test one strategy alone.\n"
-         "Consensus: test a symbol using multiple strategies with agreement filtering.",
+         "Consensus: test a symbol using its configured strategies with agreement filtering.\n"
+         "Custom Symbol: test ANY ticker (e.g. BRK-B) using the 5 scanner strategies — "
+         "useful for reproducing scanner candidates.",
 )
 
 st.divider()
@@ -571,7 +573,7 @@ if mode == "Single Strategy":
 # ══════════════════════════════════════════════════════════════
 # CONSENSUS MODE
 # ══════════════════════════════════════════════════════════════
-else:
+elif mode == "Consensus Mode":
     try:
         symbols_data = api._get("/backtest/consensus-symbols")
     except Exception as e:
@@ -670,4 +672,80 @@ else:
     _render_filter_summary(chosen_sym)
     _equity_chart(r, symbol=chosen_sym, period=period)
     _price_action_chart(r, chosen_sym, period)
+    _consensus_trades_table(r["trades"])
+
+
+# ══════════════════════════════════════════════════════════════
+# CUSTOM SYMBOL MODE — any ticker, 5 scanner strategies consensus
+# ══════════════════════════════════════════════════════════════
+else:  # mode == "Custom Symbol"
+    st.info(
+        "Type any ticker (e.g. **BRK-B**, **NVDA**, **TQQQ**) and the backtester will "
+        "run the same 5 strategies the scanner uses: RSI2 Mean Reversion, EMA+MACD "
+        "Crossover, BB Squeeze Breakout, Pullback to EMA(50), VIX Spike Reversal."
+    )
+
+    c1, c2, c3, c4 = st.columns([2, 1.5, 1.5, 1.5])
+    with c1:
+        custom_sym = st.text_input(
+            "Symbol", value="BRK-B",
+            help="Any Yahoo-Finance-compatible ticker. Use the same form the scanner used "
+                 "(e.g. BRK-B with a hyphen, not BRK.B).",
+        ).strip().upper()
+    with c2:
+        period = st.selectbox("Historical Period", ["6mo", "1y", "2y"], index=1,
+                              key="custom_bt_period")
+    with c3:
+        capital = st.number_input("Starting Capital ($)", value=100000, min_value=1000,
+                                  step=10000, key="custom_bt_capital")
+    with c4:
+        min_agreement = st.slider(
+            "Min strategies that must agree",
+            min_value=1, max_value=5, value=2,
+            help="1 = any single strategy fires (noisier). 2 = balanced (matches scanner's "
+                 "default). 3+ = high-confidence only.",
+            key="custom_bt_min_agree",
+        )
+
+    run_cs = st.button("▶ Run Custom Backtest", type="primary", key="custom_bt_run")
+
+    if run_cs:
+        if not custom_sym:
+            st.error("Enter a symbol.")
+            st.stop()
+        with st.spinner(f"Running 5-strategy consensus backtest for {custom_sym} over {period}..."):
+            try:
+                result = api.backtest_custom_consensus(
+                    custom_sym, min_agreement=min_agreement,
+                    period=period, initial_capital=capital, timeout=180,
+                )
+                st.session_state["bt_custom"] = result
+            except Exception as e:
+                st.error(f"Custom backtest failed: {e}")
+                st.stop()
+
+    r = st.session_state.get("bt_custom")
+    if not r:
+        st.caption("Enter a symbol and click Run.")
+        st.stop()
+
+    st.divider()
+    st.subheader(
+        f"Custom Consensus — {r['symbol']}  |  "
+        f"Min Agreement: {r['min_agreement']}  |  "
+        f"{r['start_date']} → {r['end_date']}"
+    )
+    st.caption(f"Strategies tested: {', '.join(r['strategies_used'])}")
+
+    _render_backtest_metrics(r)
+
+    if r["total_trades"] == 0:
+        st.warning(
+            "No trades fired in this window. Try a longer period (2y), lower the "
+            "min-agreement to 1, or check that the symbol has enough Yahoo history."
+        )
+
+    _render_regime_panel(r.get("trades", []), period)
+    _equity_chart(r, symbol=r["symbol"], period=period)
+    _price_action_chart(r, r["symbol"], period)
     _consensus_trades_table(r["trades"])

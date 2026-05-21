@@ -58,6 +58,7 @@ def init_db() -> None:
         broker_tokens,
         error_logs,
         executions,
+        notifications,
         orders,
         positions,
         scan_results,

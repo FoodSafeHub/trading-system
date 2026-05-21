@@ -44,6 +44,21 @@ def _tv_symbol(sym: str) -> str:
 
 
 def _show_candidates(candidates, *, key_prefix: str = "cands"):
+    # Direction filter — lets the user focus on buy-only or sell-only signals
+    # without re-running the scan. ANY shows everything.
+    direction_pick = st.radio(
+        "Direction filter",
+        ["All", "BUY", "SELL"],
+        index=0,
+        horizontal=True,
+        key=f"{key_prefix}_dirfilter",
+    )
+    if direction_pick != "All":
+        candidates = [c for c in candidates if str(c.get("direction", "")).upper() == direction_pick]
+        if not candidates:
+            st.info(f"No {direction_pick} candidates in this result set.")
+            return
+
     rows = []
     for c in candidates:
         direction = c.get("direction", "")
@@ -145,7 +160,16 @@ with col2:
     auto_trade = st.toggle(
         "Auto-trade top candidate",
         value=False,
-        help="If enabled, the #1 ranked candidate will be paper-traded automatically if risk checks pass.",
+        help="If enabled, the #1 ranked candidate matching the side filter below will be traded if risk checks pass.",
+    )
+    auto_trade_direction = st.radio(
+        "Auto-trade direction",
+        ["ANY", "BUY", "SELL"],
+        index=1,  # default to BUY — safer than ANY when toggling on for the first time
+        horizontal=True,
+        help="ANY = top candidate fires regardless of side. BUY/SELL = only fire on that side; "
+             "if the #1 candidate is the wrong side, the scanner walks down the list.",
+        disabled=not auto_trade,
     )
 
 run_col, _ = st.columns([1, 3])
@@ -164,6 +188,7 @@ if run_btn:
         "min_avg_volume": min_volume,
         "top_n": top_n,
         "auto_trade_top": auto_trade,
+        "auto_trade_direction": auto_trade_direction,
         "batch_size": 20,
     }
 

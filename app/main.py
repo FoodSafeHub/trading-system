@@ -3,11 +3,12 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import account, assignments, backtest, chart, daytrading, health, orders, perplexity, risk, scanner, settings as settings_routes, signals, strategy, schwab_auth
+from app.api.routes import account, assignments, backtest, chart, daytrading, health, notifications, orders, perplexity, risk, scanner, settings as settings_routes, signals, strategy, schwab_auth
 from app.config import get_settings
 from app.db import init_db
 from app.services.strategy.scheduler import start_scheduler, stop_scheduler
@@ -63,6 +64,50 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# Paths that bypass bearer auth. /health is the start.bat readiness probe.
+# Schwab's OAuth redirect comes from Schwab's servers and can't carry our header.
+# /docs and friends are static / OpenAPI scaffolding.
+_AUTH_EXEMPT_PATHS = {
+    "/health",
+    "/schwab/auth",
+    "/schwab/callback",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/favicon.ico",
+}
+
+
+@app.middleware("http")
+async def bearer_token_auth(request: Request, call_next):
+    """Require Authorization: Bearer <token> on every API call.
+
+    Why: before this, any process on localhost (browser tabs, other tools)
+    could hit the trading API. With LIVE_TRADING_ENABLED=true that's an
+    unauthenticated kill-switch and order-entry surface.
+    Empty api_bearer_token keeps the check off for back-compat — useful when
+    a fresh clone hasn't generated a token yet.
+    """
+    if request.method == "OPTIONS":  # let CORS preflight through
+        return await call_next(request)
+
+    token = settings.api_bearer_token
+    if not token:
+        return await call_next(request)
+
+    path = request.url.path
+    if path in _AUTH_EXEMPT_PATHS or path.startswith("/static/"):
+        return await call_next(request)
+
+    header = request.headers.get("authorization", "")
+    if not header.startswith("Bearer "):
+        return JSONResponse({"detail": "missing bearer token"}, status_code=401)
+    if header[len("Bearer "):] != token:
+        return JSONResponse({"detail": "invalid bearer token"}, status_code=401)
+
+    return await call_next(request)
+
 # ── Routes ───────────────────────────────────────────────────
 app.include_router(health.router)
 app.include_router(account.router)
@@ -78,6 +123,7 @@ app.include_router(scanner.router)
 app.include_router(daytrading.router, prefix="/daytrading")
 app.include_router(chart.router)
 app.include_router(settings_routes.router)
+app.include_router(notifications.router)
 
 # ── Static files ─────────────────────────────────────────────
 try:

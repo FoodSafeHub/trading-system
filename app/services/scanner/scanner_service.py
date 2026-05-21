@@ -221,8 +221,20 @@ def run_scan(config: ScanConfig) -> ScanSummary:
             db.refresh(row)
 
     # ── Step 7: Optional auto-trade top candidate ────────────────────────────
+    # If auto_trade_direction is set (BUY/SELL), pick the top-ranked candidate
+    # matching that side. ANY keeps the old behavior. Avoids the user flipping
+    # the toggle and accidentally taking a SELL when they wanted a BUY signal.
     if config.auto_trade_top and top:
-        _auto_trade_top(top[0], scan_run_id, scanned_at)
+        wanted = (config.auto_trade_direction or "ANY").upper()
+        if wanted == "ANY":
+            _auto_trade_top(top[0], scan_run_id, scanned_at)
+        else:
+            match = next((c for c in top if str(c.get("direction", "")).upper() == wanted), None)
+            if match is not None:
+                _auto_trade_top(match, scan_run_id, scanned_at)
+            else:
+                logger.info("[scanner] auto-trade skipped: no %s candidate in top %d",
+                            wanted, len(top))
 
     duration = round(time.time() - t_start, 1)
 
@@ -308,6 +320,16 @@ def _auto_trade_top(candidate: dict, scan_run_id: str, scanned_at: datetime) -> 
                 sig_id = sig.id
         except Exception:
             sig_id = None
+        try:
+            from app.services.notifications.bus import notify_signal
+            notify_signal(
+                symbol=symbol, direction=direction,
+                strategy="scanner:" + (candidate.get("strategy_name") or "top"),
+                source="scanner", price=price or None,
+                extra=f"Score: {candidate.get('score', 0):.0f}",
+            )
+        except Exception:
+            pass
         loop.run_until_complete(svc.execute(order_req, account_id=account_id, signal_id=sig_id))
         loop.close()
 
@@ -327,7 +349,12 @@ def _auto_trade_top(candidate: dict, scan_run_id: str, scanned_at: datetime) -> 
 
 
 def _make_generic_configs(symbol: str):
-    """Create a set of generic strategy configs for a symbol not in strategies.json."""
+    """Create a set of generic strategy configs for a symbol not in strategies.json.
+
+    Returns all 5 new strategy types so the backtest page can run the same
+    set on any user-typed ticker (e.g. BRK-B) and the scanner's signals are
+    directly reproducible there.
+    """
     from app.services.strategy.models import StrategyConfig
     return [
         StrategyConfig(
@@ -350,6 +377,15 @@ def _make_generic_configs(symbol: str):
                     "atr_tp_multiplier": 2.0, "max_hold_bars": 20},
         ),
         StrategyConfig(
+            name=f"{symbol}_BB_Squeeze_Breakout",
+            symbol=symbol,
+            type="bb_squeeze_breakout",
+            enabled=True,
+            params={"bb_period": 20, "bb_std": 2.0, "squeeze_bars": 5,
+                    "vol_ratio_min": 1.3, "rsi_period": 14,
+                    "rsi_entry_min": 50, "rsi_overbought": 80},
+        ),
+        StrategyConfig(
             name=f"{symbol}_Pullback_EMA50",
             symbol=symbol,
             type="pullback_ema50",
@@ -358,6 +394,16 @@ def _make_generic_configs(symbol: str):
                     "rsi_period": 14, "rsi_min": 35, "rsi_max": 55, "wick_ratio_min": 0.4,
                     "exit_rsi": 65, "exit_extension_pct": 3.0, "hard_stop_pct": 2.0,
                     "max_hold_bars": 20, "bear_skip_threshold_pct": 10.0},
+        ),
+        StrategyConfig(
+            name=f"{symbol}_VIX_Spike_Reversal",
+            symbol=symbol,
+            type="vix_spike_reversal",
+            enabled=True,
+            params={"atr_period": 14, "atr_spike_threshold": 3.0, "atr_exit_threshold": 2.0,
+                    "rsi_period": 14, "rsi_entry_max": 30, "rsi_exit": 55,
+                    "bb_pos_max": 0.15, "wick_ratio_min": 0.5,
+                    "prior_decline_pct": 2.0, "prior_decline_bars": 3},
         ),
     ]
 

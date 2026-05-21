@@ -345,6 +345,12 @@ def _run_cycle() -> None:
                     source="scheduler",
                 )
                 sig_id = _persist_signal(symbol, direction, label, entry)
+                try:
+                    from app.services.notifications.bus import notify_signal
+                    notify_signal(symbol=symbol, direction=direction, strategy=label,
+                                  source="scheduler", price=entry)
+                except Exception:
+                    pass  # never let a notify failure block an order
                 loop.run_until_complete(svc.execute(
                     order_req,
                     account_id=account_id,
@@ -389,6 +395,12 @@ def _run_cycle() -> None:
                 # so Recent Fills tells you which strategies voted to enter.
                 consensus_label = "consensus:" + "+".join(agreeing) if agreeing else "consensus"
                 sig_id = _persist_signal(symbol, direction, consensus_label, entry_p or None)
+                try:
+                    from app.services.notifications.bus import notify_signal
+                    notify_signal(symbol=symbol, direction=direction, strategy=consensus_label,
+                                  source="scheduler", price=entry_p or None)
+                except Exception:
+                    pass
                 loop.run_until_complete(svc.execute(
                     order_req,
                     account_id=account_id,

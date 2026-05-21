@@ -45,6 +45,7 @@ accounts  = _safe(api.account_summary, [])
 positions = _safe(api.positions, [])
 orders    = _safe(api.orders, [])
 autot     = _safe(api.autotrader_status, {"running": False, "traders": {}})
+notif_cnt = _safe(api.notifications_unread_count, {"unread": 0}).get("unread", 0)
 
 
 # ── TOP STRIP — at-a-glance state ───────────────────────────────────────
@@ -58,14 +59,21 @@ auto_color   = "blue" if autot.get("running") else "grey"
 mode_text = "LIVE" if risk.get("is_live") else "Paper"
 mode_color = "red" if risk.get("is_live") else "blue"
 
+notif_color = "red" if notif_cnt > 0 else "grey"
+notif_text = f"{notif_cnt} unread" if notif_cnt > 0 else "0 unread"
+
 status_row([
     ("API",          health.get("status", "?").upper(),                                   api_color),
     ("Market",       "OPEN" if risk.get("market_hours_active") else "CLOSED",             market_color),
     ("Mode",         mode_text,                                                            mode_color),
     ("Kill switch",  "ACTIVE" if risk.get("kill_switch_active") else "OFF",               ks_color),
     ("Auto-trader",  f"ON ({len(autot.get('traders', {}))} symbols)" if autot.get("running") else "OFF", auto_color),
+    ("Alerts",       notif_text,                                                           notif_color),
     ("Clock",        now_et,                                                               "grey"),
 ])
+
+if notif_cnt > 0:
+    st.info(f"You have **{notif_cnt} unread alert(s)**. Open the **Notifications** page to review.")
 
 divider()
 

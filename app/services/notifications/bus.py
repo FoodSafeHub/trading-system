@@ -1,0 +1,105 @@
+"""Single chokepoint for emitting user-facing notifications.
+
+Called from the scheduler + scanner signal paths when a BUY/SELL fires on a
+symbol that has an active assignment. Writes to the notifications table (the
+dashboard's notification log) and best-effort fires a Windows toast.
+
+Design choice: assignment gating happens INSIDE the bus, so callers don't have
+to repeat the lookup. They just call notify_signal(symbol, ...) and the bus
+decides whether to emit anything.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+from sqlalchemy.orm import Session
+
+from app.db import SessionLocal
+from app.models.assignments import SymbolStrategyAssignment
+from app.models.notifications import Notification
+
+logger = logging.getLogger(__name__)
+
+
+def _is_assigned(db: Session, symbol: str) -> bool:
+    sym = (symbol or "").upper().strip()
+    if not sym:
+        return False
+    row = (
+        db.query(SymbolStrategyAssignment)
+        .filter_by(symbol=sym, enabled=True)
+        .first()
+    )
+    return row is not None
+
+
+def _toast(title: str, body: str) -> None:
+    """Best-effort Windows toast. Silent on non-Windows or if winotify missing."""
+    try:
+        from winotify import Notification as _WinNotif, audio  # type: ignore
+    except Exception:
+        return
+    try:
+        n = _WinNotif(
+            app_id="Trading System",
+            title=title,
+            msg=body,
+            duration="short",
+        )
+        n.set_audio(audio.Default, loop=False)
+        n.show()
+    except Exception as exc:
+        logger.debug("toast failed: %s", exc)
+
+
+def notify_signal(
+    *,
+    symbol: str,
+    direction: str,
+    strategy: str,
+    source: str,
+    price: Optional[float] = None,
+    extra: Optional[str] = None,
+) -> Optional[int]:
+    """Emit a signal notification IF the symbol is in an enabled assignment.
+
+    Returns the new notification id, or None if gated out.
+    """
+    symbol = (symbol or "").upper().strip()
+    direction = (direction or "").upper().strip()
+    if direction not in ("BUY", "SELL"):
+        return None
+
+    try:
+        with SessionLocal() as db:
+            if not _is_assigned(db, symbol):
+                return None
+            title = f"{direction} signal: {symbol}"
+            body_parts = [f"Strategy: {strategy}", f"Source: {source}"]
+            if price:
+                body_parts.append(f"Price: ${price:,.2f}")
+            if extra:
+                body_parts.append(extra)
+            body = " · ".join(body_parts)
+
+            row = Notification(
+                kind="signal",
+                symbol=symbol,
+                direction=direction,
+                strategy=strategy,
+                source=source,
+                price=price,
+                title=title,
+                body=body,
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+            new_id = row.id
+    except Exception as exc:
+        logger.warning("notify_signal db write failed: %s", exc)
+        return None
+
+    _toast(title, body)
+    return new_id
