@@ -408,6 +408,37 @@ def _make_generic_configs(symbol: str):
     ]
 
 
+def _make_generic_configs_full(symbol: str):
+    """Same as _make_generic_configs but also includes the 2 legacy strategy
+    types (Bollinger Mean Reversion + Fibonacci Pullback). Used by the
+    Custom Symbol backtest comparison so the user sees all 7 strategies
+    available for AAPL/MSFT/etc. on any ticker.
+
+    Kept SEPARATE from _make_generic_configs because the live scanner is
+    tuned around the 5 regime-aware strategies — pulling in legacy ones
+    there would slow scans and reintroduce noisier signals.
+    """
+    from app.services.strategy.models import StrategyConfig
+    base = _make_generic_configs(symbol)
+    legacy = [
+        StrategyConfig(
+            name=f"Legacy_{symbol}_BB_Mean_Reversion",
+            symbol=symbol,
+            type="bollinger",
+            enabled=True,
+            params={"bb_period": 20, "bb_std": 2.0, "rsi_low": 35, "rsi_high": 50},
+        ),
+        StrategyConfig(
+            name=f"Legacy_{symbol}_Fib_Pullback",
+            symbol=symbol,
+            type="fib_pullback",
+            enabled=True,
+            params={"lookback": 60, "rsi_low": 40, "rsi_high": 55, "fib_tolerance": 0.015},
+        ),
+    ]
+    return base + legacy
+
+
 def get_latest_results(limit: int = 50) -> list[ScanResultOut]:
     """Return the most recent scan results from DB."""
     with SessionLocal() as db:

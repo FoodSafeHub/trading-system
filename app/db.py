@@ -61,6 +61,7 @@ def init_db() -> None:
         notifications,
         orders,
         positions,
+        realized_trades,
         scan_results,
         settings as settings_model,
         signals,
@@ -68,6 +69,8 @@ def init_db() -> None:
     )
     Base.metadata.create_all(bind=engine)
     _migrate_add_orders_source_column()
+    _migrate_add_assignments_max_shares_column()
+    _migrate_add_assignments_broker_column()
 
 
 def _migrate_add_orders_source_column() -> None:
@@ -97,4 +100,51 @@ def _migrate_add_orders_source_column() -> None:
             conn.commit()
         except Exception:
             # If the ALTER raced with another worker, the column will exist; safe to ignore.
+            pass
+
+
+def _migrate_add_assignments_max_shares_column() -> None:
+    """Idempotent ALTER TABLE to add symbol_strategy_assignments.max_shares."""
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql(
+                "PRAGMA table_info(symbol_strategy_assignments)"
+            ).fetchall()
+        except Exception:
+            return
+        cols = {r[1] for r in rows}
+        if "max_shares" in cols:
+            return
+        try:
+            conn.exec_driver_sql(
+                "ALTER TABLE symbol_strategy_assignments ADD COLUMN max_shares REAL"
+            )
+            conn.commit()
+        except Exception:
+            pass
+
+
+def _migrate_add_assignments_broker_column() -> None:
+    """Idempotent ALTER TABLE to add symbol_strategy_assignments.broker.
+
+    Default is 'default' so existing rows keep using the global active_broker /
+    trade_routing toggle until the user assigns a specific broker.
+    """
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql(
+                "PRAGMA table_info(symbol_strategy_assignments)"
+            ).fetchall()
+        except Exception:
+            return
+        cols = {r[1] for r in rows}
+        if "broker" in cols:
+            return
+        try:
+            conn.exec_driver_sql(
+                "ALTER TABLE symbol_strategy_assignments "
+                "ADD COLUMN broker TEXT NOT NULL DEFAULT 'default'"
+            )
+            conn.commit()
+        except Exception:
             pass

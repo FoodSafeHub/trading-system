@@ -17,7 +17,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models.signals import Signal
-from app.services.brokers.factory import get_broker
+from app.services.brokers.factory import _build_one, get_broker
 from app.services.execution.service import ExecutionService
 from app.services.market_data.provider import get_ohlcv, get_price_series
 from app.services.risk.engine import RiskEngine
@@ -90,23 +90,35 @@ def _compute_quantity(
     entry: float,
     stop: float | None,
     max_capital_usd: float | None = None,
+    max_shares: float | None = None,
 ) -> float:
     """
     Return shares to buy using fixed-fractional position sizing.
 
-    max_capital_usd: per-symbol budget cap set by the user on the assignment.
+    max_capital_usd: per-symbol dollar cap set by the user on the assignment.
                      When set, shares are capped so position value never exceeds it.
+    max_shares:      per-symbol shares cap. Used ONLY when max_capital_usd is
+                     empty — dollar cap wins whenever both are set.
                      Falls back to 1 share if stop is missing or sizing is not viable.
     """
     if stop is None or stop <= 0 or stop >= entry:
-        # No stop — cap by max_capital_usd if given, else 1 share
+        # No stop — cap by max_capital_usd if given, else max_shares, else 1.
         if max_capital_usd and entry > 0:
             return _quantize_for_broker(max_capital_usd / entry)
+        if max_shares and max_shares > 0:
+            return _quantize_for_broker(max_shares)
         return _quantize_for_broker(1.0)
 
     settings = get_settings()
-    # If user set a per-symbol cap, use that; otherwise use global max_position_size_usd
-    effective_max = max_capital_usd if max_capital_usd else settings.max_position_size_usd
+    # Dollar cap wins. When it's absent and a shares cap is set, derive a
+    # dollar-equivalent cap from max_shares * entry so the risk sizer can still
+    # honour the user's intent.
+    if max_capital_usd:
+        effective_max = max_capital_usd
+    elif max_shares and max_shares > 0 and entry > 0:
+        effective_max = max_shares * entry
+    else:
+        effective_max = settings.max_position_size_usd
     try:
         sz = calculate_position_size(
             symbol=symbol,
@@ -177,6 +189,33 @@ def _run_cycle() -> None:
             account_id = accounts[0].account_id if accounts else ""
             svc = ExecutionService(broker)
 
+            # Lazy per-broker execution-service cache for per-assignment broker
+            # overrides. "default" reuses the global svc / account_id built
+            # above. Anything else builds (authenticates, account lookup) on
+            # first hit this cycle, then is reused for subsequent symbols.
+            broker_svc_cache: dict[str, tuple[ExecutionService, str]] = {
+                "default": (svc, account_id),
+            }
+
+            def _svc_for(name: str) -> tuple[ExecutionService, str]:
+                key = (name or "default").lower()
+                if key in broker_svc_cache:
+                    return broker_svc_cache[key]
+                try:
+                    b = _build_one(key)
+                    loop.run_until_complete(b.authenticate())
+                    accts = loop.run_until_complete(b.get_accounts())
+                    aid = accts[0].account_id if accts else ""
+                    pair = (ExecutionService(b), aid)
+                    broker_svc_cache[key] = pair
+                    return pair
+                except Exception as exc:
+                    logger.warning(
+                        "[scheduler] Broker override %r failed (%s) — falling back to default",
+                        key, exc,
+                    )
+                    return broker_svc_cache["default"]
+
             from app.models.assignments import SymbolStrategyAssignment
             from app.schemas.orders import OrderRequest
 
@@ -189,7 +228,8 @@ def _run_cycle() -> None:
                 )
                 assignments = [
                     {"symbol": a.symbol, "system": a.system, "strategy_name": a.strategy_name,
-                     "max_capital_usd": a.max_capital_usd}
+                     "max_capital_usd": a.max_capital_usd, "max_shares": a.max_shares,
+                     "broker": a.broker or "default"}
                     for a in active_assignments
                 ]
 
@@ -315,11 +355,14 @@ def _run_cycle() -> None:
 
             # ── 3. Execute assigned signals (no consensus needed) ─
             for symbol, direction, label, entry, stop in signals_to_act:
-                asgn_cap = next((a["max_capital_usd"] for a in assignments if a["symbol"] == symbol), None)
+                asgn = next((a for a in assignments if a["symbol"] == symbol), None)
+                asgn_cap = asgn["max_capital_usd"] if asgn else None
+                asgn_shares = asgn["max_shares"] if asgn else None
+                asgn_broker = asgn["broker"] if asgn else "default"
                 if direction == "BUY":
-                    qty = _compute_quantity(symbol, entry, stop, asgn_cap)
+                    qty = _compute_quantity(symbol, entry, stop, asgn_cap, asgn_shares)
                     if qty <= 0:
-                        logger.info("[scheduler] BUY %s skipped — sizing produced 0 shares (cap=%s, entry=%.2f)", symbol, asgn_cap, entry)
+                        logger.info("[scheduler] BUY %s skipped — sizing produced 0 shares (cap=%s, shares=%s, entry=%.2f)", symbol, asgn_cap, asgn_shares, entry)
                         continue
                 else:
                     # SELL: only close positions we actually hold. Be strict —
@@ -351,9 +394,17 @@ def _run_cycle() -> None:
                                   source="scheduler", price=entry)
                 except Exception:
                     pass  # never let a notify failure block an order
-                loop.run_until_complete(svc.execute(
+                # Resolve the per-assignment broker. "default" reuses the global
+                # svc/account_id; anything else routes only this symbol's order.
+                exec_svc, exec_acct = _svc_for(asgn_broker)
+                if asgn_broker != "default":
+                    logger.info(
+                        "[scheduler] Routing %s %s via broker override %r",
+                        direction, symbol, asgn_broker,
+                    )
+                loop.run_until_complete(exec_svc.execute(
                     order_req,
-                    account_id=account_id,
+                    account_id=exec_acct,
                     signal_id=sig_id,
                     estimated_price=entry,
                 ))

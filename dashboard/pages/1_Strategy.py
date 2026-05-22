@@ -31,6 +31,39 @@ def _load_perplexity_strategy_names() -> list[str]:
         ]
 
 
+# The 7 generic scanner strategies — 5 regime-aware + 2 legacy.
+# Names are templated per symbol to match what _make_generic_configs_full(symbol)
+# produces, so the scheduler can resolve them to the right StrategyConfig.
+SCANNER_GENERIC_LABELS: list[tuple[str, str]] = [
+    ("{sym}_RSI2_Mean_Reversion",      "RSI-2 Mean Reversion"),
+    ("{sym}_EMA_MACD_Crossover",       "EMA + MACD Crossover"),
+    ("{sym}_BB_Squeeze_Breakout",      "Bollinger Squeeze Breakout"),
+    ("{sym}_Pullback_EMA50",           "Pullback to EMA(50)"),
+    ("{sym}_VIX_Spike_Reversal",       "VIX Spike Reversal"),
+    ("Legacy_{sym}_BB_Mean_Reversion", "Legacy: Bollinger Mean Reversion"),
+    ("Legacy_{sym}_Fib_Pullback",      "Legacy: Fibonacci Pullback"),
+]
+
+
+def _generic_strategy_names_for(symbol: str) -> list[tuple[str, str]]:
+    """Return [(name, display_label), ...] for the 7 generic strategies on this symbol."""
+    sym = (symbol or "SYMBOL").upper().strip() or "SYMBOL"
+    return [(tmpl.format(sym=sym), label) for tmpl, label in SCANNER_GENERIC_LABELS]
+
+
+# Broker route options for the per-assignment override. "default" defers to
+# the global active_broker / trade_routing toggle; the others pin orders for
+# the symbol to a specific broker adapter.
+BROKER_OPTIONS: list[tuple[str, str]] = [
+    ("default", "Default (use global toggle)"),
+    ("schwab",  "Schwab"),
+    ("webull",  "Webull"),
+    ("paper",   "Paper"),
+]
+BROKER_LABEL = {k: v for k, v in BROKER_OPTIONS}
+BROKER_VALUES = [k for k, _ in BROKER_OPTIONS]
+
+
 def _safe(call, default):
     try:
         return call()
@@ -150,15 +183,19 @@ if assignments:
     for a in assignments:
         sym = a["symbol"]
         cap = a.get("max_capital_usd")
+        shares_cap = a.get("max_shares")
         pos = pos_by_symbol.get(sym, {})
         qty = pos.get("quantity") or 0
         mkt_val = pos.get("market_value") or 0
+        broker_route = (a.get("broker") or "default")
         rows.append({
             "Symbol":         sym,
             "Strategy":       a["strategy_name"].replace("_", " "),
             "System":         a["system"].title(),
             "Auto-trade":     "✅ Active" if a["enabled"] else "⏸ Paused",
-            "Cap":            f"${cap:,.0f}" if cap else "(global)",
+            "Broker":         broker_route.title(),
+            "$ Cap":          f"${cap:,.0f}" if cap else "(global)",
+            "Shares Cap":     f"{shares_cap:g}" if shares_cap else "—",
             "Held":           f"{qty:g}" if qty else "—",
             "Exposure":       f"${mkt_val:,.0f}" if mkt_val else "—",
             "Notes":          a.get("notes") or "",
@@ -218,11 +255,87 @@ if assignments:
                 st.success(f"Removed assignment for {sel_sym}")
                 st.rerun()
         with mc3:
+            cur_cap = sel_asgn.get("max_capital_usd")
+            cur_shares = sel_asgn.get("max_shares")
+            cap_bits = []
+            if cur_cap:
+                cap_bits.append(f"${cur_cap:,.0f}")
+            if cur_shares:
+                cap_bits.append(f"{cur_shares:g} shs")
+            cap_label = " / ".join(cap_bits) if cap_bits else "global"
             st.caption(
                 f"Current: **{sel_asgn['strategy_name'].replace('_',' ')}** "
-                f"({sel_asgn['system']})  ·  "
-                f"Cap: {('$' + format(sel_asgn['max_capital_usd'], ',.0f')) if sel_asgn.get('max_capital_usd') else 'global'}"
+                f"({sel_asgn['system']})  ·  Cap: {cap_label}"
             )
+
+        # Edit caps row — dollar cap and shares cap. Dollar cap wins when both
+        # are set; shares cap is the fallback used when the dollar cap is empty.
+        ec1, ec2, ec3 = st.columns([2, 2, 1])
+        with ec1:
+            edit_cap = st.number_input(
+                "Max capital ($)",
+                min_value=0.0,
+                value=float(cur_cap) if cur_cap else 0.0,
+                step=100.0,
+                key=f"edit_cap_{sel_sym}",
+                help="0 = clear dollar cap. Wins over shares cap when both are set.",
+            )
+        with ec2:
+            edit_shares = st.number_input(
+                "Max shares (qty)",
+                min_value=0.0,
+                value=float(cur_shares) if cur_shares else 0.0,
+                step=1.0,
+                key=f"edit_shares_{sel_sym}",
+                help="0 = clear shares cap. Used only when dollar cap is empty.",
+            )
+        with ec3:
+            st.write("")
+            st.write("")
+            if st.button("💾 Update caps", key=f"update_caps_{sel_sym}",
+                         use_container_width=True):
+                try:
+                    api.set_assignment_cap(
+                        sel_sym,
+                        float(edit_cap) if edit_cap and edit_cap > 0 else None,
+                    )
+                    api.set_assignment_shares(
+                        sel_sym,
+                        float(edit_shares) if edit_shares and edit_shares > 0 else None,
+                    )
+                    st.success(f"Caps updated for {sel_sym}.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Update failed: {exc}")
+
+        # Per-assignment broker override. "default" follows the global toggle;
+        # anything else pins this symbol's orders to a specific broker so two
+        # assignments can fire to different brokers in the same cycle.
+        cur_broker = (sel_asgn.get("broker") or "default")
+        br1, br2 = st.columns([4, 1])
+        with br1:
+            edit_broker = st.selectbox(
+                "Broker route",
+                BROKER_VALUES,
+                index=BROKER_VALUES.index(cur_broker) if cur_broker in BROKER_VALUES else 0,
+                format_func=lambda v: BROKER_LABEL.get(v, v.title()),
+                key=f"edit_broker_{sel_sym}",
+                help="Default = global toggle. Otherwise this symbol's orders "
+                     "are pinned to the selected broker even if the global "
+                     "toggle points somewhere else.",
+            )
+        with br2:
+            st.write("")
+            st.write("")
+            if st.button("💾 Update broker", key=f"update_broker_{sel_sym}",
+                         use_container_width=True,
+                         disabled=(edit_broker == cur_broker)):
+                try:
+                    api.set_assignment_broker(sel_sym, edit_broker)
+                    st.success(f"{sel_sym} → {BROKER_LABEL[edit_broker]}.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Update failed: {exc}")
 else:
     st.info(
         "No assignments yet. With the consensus pool **OFF**, the scheduler has "
@@ -250,49 +363,89 @@ with st.expander("Add or update an assignment", expanded=not assignments):
     with ac2:
         new_system = st.selectbox(
             "System",
-            ["perplexity", "bollinger"],
+            ["perplexity", "bollinger", "scanner"],
             key="new_system",
             help="Perplexity = the 8 advanced swing strategies. "
-                 "Bollinger = entries from strategies.json.",
+                 "Bollinger / Scanner = the 7 generic strategies (RSI-2, EMA+MACD, "
+                 "BB Squeeze, Pullback EMA50, VIX Spike + 2 legacy) plus anything "
+                 "defined in strategies.json.",
         )
     with ac3:
         if new_system == "perplexity":
             new_strat = st.selectbox("Strategy", PERPLEXITY_STRATEGIES, key="new_strat_p")
         else:
+            # Build the dropdown with the 7 generic strategies on top, then any
+            # predefined strategies.json entries that match (or all of them as a
+            # fallback when none are tagged for this symbol).
+            generic_pairs = _generic_strategy_names_for(new_sym)
+            generic_names = [n for n, _ in generic_pairs]
             try:
                 boll_configs = api.strategy_configs()
-                boll_names = [c["name"] for c in boll_configs
+                predefined = [c["name"] for c in boll_configs
                               if c.get("symbol", "").upper() == new_sym]
-                if not boll_names:
-                    boll_names = [c["name"] for c in boll_configs]
+                if not predefined:
+                    predefined = [c["name"] for c in boll_configs]
             except Exception:
-                boll_names = []
+                predefined = []
+            # De-dup while preserving order: generics first, then predefined.
+            seen: set[str] = set()
+            combined: list[str] = []
+            for n in generic_names + predefined:
+                if n not in seen:
+                    seen.add(n)
+                    combined.append(n)
+
+            # Display label maps name -> friendly display (only for the generics).
+            label_for = {n: lbl for n, lbl in generic_pairs}
             new_strat = st.selectbox(
                 "Strategy",
-                boll_names if boll_names else ["—"],
+                combined if combined else ["—"],
                 key="new_strat_b",
-                help="Bollinger strategies are filtered to those tagged for this symbol "
-                     "when possible.",
+                format_func=lambda n: label_for.get(n, n.replace("_", " ")),
+                help="Top 7 = generic strategies (RSI-2, EMA+MACD, BB Squeeze, "
+                     "Pullback EMA50, VIX Spike + 2 legacy). Below = strategies.json "
+                     "entries tagged for this symbol.",
             )
 
-    cap_col, notes_col = st.columns([1, 2])
+    cap_col, shares_col, broker_col = st.columns([1, 1, 2])
     with cap_col:
         new_cap = st.number_input(
             "Max capital ($)", min_value=0, value=0, step=100, key="new_cap",
-            help="Dollar limit for this symbol. 0 = use global settings.",
+            help="Dollar limit for this symbol. Wins over shares cap when both "
+                 "are set. 0 = no dollar cap (falls back to shares cap or global).",
         )
-    with notes_col:
-        new_notes = st.text_input(
-            "Notes", placeholder="e.g. Best on 5y backtest, PF=3.26", key="new_notes",
+    with shares_col:
+        new_shares = st.number_input(
+            "Max shares (qty)", min_value=0.0, value=0.0, step=1.0, key="new_shares",
+            help="Shares cap. Used only when the dollar cap is empty. 0 = no shares cap.",
+        )
+    with broker_col:
+        new_broker = st.selectbox(
+            "Broker route",
+            BROKER_VALUES,
+            index=0,
+            format_func=lambda v: BROKER_LABEL.get(v, v.title()),
+            key="new_broker",
+            help="Default = global toggle. Otherwise this symbol's orders are "
+                 "pinned to the selected broker even if the global toggle "
+                 "points somewhere else.",
         )
 
+    new_notes = st.text_input(
+        "Notes", placeholder="e.g. Best on 5y backtest, PF=3.26", key="new_notes",
+    )
+
     max_capital_usd = float(new_cap) if new_cap and new_cap > 0 else None
+    max_shares = float(new_shares) if new_shares and new_shares > 0 else None
     save_disabled = (not new_sym) or (not new_strat) or new_strat == "—"
     if st.button("💾 Save assignment", type="primary", key="save_asgn",
                  disabled=save_disabled):
         try:
             api.upsert_assignment(new_sym, new_system, new_strat, enabled=True,
-                                  notes=new_notes, max_capital_usd=max_capital_usd)
+                                  notes=new_notes,
+                                  max_capital_usd=max_capital_usd,
+                                  max_shares=max_shares,
+                                  broker=new_broker)
             st.success(
                 f"Assigned **{new_strat.replace('_',' ')}** to **{new_sym}**. "
                 f"It will be evaluated on the next scheduler cycle."

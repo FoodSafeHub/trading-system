@@ -165,10 +165,23 @@ def list_assignments():
     return _get("/assignments")
 
 def upsert_assignment(symbol: str, system: str, strategy_name: str, enabled: bool = True,
-                      notes: str = "", max_capital_usd: float | None = None):
+                      notes: str = "", max_capital_usd: float | None = None,
+                      max_shares: float | None = None,
+                      broker: str = "default"):
     return _post("/assignments", json={"symbol": symbol, "system": system,
                                        "strategy_name": strategy_name, "enabled": enabled,
-                                       "notes": notes, "max_capital_usd": max_capital_usd})
+                                       "notes": notes,
+                                       "max_capital_usd": max_capital_usd,
+                                       "max_shares": max_shares,
+                                       "broker": broker})
+
+
+def set_assignment_broker(symbol: str, broker: str):
+    r = requests.patch(f"{BASE}/assignments/{symbol}/broker",
+                       params={"broker": broker},
+                       timeout=10, verify=False, headers=_headers())
+    r.raise_for_status()
+    return r.json()
 
 def toggle_assignment(symbol: str, enabled: bool):
     r = requests.patch(f"{BASE}/assignments/{symbol}/toggle", params={"enabled": str(enabled).lower()}, timeout=10, verify=False, headers=_headers())
@@ -176,8 +189,19 @@ def toggle_assignment(symbol: str, enabled: bool):
     return r.json()
 
 def set_assignment_cap(symbol: str, max_capital_usd: float | None):
+    # When clearing the cap, send no value at all (FastAPI's Optional[float]
+    # parameter accepts a missing query param as None, but rejects "").
+    params = {"max_capital_usd": max_capital_usd} if max_capital_usd else {}
     r = requests.patch(f"{BASE}/assignments/{symbol}/cap",
-                       params={"max_capital_usd": max_capital_usd if max_capital_usd else ""},
+                       params=params,
+                       timeout=10, verify=False, headers=_headers())
+    r.raise_for_status()
+    return r.json()
+
+def set_assignment_shares(symbol: str, max_shares: float | None):
+    params = {"max_shares": max_shares} if max_shares else {}
+    r = requests.patch(f"{BASE}/assignments/{symbol}/shares",
+                       params=params,
                        timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
@@ -429,6 +453,41 @@ def notifications_delete(notification_id: int):
     return _delete(f"/notifications/{notification_id}")
 
 
+# ── P/L ─────────────────────────────────────────────────────────────────────
+
+def pnl_summary(include_unrealized: bool = True):
+    return _get("/pnl/summary",
+                params={"include_unrealized": str(include_unrealized).lower()},
+                timeout=30)
+
+
+def pnl_by_symbol():
+    return _get("/pnl/by-symbol", timeout=30)
+
+
+def pnl_by_strategy():
+    return _get("/pnl/by-strategy", timeout=30)
+
+
+def pnl_closed_trades(symbol: str | None = None,
+                      strategy: str | None = None,
+                      limit: int = 500):
+    params: dict = {"limit": limit}
+    if symbol:
+        params["symbol"] = symbol
+    if strategy:
+        params["strategy"] = strategy
+    return _get("/pnl/closed-trades", params=params, timeout=30)
+
+
+def pnl_equity_curve(bucket: str = "trade"):
+    return _get("/pnl/equity-curve", params={"bucket": bucket}, timeout=30)
+
+
+def pnl_open_positions():
+    return _get("/pnl/open-positions", timeout=30)
+
+
 def backtest_custom_consensus(symbol: str, min_agreement: int = 2,
                               period: str = "1y", initial_capital: float = 100_000.0,
                               timeout: int = 120):
@@ -437,5 +496,36 @@ def backtest_custom_consensus(symbol: str, min_agreement: int = 2,
         f"/backtest/custom-consensus/{symbol}",
         params={"min_agreement": min_agreement, "period": period,
                 "initial_capital": initial_capital},
+        timeout=timeout,
+    )
+
+
+def backtest_custom_compare_all(symbol: str, period: str = "1y",
+                                initial_capital: float = 100_000.0,
+                                timeout: int = 240):
+    """Compare-all backtest: each of the 5 scanner strategies run independently."""
+    return _get(
+        f"/backtest/custom-compare-all/{symbol}",
+        params={"period": period, "initial_capital": initial_capital},
+        timeout=timeout,
+    )
+
+
+def backtest_run_generic(symbol: str, strategy_type: str,
+                         period: str = "1y", initial_capital: float = 100_000.0,
+                         timeout: int = 120):
+    """Single-strategy backtest on an arbitrary symbol using factory defaults."""
+    return _get(
+        f"/backtest/run-generic/{symbol}/{strategy_type}",
+        params={"period": period, "initial_capital": initial_capital},
+        timeout=timeout,
+    )
+
+
+def backtest_live_signals(symbol: str, period: str = "1y", timeout: int = 60):
+    """Run all 7 backtest strategies on the latest bar — read-only signal preview."""
+    return _get(
+        f"/backtest/live-signals/{symbol}",
+        params={"period": period},
         timeout=timeout,
     )

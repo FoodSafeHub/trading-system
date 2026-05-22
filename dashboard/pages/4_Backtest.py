@@ -13,6 +13,19 @@ apply_theme("Backtest")
 st.title("Strategy Backtester")
 st.caption("Simulates how a strategy would have performed on historical data — no real money involved.")
 
+# ── Broker route options (per-assignment override at Promote time) ─────────────
+# "default" defers to the global active_broker / trade_routing toggle; the
+# others pin orders for the promoted symbol to a specific broker adapter.
+BROKER_OPTIONS: list[tuple[str, str]] = [
+    ("default", "Default (use global toggle)"),
+    ("schwab",  "Schwab"),
+    ("webull",  "Webull"),
+    ("paper",   "Paper"),
+]
+BROKER_LABEL = {k: v for k, v in BROKER_OPTIONS}
+BROKER_VALUES = [k for k, _ in BROKER_OPTIONS]
+
+
 # ── New strategy metadata ──────────────────────────────────────────────────────
 
 NEW_STRATEGY_TYPES = {
@@ -309,7 +322,8 @@ def _equity_chart(r: dict, *, symbol: str | None = None, period: str = "1y") -> 
     )
 
 
-def _price_action_chart(r: dict, symbol: str | None, period: str) -> None:
+def _price_action_chart(r: dict, symbol: str | None, period: str,
+                        key_suffix: str = "") -> None:
     """Render the underlying price as candlesticks with trade markers + indicators."""
     if not symbol:
         return
@@ -334,7 +348,7 @@ def _price_action_chart(r: dict, symbol: str | None, period: str) -> None:
             "vwap": "VWAP", "bb_upper": "Bollinger ↑", "bb_lower": "Bollinger ↓",
             "supertrend": "Supertrend",
         }[k],
-        key=f"price_overlays_{symbol}",
+        key=f"price_overlays_{symbol}_{key_suffix}" if key_suffix else f"price_overlays_{symbol}",
     )
 
     charts.render_price_chart(
@@ -426,6 +440,92 @@ def _consensus_trades_table(trades: list) -> None:
 
 
 # ══════════════════════════════════════════════════════════════
+# LIVE SIGNALS — what would fire RIGHT NOW (read-only snapshot)
+# ══════════════════════════════════════════════════════════════
+with st.expander("📡 Live Signals — what would fire right now", expanded=False):
+    st.caption(
+        "Runs all 7 strategies on the latest market data — no trade is placed, "
+        "just analysis. Use this before running a backtest to see what's actively "
+        "signalling on a symbol."
+    )
+
+    ls_c1, ls_c2 = st.columns([3, 1])
+    with ls_c1:
+        ls_symbol = st.text_input(
+            "Symbol", value="AAPL", key="bt_live_sym",
+            help="Type any US stock ticker — BRK-B, NVDA, TQQQ, etc.",
+        ).upper().strip()
+    with ls_c2:
+        st.write("")
+        st.write("")
+        ls_run = st.button("▶ Get Signals", type="primary",
+                           use_container_width=True, key="bt_live_run")
+
+    if ls_run:
+        if not ls_symbol:
+            st.error("Enter a symbol.")
+        else:
+            with st.spinner(f"Fetching signals for {ls_symbol}..."):
+                try:
+                    st.session_state["bt_live_result"] = api.backtest_live_signals(ls_symbol)
+                except Exception as exc:
+                    st.error(f"Failed: {exc}")
+
+    live = st.session_state.get("bt_live_result")
+    if live and live.get("signals"):
+        sigs = live["signals"]
+        buy_n  = sum(1 for s in sigs if s.get("direction") == "BUY")
+        sell_n = sum(1 for s in sigs if s.get("direction") == "SELL")
+        hold_n = sum(1 for s in sigs if s.get("direction") == "HOLD")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("🟢 BUY signals",  buy_n)
+        c2.metric("🔴 SELL signals", sell_n)
+        c3.metric("⬜ HOLD",         hold_n)
+        c4.metric("Last close", f"${live.get('last_close'):,.2f}" if live.get("last_close") else "—")
+        st.caption(f"As of: **{live.get('as_of', '—')}** for **{live.get('symbol', '—')}**")
+        st.divider()
+
+        for s in sigs:
+            direction = s.get("direction", "HOLD")
+            name = s.get("strategy_name", "?")
+            if s.get("error"):
+                with st.expander(f"❌ {name} — error", expanded=False):
+                    st.error(s["error"])
+                continue
+            icon = "🟢" if direction == "BUY" else ("🔴" if direction == "SELL" else "⬜")
+            strength = s.get("strength") or 0
+            strength_str = f"  ·  strength {strength:.0%}" if strength else ""
+            with st.expander(
+                f"{icon} **{name}** — {direction}{strength_str}",
+                expanded=(direction in ("BUY", "SELL")),
+            ):
+                if s.get("reason"):
+                    st.info(f"**Reason:** {s['reason']}")
+
+                if direction in ("BUY", "SELL"):
+                    mc1, mc2, mc3 = st.columns(3)
+                    if s.get("entry_price"):
+                        mc1.metric("Entry", f"${s['entry_price']:,.2f}")
+                    if s.get("stop_price") and s.get("entry_price"):
+                        stop_pct = (s["entry_price"] - s["stop_price"]) / s["entry_price"] * 100
+                        mc2.metric("Stop", f"${s['stop_price']:,.2f}",
+                                   delta=f"-{stop_pct:.1f}% from entry",
+                                   delta_color="inverse")
+                    if s.get("target_price") and s.get("entry_price"):
+                        tgt_pct = (s["target_price"] - s["entry_price"]) / s["entry_price"] * 100
+                        mc3.metric("Target", f"${s['target_price']:,.2f}",
+                                   delta=f"+{tgt_pct:.1f}% from entry")
+
+                if s.get("indicators"):
+                    with st.expander("Indicator values", expanded=False):
+                        st.json(s["indicators"])
+    elif live:
+        st.warning("No signals returned for this symbol.")
+    else:
+        st.caption("Enter a symbol and click Get Signals.")
+
+
+# ══════════════════════════════════════════════════════════════
 # MODE TOGGLE
 # ══════════════════════════════════════════════════════════════
 _render_recommendation_overview()
@@ -445,73 +545,34 @@ st.divider()
 # SINGLE STRATEGY MODE
 # ══════════════════════════════════════════════════════════════
 if mode == "Single Strategy":
-    try:
-        strategies = api._get("/backtest/strategies")
-        strategy_names = [s["name"] for s in strategies]
-    except Exception as e:
-        st.error(f"Cannot reach API: {e}")
-        st.stop()
-
-    # Sort: new strategies first, then legacy
-    new_names    = [n for n in strategy_names if not n.startswith("Legacy_")]
-    legacy_names = [n for n in strategy_names if n.startswith("Legacy_")]
-    strategy_names = new_names + legacy_names
-
-    symbol_list = []
-    symbol_info = {}
-    try:
-        symbols_data = api._get("/backtest/consensus-symbols")
-        symbol_list = [s["symbol"] for s in symbols_data]
-        symbol_info = {s["symbol"]: s for s in symbols_data}
-    except Exception:
-        symbol_list = []
-        symbol_info = {}
-
-    strategy_by_symbol: dict[str, list[str]] = {}
-    for s in strategies:
-        strategy_by_symbol.setdefault(s["symbol"], []).append(s["name"])
+    # The 7 strategy types available via _make_generic_configs_full.
+    # Ordered: 5 regime-aware first, then the 2 legacy types.
+    SINGLE_STRATEGY_CHOICES: list[tuple[str, str]] = [
+        ("rsi2_mean_reversion",  "RSI-2 Mean Reversion"),
+        ("ema_macd_crossover",   "EMA + MACD Crossover"),
+        ("bb_squeeze_breakout",  "Bollinger Squeeze Breakout"),
+        ("pullback_ema50",       "Pullback to EMA(50)"),
+        ("vix_spike_reversal",   "VIX Spike Reversal"),
+        ("bollinger",            "Legacy: Bollinger Mean Reversion"),
+        ("fib_pullback",         "Legacy: Fibonacci Pullback"),
+    ]
+    _label_by_type = {t: lbl for t, lbl in SINGLE_STRATEGY_CHOICES}
+    _types = [t for t, _ in SINGLE_STRATEGY_CHOICES]
 
     col1, col2, col3, col4, col5 = st.columns([2, 2.5, 1.5, 2, 1])
     with col1:
-        if symbol_list:
-            chosen_sym = st.selectbox("Symbol", symbol_list)
-        else:
-            chosen_sym = st.text_input("Symbol", value="AAPL")
-
-    sym_strats = strategy_by_symbol.get(chosen_sym, strategy_names)
-    if not sym_strats:
-        sym_strats = strategy_names
-    # New strategies first within symbol
-    sym_new    = [n for n in sym_strats if not n.startswith("Legacy_")]
-    sym_legacy = [n for n in sym_strats if n.startswith("Legacy_")]
-    sym_strats = sym_new + sym_legacy
-
+        chosen_sym = st.text_input(
+            "Symbol", value="AAPL",
+            help="Any Yahoo-Finance-compatible ticker (AAPL, BRK-B, NVDA, TQQQ, ...).",
+        ).strip().upper()
     with col2:
-        use_recommended = st.checkbox(
-            "Use recommended strategy for selected symbol",
-            value=True,
+        chosen_type = st.selectbox(
+            "Strategy", _types,
+            format_func=lambda t: _label_by_type[t],
+            index=3,  # Pullback EMA50 — the highest-frequency strategy
         )
-        rec = get_symbol_recommendation(chosen_sym)
-        recommended_choice = None
-        if rec:
-            recommended_choice = _resolve_recommended_strategy(
-                chosen_sym, sym_strats, rec.get("primary", "")
-            )
-
-        use_rec_picker = use_recommended and bool(recommended_choice)
-        default_idx = sym_strats.index(recommended_choice) if recommended_choice in sym_strats else 0
-        chosen = st.selectbox(
-            "Strategy", sym_strats,
-            index=default_idx,
-            disabled=use_rec_picker,
-        )
-        if use_rec_picker and recommended_choice:
-            chosen = recommended_choice
-        elif use_recommended and rec and not recommended_choice:
-            st.warning("Recommended strategy not available — choose manually.")
-
     with col3:
-        period = st.selectbox("Historical Period", ["6mo", "1y", "2y"], index=1)
+        period = st.selectbox("Historical Period", ["6mo", "1y", "2y", "5y"], index=1)
     with col4:
         capital = st.number_input("Starting Capital ($)", value=100000, min_value=1000, step=10000)
     with col5:
@@ -519,38 +580,33 @@ if mode == "Single Strategy":
         st.write("")
         run = st.button("▶ Run Backtest", type="primary", use_container_width=True)
 
-    _render_symbol_recommendation_card(chosen_sym)
-    _render_strategy_description(chosen or "")
+    # Strategy notes — re-use the description card if it matches.
+    # _render_strategy_description expects a strategy NAME, but matches on
+    # type substrings, so the bare type works.
+    _render_strategy_description(chosen_type)
 
     if not run and "bt_result" not in st.session_state:
-        st.info("Select a symbol and strategy, then click Run Backtest.")
+        st.info("Type a symbol, pick a strategy, then click Run Backtest.")
         st.stop()
 
     if run:
-        with st.spinner(f"Running backtest for {chosen_sym} / {chosen} over {period}..."):
+        if not chosen_sym:
+            st.error("Enter a symbol.")
+            st.stop()
+        with st.spinner(f"Running backtest for {chosen_sym} / {_label_by_type[chosen_type]} over {period}..."):
             try:
-                params = {"period": period, "initial_capital": capital, "quantity": 0}
-                if chosen_sym:
-                    params["symbol"] = chosen_sym
-                result = api._get(f"/backtest/run/{chosen}", timeout=120, params=params)
+                result = api.backtest_run_generic(
+                    chosen_sym, chosen_type,
+                    period=period, initial_capital=capital, timeout=120,
+                )
                 st.session_state["bt_result"] = result
                 st.session_state.pop("bt_consensus", None)
             except Exception as e:
-                # Fallback: retry without symbol param for older API compatibility
-                if chosen_sym:
-                    try:
-                        result = api._get(
-                            f"/backtest/run/{chosen}?period={period}&initial_capital={capital}&quantity=0",
-                            timeout=120,
-                        )
-                        st.session_state["bt_result"] = result
-                        st.session_state.pop("bt_consensus", None)
-                    except Exception:
-                        st.error(f"Backtest failed: {e}")
-                        st.stop()
-                else:
-                    st.error(f"Backtest failed: {e}")
-                    st.stop()
+                st.error(f"Backtest failed: {e}")
+                st.stop()
+
+    # Keep `chosen` populated so the Promote block below still works.
+    chosen = st.session_state.get("bt_result", {}).get("strategy_name", "")
 
     r = st.session_state.get("bt_result")
     if not r:
@@ -568,6 +624,79 @@ if mode == "Single Strategy":
     _equity_chart(r, symbol=chosen_sym, period=period)
     _price_action_chart(r, chosen_sym, period)
     _single_trades_table(r["trades"])
+
+    # ── Promote this exact strategy/symbol pair to auto-trade ──────────
+    # Lives after the trades table so the user has full context (equity
+    # curve, drawdown, trade list) before committing the strategy to the
+    # live scheduler.
+    st.divider()
+    st.markdown("##### Promote this strategy to auto-trade")
+    st.caption(
+        f"Assigns **{r['strategy_name']}** to **{chosen_sym}** in the live scheduler. "
+        "BUY/SELL signals on this symbol will create notifications once promoted."
+    )
+    p1, p2 = st.columns([1, 1])
+    with p1:
+        single_cap_str = st.text_input(
+            "Max capital ($)", value="", placeholder="optional",
+            key=f"single_promote_cap_{chosen_sym}_{chosen}",
+            help="Dollar cap. Wins over shares cap when both are set. "
+                 "Leave blank to use the global account cap.",
+        )
+    with p2:
+        single_shares_str = st.text_input(
+            "Max shares (qty)", value="", placeholder="optional",
+            key=f"single_promote_shares_{chosen_sym}_{chosen}",
+            help="Shares cap. Used only when the dollar cap is empty.",
+        )
+    p3, p4, p5 = st.columns([3, 1, 2])
+    with p3:
+        single_broker = st.selectbox(
+            "Broker route",
+            BROKER_VALUES,
+            index=0,
+            format_func=lambda v: BROKER_LABEL.get(v, v.title()),
+            key=f"single_promote_broker_{chosen_sym}_{chosen}",
+            help="Default = global toggle. Otherwise pins this symbol's orders "
+                 "to the selected broker.",
+        )
+    with p4:
+        single_enabled = st.checkbox(
+            "Enabled", value=True,
+            key=f"single_promote_en_{chosen_sym}_{chosen}",
+        )
+    with p5:
+        st.write("")
+        st.write("")
+        single_go = st.button(
+            "Promote", type="primary", use_container_width=True,
+            key=f"single_promote_btn_{chosen_sym}_{chosen}",
+        )
+    if single_go:
+        try:
+            single_cap_val: float | None = None
+            if single_cap_str.strip():
+                single_cap_val = float(single_cap_str.strip())
+            single_shares_val: float | None = None
+            if single_shares_str.strip():
+                single_shares_val = float(single_shares_str.strip())
+            api.upsert_assignment(
+                symbol=chosen_sym,
+                system="scanner",
+                strategy_name=r["strategy_name"],
+                enabled=single_enabled,
+                notes=f"Promoted from Single Strategy backtest ({period})",
+                max_capital_usd=single_cap_val,
+                max_shares=single_shares_val,
+                broker=single_broker,
+            )
+            st.success(
+                f"Assigned **{r['strategy_name']}** to **{chosen_sym}** "
+                f"(scanner, enabled={single_enabled}). "
+                "BUY/SELL signals on this symbol will now create notifications."
+            )
+        except Exception as exc:
+            st.error(f"Promote failed: {exc}")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -681,71 +810,269 @@ elif mode == "Consensus Mode":
 else:  # mode == "Custom Symbol"
     st.info(
         "Type any ticker (e.g. **BRK-B**, **NVDA**, **TQQQ**) and the backtester will "
-        "run the same 5 strategies the scanner uses: RSI2 Mean Reversion, EMA+MACD "
-        "Crossover, BB Squeeze Breakout, Pullback to EMA(50), VIX Spike Reversal."
+        "run each of the 7 strategies INDEPENDENTLY — RSI2 Mean Reversion, "
+        "EMA+MACD Crossover, BB Squeeze Breakout, Pullback to EMA(50), VIX Spike "
+        "Reversal, plus the 2 legacy strategies (Bollinger Mean Reversion, "
+        "Fibonacci Pullback) — so you see the same coverage as predefined symbols."
     )
 
-    c1, c2, c3, c4 = st.columns([2, 1.5, 1.5, 1.5])
+    c1, c2, c3 = st.columns([2, 2, 2])
     with c1:
         custom_sym = st.text_input(
             "Symbol", value="BRK-B",
             help="Any Yahoo-Finance-compatible ticker. Use the same form the scanner used "
                  "(e.g. BRK-B with a hyphen, not BRK.B).",
+            key="custom_bt_sym",
         ).strip().upper()
     with c2:
-        period = st.selectbox("Historical Period", ["6mo", "1y", "2y"], index=1,
+        period = st.selectbox("Historical Period", ["6mo", "1y", "2y", "5y"], index=1,
                               key="custom_bt_period")
     with c3:
-        capital = st.number_input("Starting Capital ($)", value=100000, min_value=1000,
-                                  step=10000, key="custom_bt_capital")
-    with c4:
-        min_agreement = st.slider(
-            "Min strategies that must agree",
-            min_value=1, max_value=5, value=2,
-            help="1 = any single strategy fires (noisier). 2 = balanced (matches scanner's "
-                 "default). 3+ = high-confidence only.",
-            key="custom_bt_min_agree",
-        )
+        capital = st.number_input("Starting Capital ($)", value=10000, min_value=1000,
+                                  step=1000, key="custom_bt_capital")
 
-    run_cs = st.button("▶ Run Custom Backtest", type="primary", key="custom_bt_run")
+    run_cs = st.button("▶ Compare All 7 Strategies", type="primary", key="custom_bt_run")
 
     if run_cs:
         if not custom_sym:
             st.error("Enter a symbol.")
             st.stop()
-        with st.spinner(f"Running 5-strategy consensus backtest for {custom_sym} over {period}..."):
+        with st.spinner(f"Running all 7 strategies on {custom_sym} over {period}..."):
             try:
-                result = api.backtest_custom_consensus(
-                    custom_sym, min_agreement=min_agreement,
-                    period=period, initial_capital=capital, timeout=180,
+                results = api.backtest_custom_compare_all(
+                    custom_sym, period=period, initial_capital=capital, timeout=240,
                 )
-                st.session_state["bt_custom"] = result
+                st.session_state["bt_custom_compare"] = {"symbol": custom_sym,
+                                                          "period": period,
+                                                          "rows": results}
             except Exception as e:
-                st.error(f"Custom backtest failed: {e}")
+                st.error(f"Custom compare failed: {e}")
                 st.stop()
 
-    r = st.session_state.get("bt_custom")
-    if not r:
-        st.caption("Enter a symbol and click Run.")
+    state = st.session_state.get("bt_custom_compare")
+    if not state:
+        st.caption("Enter a symbol and click Compare.")
         st.stop()
 
+    cmp = state["rows"]
+    cmp_symbol = state["symbol"]
+    cmp_period = state["period"]
+
     st.divider()
-    st.subheader(
-        f"Custom Consensus — {r['symbol']}  |  "
-        f"Min Agreement: {r['min_agreement']}  |  "
-        f"{r['start_date']} → {r['end_date']}"
-    )
-    st.caption(f"Strategies tested: {', '.join(r['strategies_used'])}")
 
-    _render_backtest_metrics(r)
+    # Require at least 3 trades for the comparison; same statistical guardrail
+    # the Perplexity Compare All tab uses (set lower here because some scanner
+    # strategies only fire 3–4 times in 1y on a single name).
+    valid = [r for r in cmp if not r.get("error") and (r.get("total_trades") or 0) >= 3]
 
-    if r["total_trades"] == 0:
+    # ── Best strategy recommendation (rank-based, same weights as Perplexity) ──
+    best = None
+    if valid:
+        def _ranked_score(strategies):
+            metrics = {
+                "total_return_pct": 0.40,
+                "profit_factor":    0.25,
+                "win_rate_pct":     0.20,
+                "sharpe_ratio":     0.10,
+                "total_trades":     0.05,
+            }
+            scores = {r["strategy_name"]: 0.0 for r in strategies}
+            n = len(strategies)
+            for metric, weight in metrics.items():
+                def _val(r, m=metric):
+                    v = r.get(m)
+                    return float("inf") if v is None else float(v)
+                ranked = sorted(strategies, key=_val, reverse=True)
+                for rank, r in enumerate(ranked, start=1):
+                    scores[r["strategy_name"]] += weight * (n - rank + 1) / n
+            return scores
+
+        profitable = [r for r in valid if (r.get("total_return_pct") or 0) > 0]
+        pool = profitable if profitable else valid
+        scores = _ranked_score(pool)
+        best = max(pool, key=lambda r: scores[r["strategy_name"]])
+
+        b_pf  = best.get("profit_factor") or 0
+        b_ret = best.get("total_return_pct") or 0
+        b_wr  = best.get("win_rate_pct") or 0
+        st.success(
+            f"**Recommended strategy for {cmp_symbol}: {best['strategy_name'].replace('_', ' ')}**  \n"
+            f"Win Rate: **{b_wr:.1f}%** | Profit Factor: **{b_pf:.2f}** | "
+            f"Return over {cmp_period}: **{b_ret:+.2f}%** | Trades: **{best.get('total_trades', 0)}**  \n"
+            f"Use the Promote control below to assign this to auto-trade."
+        )
+        st.divider()
+    else:
         st.warning(
-            "No trades fired in this window. Try a longer period (2y), lower the "
-            "min-agreement to 1, or check that the symbol has enough Yahoo history."
+            "None of the 5 strategies generated enough trades on this symbol/period "
+            "to compare reliably (need at least 3). Try a longer period (2y or 5y)."
         )
 
-    _render_regime_panel(r.get("trades", []), period)
-    _equity_chart(r, symbol=r["symbol"], period=period)
-    _price_action_chart(r, r["symbol"], period)
-    _consensus_trades_table(r["trades"])
+    # ── Comparison table ───────────────────────────────────────────────
+    rows = []
+    for r in cmp:
+        if r.get("error"):
+            rows.append({
+                "Strategy":      r["strategy_name"],
+                "Trades":        "—",
+                "Win Rate":      "—",
+                "Profit Factor": "—",
+                "Avg Win":       "—",
+                "Expectancy":    "—",
+                "Total Return":  "ERROR",
+                "CAGR":          "—",
+                "Total P&L":     r["error"][:60],
+                "Max Drawdown":  "—",
+                "Sharpe":        "—",
+            })
+            continue
+        pnl = r.get("total_pnl") or 0
+        is_best = best is not None and r["strategy_name"] == best["strategy_name"]
+        pf = r.get("profit_factor")
+        sh = r.get("sharpe_ratio")
+        rows.append({
+            "Strategy":      ("⭐ " if is_best else "") + r["strategy_name"],
+            "Trades":        r.get("total_trades", 0),
+            "Win Rate":      f"{(r.get('win_rate_pct') or 0):.1f}%",
+            "Profit Factor": f"{pf:.2f}" if pf is not None else "—",
+            "Avg Win":       f"{(r.get('avg_win_pct') or 0):+.2f}%",
+            "Expectancy":    f"{(r.get('expectancy_pct') or 0):+.2f}%",
+            "Total Return":  f"{(r.get('total_return_pct') or 0):+.2f}%",
+            "CAGR":          f"{(r.get('cagr') or 0):+.2f}%",
+            "Total P&L":     f"+${pnl:,.0f}" if pnl >= 0 else f"-${abs(pnl):,.0f}",
+            "Max Drawdown":  f"{(r.get('max_drawdown_pct') or 0):.1f}%",
+            "Sharpe":        f"{sh:.2f}" if sh is not None else "—",
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # ── Per-strategy detail expanders ──────────────────────────────────
+    # Click any strategy below to see its equity curve, trade markers on
+    # the price chart, and full trade list — same view as Single Strategy
+    # mode, but for any ticker. Recommended winner is expanded by default.
+    st.markdown("##### Strategy details — click to expand")
+    best_name = best["strategy_name"] if best else None
+    for row in cmp:
+        sname = row.get("strategy_name", "?")
+        is_winner = (sname == best_name)
+        if row.get("error"):
+            with st.expander(f"❌ {sname} — ERROR", expanded=False):
+                st.error(row["error"])
+            continue
+        label = ("⭐ " if is_winner else "") + sname
+        ret = row.get("total_return_pct") or 0
+        wr = row.get("win_rate_pct") or 0
+        n = row.get("total_trades") or 0
+        with st.expander(
+            f"{label}  ·  {ret:+.2f}% return  ·  {wr:.1f}% win rate  ·  {n} trades",
+            expanded=is_winner,
+        ):
+            _render_backtest_metrics(row)
+            if not row.get("trades"):
+                st.info(
+                    "No trades fired for this strategy on this symbol/period. "
+                    "Try a longer period (2y or 5y)."
+                )
+            else:
+                _equity_chart(row, symbol=cmp_symbol, period=cmp_period)
+                _price_action_chart(row, cmp_symbol, cmp_period, key_suffix=sname)
+                _single_trades_table(row["trades"])
+
+    # ── Bar chart of returns (gold = winner) ───────────────────────────
+    if valid:
+        best_name = best["strategy_name"]
+        fig = go.Figure(go.Bar(
+            x=[r["strategy_name"].replace("_", " ") for r in valid],
+            y=[r.get("total_return_pct") or 0 for r in valid],
+            marker_color=[
+                "#FFD700" if r["strategy_name"] == best_name
+                else ("#00d4aa" if (r.get("total_return_pct") or 0) >= 0 else "#ff4b4b")
+                for r in valid
+            ],
+            text=[("⭐ " if r["strategy_name"] == best_name else "") +
+                  f"{(r.get('total_return_pct') or 0):+.1f}%" for r in valid],
+            textposition="outside",
+        ))
+        fig.update_layout(
+            title=f"Total Return — {cmp_symbol} ({cmp_period})  |  Gold = Recommended",
+            height=350, template="plotly_dark",
+            yaxis_title="Total Return (%)", xaxis_title="",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── Promote to auto-trade ──────────────────────────────────────────
+    promotable = [r for r in cmp if not r.get("error")]
+    if promotable:
+        st.divider()
+        st.markdown("##### Promote a strategy to auto-trade")
+        st.caption(
+            "Picks the strategy/symbol pair the live scheduler should use for this ticker. "
+            "Notifications fire on every BUY/SELL signal once promoted."
+        )
+        p1, p2, p3 = st.columns([3, 2, 2])
+        with p1:
+            names = [r["strategy_name"] for r in promotable]
+            default_name = best["strategy_name"] if best else names[0]
+            pick = st.selectbox(
+                "Strategy to promote",
+                names,
+                index=names.index(default_name) if default_name in names else 0,
+                key=f"custom_promote_pick_{cmp_symbol}",
+                help="Defaults to the recommended winner. Override if you want a different one.",
+            )
+        with p2:
+            cap_str = st.text_input(
+                "Max capital ($)", value="", placeholder="optional",
+                key=f"custom_promote_cap_{cmp_symbol}",
+                help="Dollar cap. Wins over shares cap when both are set. "
+                     "Leave blank to use the global account cap.",
+            )
+        with p3:
+            shares_str = st.text_input(
+                "Max shares (qty)", value="", placeholder="optional",
+                key=f"custom_promote_shares_{cmp_symbol}",
+                help="Shares cap. Used only when the dollar cap is empty.",
+            )
+        p4, p5, p6 = st.columns([3, 1, 2])
+        with p4:
+            custom_broker = st.selectbox(
+                "Broker route",
+                BROKER_VALUES,
+                index=0,
+                format_func=lambda v: BROKER_LABEL.get(v, v.title()),
+                key=f"custom_promote_broker_{cmp_symbol}",
+                help="Default = global toggle. Otherwise pins this symbol's "
+                     "orders to the selected broker.",
+            )
+        with p5:
+            enabled = st.checkbox("Enabled", value=True, key=f"custom_promote_en_{cmp_symbol}")
+        with p6:
+            st.write("")
+            st.write("")
+            go_btn = st.button("Promote", type="primary",
+                               use_container_width=True,
+                               key=f"custom_promote_btn_{cmp_symbol}")
+        if go_btn:
+            try:
+                cap_val: float | None = None
+                if cap_str.strip():
+                    cap_val = float(cap_str.strip())
+                shares_val: float | None = None
+                if shares_str.strip():
+                    shares_val = float(shares_str.strip())
+                api.upsert_assignment(
+                    symbol=cmp_symbol,
+                    system="scanner",
+                    strategy_name=pick,
+                    enabled=enabled,
+                    notes=f"Promoted from Custom Symbol compare ({cmp_period})",
+                    max_capital_usd=cap_val,
+                    max_shares=shares_val,
+                    broker=custom_broker,
+                )
+                st.success(
+                    f"Assigned **{pick}** to **{cmp_symbol}** "
+                    f"(scanner, enabled={enabled}). "
+                    "BUY/SELL signals on this symbol will now create notifications."
+                )
+            except Exception as exc:
+                st.error(f"Promote failed: {exc}")

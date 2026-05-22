@@ -1,0 +1,270 @@
+"""Realized + unrealized P/L dashboard.
+
+Pulls everything from /pnl/* — no local state. Top-line tiles, equity curve,
+open positions with live unrealized, then breakdowns by symbol and strategy
+followed by the full closed-trade log.
+"""
+from __future__ import annotations
+
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
+import api
+from _theme import apply_theme, section, kpi_row, money, pct, divider
+
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import streamlit as st
+
+apply_theme("P/L")
+st.title("P/L Dashboard")
+st.caption(
+    "Realized P/L is computed FIFO from filled orders. Unrealized P/L is the "
+    "open position size × (last quote − avg cost) — refreshed each page load."
+)
+
+
+# ── Load ────────────────────────────────────────────────────────────────────
+try:
+    summary = api.pnl_summary(include_unrealized=True)
+except Exception as exc:
+    st.error(f"Cannot load /pnl/summary: {exc}")
+    st.stop()
+
+realized = summary.get("realized") or {}
+total_unrealized = summary.get("total_unrealized_pnl") or 0.0
+closed_count = summary.get("closed_trade_count") or 0
+open_count = summary.get("open_position_count") or 0
+has_live_prices = summary.get("has_live_prices", False)
+
+total_realized = realized.get("total_realized_pnl") or 0.0
+win_rate = realized.get("win_rate_pct") or 0.0
+profit_factor = realized.get("profit_factor")
+best_trade = realized.get("best_trade") or 0.0
+worst_trade = realized.get("worst_trade") or 0.0
+avg_hold = realized.get("avg_hold_days") or 0.0
+
+# ── Top tiles ───────────────────────────────────────────────────────────────
+kpi_row([
+    ("Realized P/L", money(total_realized)),
+    ("Unrealized P/L", money(total_unrealized) if has_live_prices else "—"),
+    ("Total P/L", money(total_realized + total_unrealized) if has_live_prices else money(total_realized)),
+    ("Closed trades", f"{closed_count:,}"),
+])
+
+kpi_row([
+    ("Win rate", f"{win_rate:.1f}%"),
+    ("Profit factor", f"{profit_factor:.2f}" if profit_factor is not None else "—"),
+    ("Best trade", money(best_trade)),
+    ("Worst trade", money(worst_trade)),
+])
+
+if not has_live_prices and open_count > 0:
+    st.info(f"{open_count} open position(s) — live quotes unavailable, unrealized P/L shown as —.")
+
+divider()
+
+
+# ── Equity curve ────────────────────────────────────────────────────────────
+section("Equity Curve", "Cumulative realized P/L + running drawdown from peak.")
+
+bcol1, bcol2 = st.columns([1, 5])
+with bcol1:
+    bucket_label = st.selectbox("Bucket", ["Per trade", "Per day"], index=0, key="pnl_eq_bucket")
+bucket = "day" if bucket_label == "Per day" else "trade"
+
+try:
+    eq = api.pnl_equity_curve(bucket=bucket)
+except Exception as exc:
+    st.error(f"Cannot load /pnl/equity-curve: {exc}")
+    eq = []
+
+if not eq:
+    st.info("No realized trades yet. The curve fills in as round-trips close.")
+else:
+    df_eq = pd.DataFrame(eq)
+    df_eq["at"] = pd.to_datetime(df_eq["at"])
+
+    max_dd = float(df_eq["drawdown"].max()) if "drawdown" in df_eq else 0.0
+    max_dd_pct = df_eq["drawdown_pct"].max() if "drawdown_pct" in df_eq else None
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+        row_heights=[0.72, 0.28],
+    )
+    fig.add_trace(go.Scatter(
+        x=df_eq["at"], y=df_eq["realized_pnl"],
+        mode="lines", line=dict(color="#26a69a", width=2),
+        fill="tozeroy", fillcolor="rgba(38,166,154,0.15)",
+        hovertemplate="%{x}<br>P/L $%{y:,.2f}<extra></extra>",
+        name="Realized P/L",
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=df_eq["at"], y=df_eq["peak_pnl"],
+        mode="lines", line=dict(color="rgba(255,255,255,0.35)", width=1, dash="dot"),
+        hovertemplate="%{x}<br>Peak $%{y:,.2f}<extra></extra>",
+        name="Peak",
+    ), row=1, col=1)
+    # Drawdown as negative bars so the eye reads it as a loss from peak.
+    fig.add_trace(go.Scatter(
+        x=df_eq["at"], y=-df_eq["drawdown"],
+        mode="lines", line=dict(color="#ef5350", width=1.5),
+        fill="tozeroy", fillcolor="rgba(239,83,80,0.22)",
+        hovertemplate="%{x}<br>DD $%{customdata:,.2f}<extra></extra>",
+        customdata=df_eq["drawdown"],
+        name="Drawdown",
+    ), row=2, col=1)
+
+    fig.update_layout(
+        height=420,
+        margin=dict(l=8, r=8, t=8, b=8),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="rgba(230,230,230,0.9)"),
+        showlegend=False,
+    )
+    fig.update_xaxes(gridcolor="rgba(255,255,255,0.06)")
+    fig.update_yaxes(gridcolor="rgba(255,255,255,0.06)", tickprefix="$", row=1, col=1)
+    fig.update_yaxes(gridcolor="rgba(255,255,255,0.06)", tickprefix="$", row=2, col=1)
+    st.plotly_chart(fig, use_container_width=True)
+
+    dd_pct_str = f" ({max_dd_pct * 100:.1f}%)" if max_dd_pct else ""
+    st.caption(f"Max drawdown from peak: {money(max_dd)}{dd_pct_str}")
+
+
+# ── Open positions ──────────────────────────────────────────────────────────
+section("Open Positions", "Currently long lots aggregated per symbol, unrealized P/L vs last broker quote.")
+
+try:
+    opens = api.pnl_open_positions()
+except Exception as exc:
+    st.error(f"Cannot load /pnl/open-positions: {exc}")
+    opens = []
+
+if not opens:
+    st.info("No open positions.")
+else:
+    df_open = pd.DataFrame(opens)
+    df_open = df_open[[
+        "symbol", "quantity", "avg_cost", "last_price",
+        "market_value", "unrealized_pnl", "unrealized_pct",
+        "broker", "is_paper",
+    ]]
+    df_open.columns = ["Symbol", "Qty", "Avg cost", "Last", "Mkt value",
+                       "Unrealized $", "Unrealized %", "Broker", "Paper"]
+    st.dataframe(
+        df_open,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Qty": st.column_config.NumberColumn(format="%.4f"),
+            "Avg cost": st.column_config.NumberColumn(format="$%.2f"),
+            "Last": st.column_config.NumberColumn(format="$%.2f"),
+            "Mkt value": st.column_config.NumberColumn(format="$%.2f"),
+            "Unrealized $": st.column_config.NumberColumn(format="$%+.2f"),
+            "Unrealized %": st.column_config.NumberColumn(format="%+.2f%%"),
+        },
+    )
+
+
+# ── By symbol / strategy ────────────────────────────────────────────────────
+col_sym, col_strat = st.columns(2)
+
+with col_sym:
+    section("By Symbol", "Realized P/L per ticker, best first.", level=3)
+    try:
+        sym_rows = api.pnl_by_symbol()
+    except Exception as exc:
+        st.error(f"Cannot load /pnl/by-symbol: {exc}")
+        sym_rows = []
+    if not sym_rows:
+        st.info("No closed trades yet.")
+    else:
+        df_sym = pd.DataFrame(sym_rows)[[
+            "key", "trade_count", "win_rate_pct",
+            "total_realized_pnl", "avg_pnl", "profit_factor", "avg_hold_days",
+        ]]
+        df_sym.columns = ["Symbol", "Trades", "Win %", "Total $", "Avg $", "PF", "Avg hold (d)"]
+        st.dataframe(
+            df_sym, use_container_width=True, hide_index=True,
+            column_config={
+                "Win %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Total $": st.column_config.NumberColumn(format="$%+.2f"),
+                "Avg $": st.column_config.NumberColumn(format="$%+.2f"),
+                "PF": st.column_config.NumberColumn(format="%.2f"),
+                "Avg hold (d)": st.column_config.NumberColumn(format="%.1f"),
+            },
+        )
+
+with col_strat:
+    section("By Strategy", "Attributed to whichever strategy opened the trade.", level=3)
+    try:
+        strat_rows = api.pnl_by_strategy()
+    except Exception as exc:
+        st.error(f"Cannot load /pnl/by-strategy: {exc}")
+        strat_rows = []
+    if not strat_rows:
+        st.info("No closed trades yet.")
+    else:
+        df_strat = pd.DataFrame(strat_rows)[[
+            "key", "trade_count", "win_rate_pct",
+            "total_realized_pnl", "avg_pnl", "profit_factor", "avg_hold_days",
+        ]]
+        df_strat.columns = ["Strategy", "Trades", "Win %", "Total $", "Avg $", "PF", "Avg hold (d)"]
+        st.dataframe(
+            df_strat, use_container_width=True, hide_index=True,
+            column_config={
+                "Win %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Total $": st.column_config.NumberColumn(format="$%+.2f"),
+                "Avg $": st.column_config.NumberColumn(format="$%+.2f"),
+                "PF": st.column_config.NumberColumn(format="%.2f"),
+                "Avg hold (d)": st.column_config.NumberColumn(format="%.1f"),
+            },
+        )
+
+
+# ── Closed trades log ───────────────────────────────────────────────────────
+divider()
+section("Closed Trades", "Every realized round-trip, most recent first.")
+
+f1, f2, f3 = st.columns([2, 2, 2])
+with f1:
+    flt_sym = st.text_input("Symbol filter", value="", key="pnl_flt_sym").strip().upper() or None
+with f2:
+    strat_options = ["(all)"] + [r["key"] for r in (strat_rows or [])]
+    flt_strat_pick = st.selectbox("Strategy filter", strat_options, index=0, key="pnl_flt_strat")
+    flt_strat = None if flt_strat_pick == "(all)" else flt_strat_pick
+with f3:
+    flt_limit = st.selectbox("Limit", [100, 250, 500, 1000, 5000], index=2, key="pnl_flt_limit")
+
+try:
+    closed = api.pnl_closed_trades(symbol=flt_sym, strategy=flt_strat, limit=flt_limit)
+except Exception as exc:
+    st.error(f"Cannot load /pnl/closed-trades: {exc}")
+    closed = []
+
+if not closed:
+    st.info("No closed trades match the current filters.")
+else:
+    df_cl = pd.DataFrame(closed)
+    df_cl = df_cl[[
+        "sell_at", "symbol", "quantity", "buy_price", "sell_price",
+        "realized_pnl", "realized_pct", "hold_days",
+        "buy_strategy", "broker", "is_paper",
+    ]]
+    df_cl.columns = ["Closed", "Symbol", "Qty", "Buy", "Sell",
+                     "P/L $", "P/L %", "Hold (d)",
+                     "Strategy", "Broker", "Paper"]
+    st.dataframe(
+        df_cl, use_container_width=True, hide_index=True,
+        column_config={
+            "Qty": st.column_config.NumberColumn(format="%.4f"),
+            "Buy": st.column_config.NumberColumn(format="$%.2f"),
+            "Sell": st.column_config.NumberColumn(format="$%.2f"),
+            "P/L $": st.column_config.NumberColumn(format="$%+.2f"),
+            "P/L %": st.column_config.NumberColumn(format="%+.2f%%"),
+            "Hold (d)": st.column_config.NumberColumn(format="%.1f"),
+        },
+    )
+    st.caption(f"{len(df_cl):,} trade(s) shown.")
