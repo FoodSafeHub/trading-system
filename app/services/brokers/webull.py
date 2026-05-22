@@ -375,36 +375,75 @@ class WebullBroker(BrokerBase):
             params={"account_id": acct, "client_order_id": broker_order_id},
         )
         row = data if isinstance(data, dict) else (data[0] if isinstance(data, list) and data else {})
-        return self._parse_order_response(row)
+        return self._parse_order_response(self._flatten_order(row))
 
     async def list_orders(self, account_id: str, status: Optional[str] = None) -> List[OrderStatusResponse]:
         acct = account_id or self._account_id
         params: dict = {"account_id": acct, "page_size": 100}
         data = await self._get("/trade/orders/list-today", params=params)
         rows = data if isinstance(data, list) else (data or {}).get("orders") or (data or {}).get("items") or []
-        parsed = [self._parse_order_response(r) for r in rows]
+        parsed = [self._parse_order_response(self._flatten_order(r)) for r in rows]
         if status:
             parsed = [p for p in parsed if p.status == status.lower()]
         return parsed
 
+    @staticmethod
+    def _flatten_order(row: dict) -> dict:
+        """Merge Webull's nested order wrapper with its executed leg.
+
+        The US list-today / order-detail response wraps each order as::
+
+            {"client_order_id": ..., "order_id": ..., "tif": ...,
+             "items": [ {"symbol": ..., "filled_price": ..., "filled_qty": ...,
+                         "order_status": "FILLED", "side": ..., "qty": ...} ]}
+
+        The order-level identity fields live on the wrapper; the executed
+        symbol/fill/status fields live inside items[]. We merge the first item
+        over the wrapper so a single flat dict carries everything the parser
+        needs. (Combo/multi-leg orders are rare for plain stock trades; we take
+        the first leg, which is the equity fill.)
+        """
+        if not isinstance(row, dict):
+            return {}
+        items = row.get("items")
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            merged = dict(row)
+            merged.update(items[0])  # item fields win over the wrapper
+            return merged
+        return row
+
     def _parse_order_response(self, data: dict) -> OrderStatusResponse:
         return OrderStatusResponse(
             broker_order_id=str(
-                data.get("client_order_id")
-                or data.get("order_id")
+                # Prefer Webull's server-side order_id over the echoed
+                # client_order_id so reconciliation stores a stable id.
+                data.get("order_id")
                 or data.get("orderId")
+                or data.get("client_order_id")
                 or data.get("id")
                 or ""
             ),
             symbol=str(data.get("symbol") or "").upper(),
             side=str(data.get("side") or ""),
             order_type=str(data.get("order_type") or data.get("orderType") or ""),
-            quantity=_to_float(data.get("qty") or data.get("quantity") or data.get("totalQuantity")) or 0.0,
-            status=str(data.get("status") or data.get("order_status") or data.get("orderStatus") or "").lower(),
+            quantity=_to_float(
+                data.get("qty") or data.get("quantity") or data.get("totalQuantity")
+            ) or 0.0,
+            status=str(
+                data.get("order_status")
+                or data.get("status")
+                or data.get("orderStatus")
+                or ""
+            ).lower(),
             fill_price=_to_float(
-                data.get("avg_filled_price") or data.get("avgFilledPrice") or data.get("filledPrice")
+                data.get("filled_price")
+                or data.get("avg_filled_price")
+                or data.get("avgFilledPrice")
+                or data.get("filledPrice")
             ),
-            filled_quantity=_to_float(data.get("filled_qty") or data.get("filledQuantity")),
+            filled_quantity=_to_float(
+                data.get("filled_qty") or data.get("filledQuantity")
+            ),
             raw=data,
         )
 

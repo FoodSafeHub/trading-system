@@ -230,16 +230,30 @@ class ExecutionService:
         # (queued/working/pending_activation) overrides "submitted".
         broker_status = (confirmed.status or "").lower()
         terminal = {"filled", "partial", "rejected", "cancelled", "canceled", "expired", "replaced"}
+        # Webull names a partial fill "partial_filled"; normalize to our "partial".
+        if broker_status in ("partial", "partial_filled", "partially_filled"):
+            broker_status = "partial"
         if broker_status in terminal:
-            local_status = "partial" if broker_status == "partial" else broker_status
+            local_status = broker_status
             if local_status == "canceled":
                 local_status = "cancelled"
             reason = ""
             if isinstance(confirmed.raw, dict):
                 reason = confirmed.raw.get("statusDescription") or ""
+            # Persist the fill price/qty and broker order id too — without these
+            # an order could flip to "filled" yet show no price (the Webull bug
+            # we hit on the SO order). filled_at is best-effort: use now() since
+            # the broker timestamp format varies by venue.
+            filled_at = (
+                datetime.now(tz=timezone.utc)
+                if local_status in ("filled", "partial") else None
+            )
             self._update_order_status(
                 order_id,
                 status=local_status,
+                broker_order_id=confirmed.broker_order_id or None,
+                fill_price=confirmed.fill_price,
+                filled_at=filled_at,
                 error_message=reason or None,
             )
             _audit.log(

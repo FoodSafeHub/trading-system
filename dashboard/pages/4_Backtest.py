@@ -9,6 +9,10 @@ import plotly.graph_objects as go
 import streamlit as st
 import pandas as pd
 
+# Shared trader-style ranking — the SAME service the scanner badge and the
+# /recommendations API use, so the banner here can never disagree with them.
+from app.services.recommendations.winner import score_strategies
+
 apply_theme("Backtest")
 st.title("Strategy Backtester")
 st.caption("Simulates how a strategy would have performed on historical data — no real money involved.")
@@ -865,42 +869,53 @@ else:  # mode == "Custom Symbol"
     # strategies only fire 3–4 times in 1y on a single name).
     valid = [r for r in cmp if not r.get("error") and (r.get("total_trades") or 0) >= 3]
 
-    # ── Best strategy recommendation (rank-based, same weights as Perplexity) ──
+    # ── Best strategy recommendation (trader-style weighted scoring) ───────────
+    # Delegates to the shared winner service: a weighted score (expectancy,
+    # profit factor, drawdown, Sharpe) multiplied by a steep sample-size
+    # confidence factor — so a tiny "perfect" backtest can't win on a
+    # technicality, but a dramatically superior rare setup still can.
     best = None
-    if valid:
-        def _ranked_score(strategies):
-            metrics = {
-                "total_return_pct": 0.40,
-                "profit_factor":    0.25,
-                "win_rate_pct":     0.20,
-                "sharpe_ratio":     0.10,
-                "total_trades":     0.05,
-            }
-            scores = {r["strategy_name"]: 0.0 for r in strategies}
-            n = len(strategies)
-            for metric, weight in metrics.items():
-                def _val(r, m=metric):
-                    v = r.get(m)
-                    return float("inf") if v is None else float(v)
-                ranked = sorted(strategies, key=_val, reverse=True)
-                for rank, r in enumerate(ranked, start=1):
-                    scores[r["strategy_name"]] += weight * (n - rank + 1) / n
-            return scores
-
-        profitable = [r for r in valid if (r.get("total_return_pct") or 0) > 0]
-        pool = profitable if profitable else valid
-        scores = _ranked_score(pool)
-        best = max(pool, key=lambda r: scores[r["strategy_name"]])
-
-        b_pf  = best.get("profit_factor") or 0
+    ranked = score_strategies(valid) if valid else []
+    if ranked:
+        best = ranked[0]
+        b_pf  = best.get("profit_factor")
         b_ret = best.get("total_return_pct") or 0
         b_wr  = best.get("win_rate_pct") or 0
+        b_dd  = best.get("max_drawdown_pct") or 0
+        pf_str = f"{b_pf:.2f}" if b_pf is not None else "—"
+
         st.success(
             f"**Recommended strategy for {cmp_symbol}: {best['strategy_name'].replace('_', ' ')}**  \n"
-            f"Win Rate: **{b_wr:.1f}%** | Profit Factor: **{b_pf:.2f}** | "
-            f"Return over {cmp_period}: **{b_ret:+.2f}%** | Trades: **{best.get('total_trades', 0)}**  \n"
-            f"Use the Promote control below to assign this to auto-trade."
+            f"Score: **{best.get('_score', 0):.3f}** "
+            f"({best.get('_confidence_label', 'unrated')})  \n"
+            f"Win Rate: **{b_wr:.1f}%** | Profit Factor: **{pf_str}** | "
+            f"Return over {cmp_period}: **{b_ret:+.2f}%** | "
+            f"Max Drawdown: **{b_dd:.1f}%** | Trades: **{best.get('total_trades', 0)}**  \n"
+            f"_{best.get('_reason', '')}_"
         )
+        warns = best.get("_warnings") or []
+        if warns:
+            st.warning("  \n".join(f"⚠️ {w}" for w in warns))
+
+        # Runners-up, so the user sees the next-best picks and why the leader
+        # beat them (the spec asks for transparency, not just a single name).
+        if len(ranked) > 1:
+            with st.expander("Why this one? — full ranking", expanded=False):
+                for rank, r in enumerate(ranked, start=1):
+                    marker = "⭐ " if rank == 1 else f"{rank}. "
+                    rpf = r.get("profit_factor")
+                    rpf_str = f"{rpf:.2f}" if rpf is not None else "—"
+                    st.markdown(
+                        f"**{marker}{r['strategy_name'].replace('_', ' ')}** — "
+                        f"score **{r.get('_score', 0):.3f}** · {r.get('_confidence_label', '')}  \n"
+                        f"return {(r.get('total_return_pct') or 0):+.1f}% · "
+                        f"PF {rpf_str} · win {(r.get('win_rate_pct') or 0):.1f}% · "
+                        f"{r.get('total_trades', 0)} trades  \n"
+                        f"{r.get('_reason', '')}"
+                    )
+                    for w in (r.get("_warnings") or []):
+                        st.caption(f"⚠️ {w}")
+        st.caption("Use the Promote control below to assign this to auto-trade.")
         st.divider()
     else:
         st.warning(
