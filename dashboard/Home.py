@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys, os; sys.path.insert(0, os.path.dirname(__file__))
 import api
-from _theme import apply_theme, section, divider, kpi_row, pill, status_row, money
+from _theme import apply_theme, section, divider, kpi_row, pill, status_row, money, currency_symbol
 
 from collections import defaultdict
 from datetime import datetime
@@ -117,7 +117,7 @@ for p in positions:
 # Order the broker columns deterministically: Schwab first, then Webull, then
 # anything else (paper / unknown). New brokers slot in automatically because
 # we union the keys from accounts and positions.
-KNOWN_ORDER = ["schwab", "webull", "paper"]
+KNOWN_ORDER = ["schwab", "webull", "zerodha", "paper"]
 seen = set(accounts_by_broker) | set(positions_by_broker)
 broker_keys = [b for b in KNOWN_ORDER if b in seen] + sorted(seen - set(KNOWN_ORDER))
 
@@ -127,9 +127,10 @@ broker_area, right = st.columns([2, 1])
 
 
 PRETTY_BROKER = {
-    "schwab": "Schwab",
-    "webull": "Webull",
-    "paper":  "Paper",
+    "schwab":  "Schwab",
+    "webull":  "Webull",
+    "zerodha": "Zerodha (India)",
+    "paper":   "Paper",
 }
 
 
@@ -145,6 +146,11 @@ def _render_broker_block(broker: str) -> None:
     accts_here = accounts_by_broker.get(broker, [])
     positions_here = positions_by_broker.get(broker, [])
     fills_here = [o for o in today_fills if _broker_of_order(o) == broker]
+
+    # Per-broker currency: this block renders a single broker's data, so it's
+    # safe to format every money value in that broker's native glyph (₹ for
+    # Zerodha/India, $ otherwise) — no cross-currency summing happens here.
+    cur = currency_symbol(broker)
 
     spent    = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in fills_here if o.get("side") == "BUY")
     received = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in fills_here if o.get("side") == "SELL")
@@ -162,10 +168,10 @@ def _render_broker_block(broker: str) -> None:
         # account ids don't truncate. Account id is rendered separately below
         # so the 4 KPI cells stay roomy.
         kpi_row([
-            ("Equity",        money(eq)),
-            ("Cash",          money(cash)),
-            ("Buying power",  money(bp)),
-            ("Realised P&L",  money(realised)),
+            ("Equity",        money(eq, currency=cur)),
+            ("Cash",          money(cash, currency=cur)),
+            ("Buying power",  money(bp, currency=cur)),
+            ("Realised P&L",  money(realised, currency=cur)),
         ])
         st.caption(f"Account {acct_label} · {len(fills_here)} fills today "
                    f"({sum(1 for o in fills_here if o.get('side')=='BUY')} buys, "
@@ -178,7 +184,7 @@ def _render_broker_block(broker: str) -> None:
         )
         # Still surface today's fills even if accounts are missing.
         kpi_row([
-            ("Realised P&L (today)", money(realised)),
+            ("Realised P&L (today)", money(realised, currency=cur)),
             ("Fills",                str(len(fills_here))),
             ("Buys",                 str(sum(1 for o in fills_here if o.get("side") == "BUY"))),
             ("Sells",                str(sum(1 for o in fills_here if o.get("side") == "SELL"))),
@@ -202,7 +208,7 @@ def _render_broker_block(broker: str) -> None:
             }
             for col in ("average_cost", "current_price", "market_value", "unrealized_pnl"):
                 if col in df.columns:
-                    df[col] = df[col].apply(lambda v: money(v) if v is not None else "—")
+                    df[col] = df[col].apply(lambda v: money(v, currency=cur) if v is not None else "—")
             df = df.rename(columns=rename)
         st.dataframe(df, use_container_width=True, hide_index=True)
     else:

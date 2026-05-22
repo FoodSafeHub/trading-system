@@ -5,11 +5,15 @@ import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + 
 import pandas as pd
 import streamlit as st
 import api
-from _theme import apply_theme
+from _theme import apply_theme, market_status_bar
 from _broker_routing import render_broker_routing_toggle
 
 apply_theme("Strategy & Signals")
 st.title("Strategy & Signals")
+
+# Live US + India session clocks. A Zerodha (₹) symbol only trades when the
+# India market is open; this makes that obvious at a glance.
+market_status_bar()
 
 # Broker-routing toggle: where live orders get sent. Mirrors the Day Trading
 # page — autoscheduled assignments fire through whichever broker is selected.
@@ -58,10 +62,32 @@ BROKER_OPTIONS: list[tuple[str, str]] = [
     ("default", "Default (use global toggle)"),
     ("schwab",  "Schwab"),
     ("webull",  "Webull"),
+    ("zerodha", "Zerodha (India)"),
     ("paper",   "Paper"),
 ]
 BROKER_LABEL = {k: v for k, v in BROKER_OPTIONS}
 BROKER_VALUES = [k for k, _ in BROKER_OPTIONS]
+
+
+# Small Nifty-50 hint set for the UI badge only (not the routing authority —
+# app.services.markets is the backend authority for actual order routing).
+_NIFTY50_HINT = {
+    "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "HINDUNILVR", "ITC",
+    "SBIN", "BHARTIARTL", "KOTAKBANK", "LT", "BAJFINANCE", "AXISBANK", "ASIANPAINT",
+    "MARUTI", "SUNPHARMA", "TITAN", "ULTRACEMCO", "WIPRO", "NESTLEIND", "ONGC",
+    "NTPC", "POWERGRID", "M&M", "TATAMOTORS", "TATASTEEL", "JSWSTEEL", "ADANIENT",
+    "ADANIPORTS", "COALINDIA", "HCLTECH", "BAJAJFINSV", "TECHM", "GRASIM",
+    "INDUSINDBK", "DRREDDY", "CIPLA", "EICHERMOT", "HEROMOTOCO", "BRITANNIA",
+    "DIVISLAB", "HINDALCO", "BPCL", "APOLLOHOSP", "BAJAJ-AUTO", "TATACONSUM",
+    "SBILIFE", "HDFCLIFE", "LTIM", "SHRIRAMFIN",
+}
+
+
+def _is_india(symbol: str) -> bool:
+    """India-symbol check for UI hints. Mirrors app.services.markets but kept
+    local so the dashboard doesn't import backend modules."""
+    s = (symbol or "").upper().strip()
+    return s.startswith(("NSE:", "BSE:")) or s.endswith((".NS", ".BO")) or s in _NIFTY50_HINT
 
 
 def _safe(call, default):
@@ -224,6 +250,59 @@ if assignments:
                             st.error(f"Failed to pause {a['symbol']}: {e}")
                 st.success(f"Paused {paused} assignment(s).")
                 st.rerun()
+
+    # ── Bulk broker routing ──────────────────────────────────────────────
+    # "Select all → set broker" plus a one-click auto-route by market, so the
+    # whole table can be pointed at the right broker without editing each row.
+    st.markdown("**Bulk broker routing**")
+    st.caption(
+        "Route many symbols at once. **Auto-route by market** pins India (NSE) "
+        "symbols to Zerodha and leaves every US symbol untouched — so your "
+        "existing Schwab/Webull pins are preserved. Or pick specific symbols "
+        "below and set them to one broker."
+    )
+    auto_col, auto_msg = st.columns([1, 3])
+    with auto_col:
+        if st.button("🌐 Auto-route by market", key="auto_route_btn",
+                     use_container_width=True,
+                     help="India (NSE) → Zerodha. US symbols left untouched."):
+            try:
+                res = api.bulk_set_assignment_broker(auto_by_market=True)
+                st.success(f"Auto-routed {res.get('count', 0)} assignment(s) by market.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Auto-route failed: {e}")
+    with auto_msg:
+        india_syms = [a["symbol"] for a in assignments
+                      if _is_india(a["symbol"])]
+        if india_syms:
+            st.caption(f"India symbols detected: {', '.join(india_syms)} → Zerodha")
+        else:
+            st.caption("No India (NSE) symbols in your assignments yet.")
+
+    all_syms = [a["symbol"] for a in assignments]
+    sel_syms = st.multiselect(
+        "Symbols to retag (leave empty + 'Apply' to set ALL)",
+        all_syms,
+        key="bulk_broker_syms",
+    )
+    bb1, bb2 = st.columns([2, 1])
+    with bb1:
+        bulk_broker = st.selectbox(
+            "Set selected symbols to broker",
+            BROKER_VALUES,
+            format_func=lambda v: BROKER_LABEL.get(v, v),
+            key="bulk_broker_pick",
+        )
+    with bb2:
+        if st.button("Apply broker", key="bulk_broker_apply", use_container_width=True):
+            try:
+                res = api.bulk_set_assignment_broker(
+                    symbols=sel_syms or all_syms, broker=bulk_broker)
+                st.success(f"Set {res.get('count', 0)} assignment(s) → {BROKER_LABEL.get(bulk_broker, bulk_broker)}.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Bulk set failed: {e}")
 
     # Per-symbol management
     st.markdown("**Manage a single assignment**")

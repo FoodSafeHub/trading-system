@@ -19,7 +19,10 @@ def _build_one(name: str) -> BrokerBase:
     if name == "webull":
         from app.services.brokers.webull import WebullBroker
         return WebullBroker()
-    raise ValueError(f"Unknown broker: {name!r}. Choose: paper | schwab | webull")
+    if name == "zerodha":
+        from app.services.brokers.zerodha import ZerodhaBroker
+        return ZerodhaBroker()
+    raise ValueError(f"Unknown broker: {name!r}. Choose: paper | schwab | webull | zerodha")
 
 
 def _resolve_routing(routing: str, active_broker: str) -> List[str]:

@@ -29,11 +29,11 @@ class Settings(BaseSettings):
     live_trading_confirmed: bool = False
 
     # ── Broker ───────────────────────────────────────────────
-    active_broker: Literal["paper", "schwab", "webull"] = "paper"
+    active_broker: Literal["paper", "schwab", "webull", "zerodha"] = "paper"
     # Multi-broker trade routing. When "auto", falls back to active_broker
-    # (backwards compatible). When "schwab"/"webull", routes there only.
+    # (backwards compatible). When "schwab"/"webull"/"zerodha", routes there only.
     # When "both", fans out every order to Schwab AND Webull.
-    trade_routing: Literal["auto", "paper", "schwab", "webull", "both"] = "auto"
+    trade_routing: Literal["auto", "paper", "schwab", "webull", "zerodha", "both"] = "auto"
 
     # Schwab
     schwab_client_id: str = ""
@@ -52,6 +52,25 @@ class Settings(BaseSettings):
     webull_token_expiry: str = ""
     webull_account_id: str = ""
 
+    # Zerodha (Kite Connect) — India / NSE-BSE.
+    # access_token is single-day: it expires at ~07:30 IST and CANNOT be
+    # refreshed (SEBI rule). Re-login daily via GET /zerodha/login.
+    zerodha_api_key: str = ""
+    zerodha_api_secret: str = ""
+    # Kite registers ONE redirect URL per app in the developer console.
+    zerodha_redirect_uri: str = "https://127.0.0.1:8001/zerodha/callback"
+    zerodha_access_token: str = ""
+
+    # Upstox — used as the India MARKET-DATA source (quotes + historical bars)
+    # while orders execute on Zerodha. Free API (through at least Mar 2026) and
+    # avoids Zerodha's paid data add-on. Standard OAuth2; token expires daily
+    # (~03:30 IST), re-login via GET /upstox/login. Empty key = feature off, and
+    # the system falls back to its normal data chain.
+    upstox_api_key: str = ""
+    upstox_api_secret: str = ""
+    upstox_redirect_uri: str = "https://127.0.0.1:8001/upstox/callback"
+    upstox_access_token: str = ""
+
     # ── Risk limits ──────────────────────────────────────────
     max_position_size_usd: float = 1000.0
     max_daily_loss_usd: float = 200.0
@@ -60,6 +79,12 @@ class Settings(BaseSettings):
     trading_start_time: str = "09:30"
     trading_end_time: str = "16:00"
     trading_timezone: str = "America/New_York"
+
+    # India market hours (NSE/BSE regular session). Used when the order's
+    # broker is Zerodha — the risk engine picks hours by broker, not globally.
+    india_market_open: str = "09:15"
+    india_market_close: str = "15:30"
+    india_timezone: str = "Asia/Kolkata"
 
     # ── Buying-power preflight ───────────────────────────────
     # When enabled, BUY orders are rejected if the broker's reported
@@ -132,6 +157,10 @@ class Settings(BaseSettings):
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.trading_timezone)
 
+    @property
+    def india_tz(self) -> ZoneInfo:
+        return ZoneInfo(self.india_timezone)
+
     @field_validator("log_level")
     @classmethod
     def _upper_log_level(cls, v: str) -> str:
@@ -154,6 +183,11 @@ class Settings(BaseSettings):
             if not self.webull_app_key or not self.webull_app_secret:
                 raise ValueError(
                     "Live trading requires WEBULL_APP_KEY and WEBULL_APP_SECRET"
+                )
+        if self.is_live and self.active_broker == "zerodha":
+            if not self.zerodha_api_key or not self.zerodha_api_secret:
+                raise ValueError(
+                    "Live trading requires ZERODHA_API_KEY and ZERODHA_API_SECRET"
                 )
         return self
 

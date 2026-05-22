@@ -405,6 +405,16 @@ def _run_cycle() -> None:
                 asgn_cap = asgn["max_capital_usd"] if asgn else None
                 asgn_shares = asgn["max_shares"] if asgn else None
                 asgn_broker = asgn["broker"] if asgn else "default"
+                # Auto-route by market: an India (NSE/BSE) symbol with no explicit
+                # broker override goes to Zerodha rather than the US-oriented global
+                # toggle, so US and India orders fire in their own sessions.
+                if asgn_broker == "default":
+                    try:
+                        from app.services.markets import is_india_symbol
+                        if is_india_symbol(symbol):
+                            asgn_broker = "zerodha"
+                    except Exception:
+                        pass
                 if direction == "BUY":
                     qty = _compute_quantity(symbol, entry, stop, asgn_cap, asgn_shares)
                     if qty <= 0:

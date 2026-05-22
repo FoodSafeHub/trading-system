@@ -24,6 +24,7 @@ BROKER_OPTIONS: list[tuple[str, str]] = [
     ("default", "Default (use global toggle)"),
     ("schwab",  "Schwab"),
     ("webull",  "Webull"),
+    ("zerodha", "Zerodha (India)"),
     ("paper",   "Paper"),
 ]
 BROKER_LABEL = {k: v for k, v in BROKER_OPTIONS}
@@ -373,7 +374,10 @@ def _side_tag(v: str) -> str:
 
 
 def _pnl_tag(v) -> str:
-    if v is None: return "—"
+    # Entry (BUY) rows carry no realised P/L. In a DataFrame the None is
+    # upcast to NaN, so guard for both — otherwise NaN slips to the negative
+    # branch and renders as "-$nan".
+    if v is None or (isinstance(v, float) and pd.isna(v)): return "—"
     return f"🟢 +${v:,.2f}" if v >= 0 else f"🔴 -${abs(v):,.2f}"
 
 
@@ -530,6 +534,42 @@ with st.expander("📡 Live Signals — what would fire right now", expanded=Fal
 
 
 # ══════════════════════════════════════════════════════════════
+# MARKET SELECTOR — US vs India
+# ══════════════════════════════════════════════════════════════
+# The backtest backend already routes India (NSE) symbols to the right data
+# path (Upstox → yfinance .NS) via the exchange-aware provider, so any of the
+# modes below works on NSE tickers. This selector just makes India explicit:
+# it surfaces the Nifty 50 quick-pick and reminds you what to type.
+_NIFTY50_QUICKPICK = [
+    "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "HINDUNILVR", "ITC",
+    "SBIN", "BHARTIARTL", "KOTAKBANK", "LT", "BAJFINANCE", "AXISBANK", "ASIANPAINT",
+    "MARUTI", "SUNPHARMA", "TITAN", "ULTRACEMCO", "WIPRO", "NESTLEIND", "ONGC",
+    "NTPC", "POWERGRID", "M&M", "TATAMOTORS", "TATASTEEL", "JSWSTEEL", "ADANIENT",
+    "ADANIPORTS", "COALINDIA", "HCLTECH", "BAJAJFINSV", "TECHM", "GRASIM",
+    "INDUSINDBK", "DRREDDY", "CIPLA", "EICHERMOT", "HEROMOTOCO", "BRITANNIA",
+    "DIVISLAB", "HINDALCO", "BPCL", "APOLLOHOSP", "BAJAJ-AUTO", "TATACONSUM",
+    "SBILIFE", "HDFCLIFE", "LTIM", "SHRIRAMFIN",
+]
+bt_market = st.radio(
+    "Market", ["🇺🇸 US", "🇮🇳 India (NSE)"], horizontal=True, key="bt_market",
+    help="US = Schwab/Webull universe (data via yfinance). India = NSE symbols "
+         "(orders route to Zerodha; data via Upstox → yfinance .NS). The backend "
+         "auto-detects the market from the symbol, so this is mainly a helper.",
+)
+if bt_market.startswith("🇮🇳"):
+    st.info(
+        "**India mode.** Type any NSE symbol into the modes below (e.g. "
+        "**RELIANCE**, **TCS**, **INFY**) — it will auto-fetch India data and "
+        "trade/price in ₹. For a deep India cockpit (positions, Nifty 50 scan, "
+        "Perplexity-vs-scanner compare), use the dedicated **India** page."
+    )
+    with st.expander("Nifty 50 quick reference (copy a symbol)", expanded=False):
+        st.dataframe(
+            pd.DataFrame({"NSE symbol": _NIFTY50_QUICKPICK}),
+            use_container_width=True, hide_index=True, height=240,
+        )
+
+# ══════════════════════════════════════════════════════════════
 # MODE TOGGLE
 # ══════════════════════════════════════════════════════════════
 _render_recommendation_overview()
@@ -563,11 +603,13 @@ if mode == "Single Strategy":
     _label_by_type = {t: lbl for t, lbl in SINGLE_STRATEGY_CHOICES}
     _types = [t for t, _ in SINGLE_STRATEGY_CHOICES]
 
+    _india = bt_market.startswith("🇮🇳")
     col1, col2, col3, col4, col5 = st.columns([2, 2.5, 1.5, 2, 1])
     with col1:
         chosen_sym = st.text_input(
-            "Symbol", value="AAPL",
-            help="Any Yahoo-Finance-compatible ticker (AAPL, BRK-B, NVDA, TQQQ, ...).",
+            "Symbol", value="RELIANCE" if _india else "AAPL",
+            help="Any Yahoo-Finance-compatible ticker. US: AAPL, NVDA, TQQQ. "
+                 "India: RELIANCE, TCS, INFY (NSE symbols auto-fetch India data).",
         ).strip().upper()
     with col2:
         chosen_type = st.selectbox(
@@ -823,9 +865,9 @@ else:  # mode == "Custom Symbol"
     c1, c2, c3 = st.columns([2, 2, 2])
     with c1:
         custom_sym = st.text_input(
-            "Symbol", value="BRK-B",
-            help="Any Yahoo-Finance-compatible ticker. Use the same form the scanner used "
-                 "(e.g. BRK-B with a hyphen, not BRK.B).",
+            "Symbol", value="RELIANCE" if bt_market.startswith("🇮🇳") else "BRK-B",
+            help="Any Yahoo-Finance-compatible ticker. US: BRK-B (hyphen, not BRK.B). "
+                 "India: RELIANCE, TCS, INFY (NSE symbols auto-fetch India data).",
             key="custom_bt_sym",
         ).strip().upper()
     with c2:

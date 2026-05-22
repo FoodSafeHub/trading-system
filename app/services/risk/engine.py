@@ -119,6 +119,49 @@ class RiskEngine:
             )
         return exists is not None
 
+    # ── Market hours (per-broker) ──────────────────────────────────────────────
+
+    def _resolve_broker(self, symbol: str) -> str:
+        """Effective broker for a symbol: its assignment override, else global.
+
+        Mirrors the factory's routing precedence — a symbol pinned to a specific
+        broker uses that broker's market session; everything else follows the
+        global active_broker / trade_routing toggle.
+        """
+        try:
+            from app.models.assignments import SymbolStrategyAssignment
+
+            with SessionLocal() as db:
+                row = (
+                    db.query(SymbolStrategyAssignment)
+                    .filter_by(symbol=symbol.upper().strip())
+                    .first()
+                )
+            if row and row.broker and row.broker != "default":
+                return row.broker
+        except Exception:
+            pass
+        # Auto-route by market: an India (NSE/BSE) symbol with no explicit broker
+        # override goes to Zerodha regardless of the US-oriented global toggle, so
+        # US and India symbols each trade in their own session simultaneously.
+        try:
+            from app.services.markets import is_india_symbol
+            if is_india_symbol(symbol):
+                return "zerodha"
+        except Exception:
+            pass
+        s = self._settings
+        if s.trade_routing not in ("auto", "both"):
+            return s.trade_routing
+        return s.active_broker
+
+    def _market_hours_for(self, symbol: str) -> tuple[str, str, "object", str]:
+        """Return (open, close, tzinfo, tz_name) for the symbol's broker session."""
+        s = self._settings
+        if self._resolve_broker(symbol) == "zerodha":
+            return s.india_market_open, s.india_market_close, s.india_tz, s.india_timezone
+        return s.trading_start_time, s.trading_end_time, s.tz, s.trading_timezone
+
     # ── Main check ───────────────────────────────────────────────────────────
 
     def check(self, order: OrderRequest, estimated_price: Optional[float] = None) -> RiskCheckResult:
@@ -142,11 +185,13 @@ class RiskEngine:
                     blocked_reason="LIVE_TRADING_CONFIRMED is false. Set it to true in .env to proceed.",
                 )
 
-        # 3. Market hours
-        if not is_market_hours(s.trading_start_time, s.trading_end_time, s.tz):
+        # 3. Market hours — per-broker. India (Zerodha) trades on the NSE/BSE
+        #    session (09:15–15:30 IST), not the US session.
+        open_str, close_str, tz, tz_name = self._market_hours_for(order.symbol)
+        if not is_market_hours(open_str, close_str, tz):
             return RiskCheckResult(
                 passed=False,
-                blocked_reason=f"Outside market hours ({s.trading_start_time}–{s.trading_end_time} {s.trading_timezone})",
+                blocked_reason=f"Outside market hours ({open_str}–{close_str} {tz_name})",
             )
 
         # 4. Max orders per day

@@ -16,7 +16,7 @@ router = APIRouter(prefix="/assignments", tags=["assignments"])
 VALID_SYSTEMS = {"bollinger", "perplexity", "scanner"}
 # "default" means follow the global active_broker / trade_routing toggle.
 # Any other value routes this symbol's orders to a specific broker adapter.
-VALID_BROKERS = {"default", "paper", "schwab", "webull"}
+VALID_BROKERS = {"default", "paper", "schwab", "webull", "zerodha"}
 
 
 class AssignmentIn(BaseModel):
@@ -111,6 +111,57 @@ def set_cap(symbol: str, max_capital_usd: float | None = None, db: Session = Dep
     row.max_capital_usd = max_capital_usd if max_capital_usd and max_capital_usd > 0 else None
     db.commit()
     return {"symbol": row.symbol, "max_capital_usd": row.max_capital_usd}
+
+
+class BulkBrokerIn(BaseModel):
+    # Explicit list of symbols to retag. Empty + auto_by_market=True means
+    # "retag every existing assignment by its detected market".
+    symbols: List[str] = []
+    broker: str = "default"          # ignored when auto_by_market is True
+    auto_by_market: bool = False     # India (NSE/BSE) -> zerodha, US -> "default"
+
+
+@router.post("/bulk-broker")
+def bulk_set_broker(body: BulkBrokerIn, db: Session = Depends(get_db)):
+    """Set the broker route on many assignments at once.
+
+    Two modes:
+      * explicit  — set every listed symbol to `broker`.
+      * auto_by_market — route each symbol to the broker its market implies:
+        India (NSE/BSE) -> "zerodha", everything else -> "default" (so US
+        symbols keep following the global toggle). When symbols is empty,
+        applies to every existing assignment.
+    """
+    from app.services.markets import is_india_symbol
+
+    if not body.auto_by_market and body.broker not in VALID_BROKERS:
+        raise HTTPException(400, f"broker must be one of {sorted(VALID_BROKERS)}")
+
+    if body.symbols:
+        targets = {s.upper().strip() for s in body.symbols if s.strip()}
+        rows = (
+            db.query(SymbolStrategyAssignment)
+            .filter(SymbolStrategyAssignment.symbol.in_(targets))
+            .all()
+        )
+    else:
+        rows = db.query(SymbolStrategyAssignment).all()
+
+    updated = []
+    for row in rows:
+        if body.auto_by_market:
+            # Only (re)route India symbols to Zerodha. Leave non-India symbols
+            # exactly as they are so explicit Schwab/Webull/paper pins are never
+            # clobbered — auto-route is additive, not destructive.
+            if is_india_symbol(row.symbol):
+                if row.broker != "zerodha":
+                    row.broker = "zerodha"
+                    updated.append({"symbol": row.symbol, "broker": row.broker})
+            continue
+        row.broker = body.broker
+        updated.append({"symbol": row.symbol, "broker": row.broker})
+    db.commit()
+    return {"updated": updated, "count": len(updated)}
 
 
 @router.patch("/{symbol}/broker")

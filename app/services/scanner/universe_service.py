@@ -7,6 +7,7 @@ Supported universes:
   watchlist  — symbols already in strategies.json + any active assignments
   sp500      — S&P 500 constituents fetched from Wikipedia via pandas
   nasdaq100  — NASDAQ 100 constituents fetched from Wikipedia via pandas
+  nifty50    — India: Nifty 50 NSE constituents (orders route to Zerodha)
   custom     — caller-supplied list
 """
 
@@ -96,6 +97,12 @@ def get_nasdaq100_symbols() -> List[str]:
     return _NASDAQ100_FALLBACK
 
 
+def get_nifty50_symbols() -> List[str]:
+    """India: Nifty 50 NSE tradingsymbols. Sourced from app.services.markets."""
+    from app.services.markets import NIFTY_50
+    return list(NIFTY_50)
+
+
 def get_universe(universe: str, custom_symbols: list[str] | None = None) -> List[str]:
     """Return the symbol list for the requested universe."""
     if universe == "watchlist":
@@ -104,6 +111,8 @@ def get_universe(universe: str, custom_symbols: list[str] | None = None) -> List
         return get_sp500_symbols()
     elif universe == "nasdaq100":
         return get_nasdaq100_symbols()
+    elif universe == "nifty50":
+        return get_nifty50_symbols()
     elif universe == "custom":
         return [s.upper().strip() for s in (custom_symbols or []) if s.strip()]
     else:

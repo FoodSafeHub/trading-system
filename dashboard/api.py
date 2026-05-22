@@ -103,6 +103,14 @@ def account_summary():
 def positions():
     return _get("/account/positions")
 
+def broker_account_summary(broker: str):
+    """Accounts for a specific broker, independent of global routing."""
+    return _get(f"/account/{broker}/summary")
+
+def broker_positions(broker: str):
+    """Positions for a specific broker, independent of global routing."""
+    return _get(f"/account/{broker}/positions")
+
 def risk_status():
     return _get("/risk/status")
 
@@ -182,6 +190,21 @@ def set_assignment_broker(symbol: str, broker: str):
                        timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
+
+
+def bulk_set_assignment_broker(symbols: list[str] | None = None, broker: str = "default",
+                               auto_by_market: bool = False):
+    """Set the broker route on many assignments at once.
+
+    auto_by_market=True routes each symbol by its market (India -> zerodha,
+    US -> default). Otherwise every listed symbol is set to `broker`. An empty
+    symbols list with auto_by_market applies to all existing assignments.
+    """
+    return _post("/assignments/bulk-broker", json={
+        "symbols": symbols or [],
+        "broker": broker,
+        "auto_by_market": auto_by_market,
+    })
 
 def toggle_assignment(symbol: str, enabled: bool):
     r = requests.patch(f"{BASE}/assignments/{symbol}/toggle", params={"enabled": str(enabled).lower()}, timeout=10, verify=False, headers=_headers())

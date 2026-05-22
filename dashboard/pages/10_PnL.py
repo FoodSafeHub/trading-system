@@ -10,7 +10,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
-from _theme import apply_theme, section, kpi_row, money, pct, divider
+from _theme import apply_theme, section, kpi_row, money, pct, divider, currency_symbol, market_status_bar
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -19,6 +19,7 @@ import streamlit as st
 
 apply_theme("P/L")
 st.title("P/L Dashboard")
+market_status_bar()
 st.caption(
     "Realized P/L is computed FIFO from filled orders. Unrealized P/L is the "
     "open position size × (last quote − avg cost) — refreshed each page load."
@@ -187,23 +188,35 @@ if not opens:
     st.info("No open positions.")
 else:
     df_open = pd.DataFrame(opens)
-    df_open = df_open[[
-        "symbol", "quantity", "avg_cost", "last_price",
-        "market_value", "unrealized_pnl", "unrealized_pct",
-        "broker", "is_paper",
-    ]]
-    df_open.columns = ["Symbol", "Qty", "Avg cost", "Last", "Mkt value",
-                       "Unrealized $", "Unrealized %", "Broker", "Paper"]
+    # Per-row currency: format money columns to strings prefixed with the row's
+    # broker glyph (₹ for zerodha, $ otherwise). NumberColumn can't vary the
+    # symbol per row, so we pre-format and render as text.
+    def _cur(row) -> str:
+        return currency_symbol(row.get("broker"))
+
+    def _fmt_money(row, col, signed=False) -> str:
+        cur = _cur(row)
+        return money(row.get(col), currency=cur, decimals=2) if not signed else (
+            "—" if row.get(col) is None else f"{cur}{float(row[col]):+,.2f}"
+        )
+
+    df_open["_avg"] = df_open.apply(lambda r: _fmt_money(r, "avg_cost"), axis=1)
+    df_open["_last"] = df_open.apply(lambda r: _fmt_money(r, "last_price"), axis=1)
+    df_open["_mv"] = df_open.apply(lambda r: _fmt_money(r, "market_value"), axis=1)
+    df_open["_upnl"] = df_open.apply(lambda r: _fmt_money(r, "unrealized_pnl", signed=True), axis=1)
+
+    df_show = df_open[[
+        "symbol", "quantity", "_avg", "_last", "_mv",
+        "_upnl", "unrealized_pct", "broker", "is_paper",
+    ]].copy()
+    df_show.columns = ["Symbol", "Qty", "Avg cost", "Last", "Mkt value",
+                       "Unrealized", "Unrealized %", "Broker", "Paper"]
     st.dataframe(
-        df_open,
+        df_show,
         use_container_width=True,
         hide_index=True,
         column_config={
             "Qty": st.column_config.NumberColumn(format="%.4f"),
-            "Avg cost": st.column_config.NumberColumn(format="$%.2f"),
-            "Last": st.column_config.NumberColumn(format="$%.2f"),
-            "Mkt value": st.column_config.NumberColumn(format="$%.2f"),
-            "Unrealized $": st.column_config.NumberColumn(format="$%+.2f"),
             "Unrealized %": st.column_config.NumberColumn(format="%+.2f%%"),
         },
     )
@@ -289,23 +302,35 @@ if not closed:
     st.info("No closed trades match the current filters.")
 else:
     df_cl = pd.DataFrame(closed)
-    df_cl = df_cl[[
-        "sell_at", "symbol", "quantity", "buy_price", "sell_price",
-        "realized_pnl", "realized_pct", "hold_days",
+
+    def _cur_cl(row) -> str:
+        return currency_symbol(row.get("broker"))
+
+    def _m(row, col) -> str:
+        return money(row.get(col), currency=_cur_cl(row), decimals=2)
+
+    def _m_signed(row, col) -> str:
+        v = row.get(col)
+        return "—" if v is None else f"{_cur_cl(row)}{float(v):+,.2f}"
+
+    df_cl["_buy"] = df_cl.apply(lambda r: _m(r, "buy_price"), axis=1)
+    df_cl["_sell"] = df_cl.apply(lambda r: _m(r, "sell_price"), axis=1)
+    df_cl["_pnl"] = df_cl.apply(lambda r: _m_signed(r, "realized_pnl"), axis=1)
+
+    df_show = df_cl[[
+        "sell_at", "symbol", "quantity", "_buy", "_sell",
+        "_pnl", "realized_pct", "hold_days",
         "buy_strategy", "broker", "is_paper",
-    ]]
-    df_cl.columns = ["Closed", "Symbol", "Qty", "Buy", "Sell",
-                     "P/L $", "P/L %", "Hold (d)",
-                     "Strategy", "Broker", "Paper"]
+    ]].copy()
+    df_show.columns = ["Closed", "Symbol", "Qty", "Buy", "Sell",
+                       "P/L", "P/L %", "Hold (d)",
+                       "Strategy", "Broker", "Paper"]
     st.dataframe(
-        df_cl, use_container_width=True, hide_index=True,
+        df_show, use_container_width=True, hide_index=True,
         column_config={
             "Qty": st.column_config.NumberColumn(format="%.4f"),
-            "Buy": st.column_config.NumberColumn(format="$%.2f"),
-            "Sell": st.column_config.NumberColumn(format="$%.2f"),
-            "P/L $": st.column_config.NumberColumn(format="$%+.2f"),
             "P/L %": st.column_config.NumberColumn(format="%+.2f%%"),
             "Hold (d)": st.column_config.NumberColumn(format="%.1f"),
         },
     )
-    st.caption(f"{len(df_cl):,} trade(s) shown.")
+    st.caption(f"{len(df_show):,} trade(s) shown. Money shown in each row's broker currency (₹ for Zerodha, $ otherwise).")

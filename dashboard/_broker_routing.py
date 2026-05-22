@@ -8,10 +8,11 @@ _ROUTING_LABELS = {
     "auto": "Auto (use active_broker)",
     "schwab": "Schwab only",
     "webull": "Webull only",
+    "zerodha": "Zerodha (India) only",
     "both": "Both (Schwab + Webull)",
     "paper": "Paper",
 }
-_OPTIONS = ["auto", "schwab", "webull", "both", "paper"]
+_OPTIONS = ["auto", "schwab", "webull", "zerodha", "both", "paper"]
 
 
 def render_broker_routing_toggle(*, key_suffix: str = "") -> None:
@@ -41,7 +42,10 @@ def render_broker_routing_toggle(*, key_suffix: str = "") -> None:
             horizontal=True,
             key=f"trade_routing_radio_{key_suffix}" if key_suffix else "trade_routing_radio",
             help=(
-                "Where live orders are sent. 'Both' fans out to Schwab + Webull. "
+                "Where live orders are sent. 'Both' fans out to Schwab + Webull (US). "
+                "'Zerodha (India) only' routes ALL orders to the India broker — US "
+                "symbols won't trade; for a mix of US + India use per-assignment "
+                "broker routing on the Strategy page instead. "
                 "Webull live trading is not yet implemented — selecting Webull or "
                 "Both will currently fail at the Webull leg."
             ),

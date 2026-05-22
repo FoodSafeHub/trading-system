@@ -7,9 +7,43 @@ UI feels less like a stack of unrelated dashboards.
 """
 from __future__ import annotations
 
+from datetime import datetime, time
 from typing import Iterable, Sequence
+from zoneinfo import ZoneInfo
 
 import streamlit as st
+
+
+# ── Market sessions ──────────────────────────────────────────────────────────
+# (label, open, close, tz). Kept in sync with app/config.py defaults — the
+# backend risk engine is the authority that actually gates orders; this is the
+# at-a-glance display so you know whether a market is tradeable right now.
+_SESSIONS = [
+    ("US",    time(9, 30), time(16, 0), "America/New_York"),
+    ("India", time(9, 15), time(15, 30), "Asia/Kolkata"),
+]
+
+
+def _session_status(open_t: time, close_t: time, tz_name: str) -> tuple[bool, str]:
+    now = datetime.now(tz=ZoneInfo(tz_name))
+    is_weekday = now.weekday() < 5
+    is_open = is_weekday and (open_t <= now.time() < close_t)
+    return is_open, now.strftime("%H:%M")
+
+
+def market_status_bar() -> None:
+    """Render a compact OPEN/CLOSED line for the US and India sessions.
+
+    Surfaces both clocks so a Zerodha (₹, IST) order isn't a surprise when the
+    NSE is shut. Display-only — order gating lives in the risk engine.
+    """
+    bits = []
+    for label, open_t, close_t, tz_name in _SESSIONS:
+        is_open, clock = _session_status(open_t, close_t, tz_name)
+        dot = "🟢" if is_open else "🔴"
+        state = "OPEN" if is_open else "CLOSED"
+        bits.append(f"{dot} **{label}** {state} · {clock}")
+    st.caption("&nbsp;&nbsp;|&nbsp;&nbsp;".join(bits), unsafe_allow_html=True)
 
 
 # ── CSS overrides ────────────────────────────────────────────────────────────
@@ -188,8 +222,36 @@ def status_row(items: Iterable[tuple[str, str, str]]) -> None:
 # ── Formatters ───────────────────────────────────────────────────────────────
 
 
-def money(value: float | None, *, decimals: int = 2, dash: str = "—") -> str:
-    """Format a dollar value. `None` or NaN → em-dash."""
+# Broker → currency symbol. Zerodha trades NSE/BSE in rupees; everything else
+# is a US-dollar broker. Used so India positions don't render as "$".
+_BROKER_CURRENCY = {
+    "zerodha": "₹",
+    "schwab": "$",
+    "webull": "$",
+    "paper": "$",
+    "default": "$",
+}
+
+
+def currency_symbol(broker: str | None) -> str:
+    """Currency glyph for a broker name. Unknown/None → '$'."""
+    if not broker:
+        return "$"
+    return _BROKER_CURRENCY.get(broker.lower().strip(), "$")
+
+
+def money(
+    value: float | None,
+    *,
+    decimals: int = 2,
+    dash: str = "—",
+    currency: str = "$",
+) -> str:
+    """Format a monetary value. `None` or NaN → em-dash.
+
+    `currency` is the glyph to prefix (default '$'). Pass currency_symbol(broker)
+    for India (₹) vs US ($) values.
+    """
     if value is None:
         return dash
     try:
@@ -198,7 +260,7 @@ def money(value: float | None, *, decimals: int = 2, dash: str = "—") -> str:
         return dash
     if v != v:  # NaN
         return dash
-    return f"${v:,.{decimals}f}"
+    return f"{currency}{v:,.{decimals}f}"
 
 
 def pct(value: float | None, *, decimals: int = 1, dash: str = "—") -> str:

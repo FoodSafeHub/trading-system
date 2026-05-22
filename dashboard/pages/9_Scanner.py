@@ -218,8 +218,10 @@ col1, col2 = st.columns([2, 2])
 with col1:
     universe = st.selectbox(
         "Universe",
-        ["watchlist", "sp500", "nasdaq100", "custom"],
-        help="watchlist = your current strategies.json stocks. sp500/nasdaq100 = full index scan (takes ~2–5 min).",
+        ["watchlist", "sp500", "nasdaq100", "nifty50", "custom"],
+        format_func=lambda v: "nifty50 (India)" if v == "nifty50" else v,
+        help="watchlist = your current strategies.json stocks. sp500/nasdaq100 = full US index scan (~2–5 min). "
+             "nifty50 = India NSE top-50 (orders route to Zerodha; prices in ₹).",
     )
     custom_input = ""
     if universe == "custom":
@@ -229,7 +231,12 @@ with col1:
         )
 
 with col2:
-    min_price = st.number_input("Min price ($)", min_value=1.0, value=5.0, step=1.0)
+    # India (Nifty 50) prices/volumes are in ₹ and are much larger in absolute
+    # terms than US-dollar thresholds, so default the filters lower for India.
+    _is_india_scan = universe == "nifty50"
+    _price_label = "Min price (₹)" if _is_india_scan else "Min price ($)"
+    _price_default = 50.0 if _is_india_scan else 5.0
+    min_price = st.number_input(_price_label, min_value=1.0, value=_price_default, step=1.0)
     min_volume = st.number_input("Min avg daily volume", min_value=0, value=500000, step=100000)
     scan_direction = st.radio(
         "Scan direction",
@@ -276,7 +283,7 @@ if run_btn:
         "batch_size": 20,
     }
 
-    is_large = universe in ("sp500", "nasdaq100") or len(custom_symbols) > 20
+    is_large = universe in ("sp500", "nasdaq100", "nifty50") or len(custom_symbols) > 20
 
     with st.spinner(f"Scanning {universe} universe... {'(running in background for large universe)' if is_large else ''}"):
         try:

@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import account, assignments, backtest, chart, daytrading, health, notifications, orders, perplexity, pnl, recommendations, risk, scanner, settings as settings_routes, signals, strategy, schwab_auth
+from app.api.routes import account, assignments, backtest, chart, daytrading, health, notifications, orders, perplexity, pnl, recommendations, risk, scanner, settings as settings_routes, signals, strategy, schwab_auth, zerodha_auth, upstox_auth
 from app.config import get_settings
 from app.db import init_db
 from app.services.strategy.scheduler import start_scheduler, stop_scheduler
@@ -72,6 +72,10 @@ _AUTH_EXEMPT_PATHS = {
     "/health",
     "/schwab/auth",
     "/schwab/callback",
+    "/zerodha/login",
+    "/zerodha/callback",
+    "/upstox/login",
+    "/upstox/callback",
     "/docs",
     "/redoc",
     "/openapi.json",
@@ -117,6 +121,8 @@ app.include_router(signals.router)
 app.include_router(risk.router)
 app.include_router(strategy.router)
 app.include_router(schwab_auth.router)
+app.include_router(zerodha_auth.router)
+app.include_router(upstox_auth.router)
 app.include_router(perplexity.router)
 app.include_router(assignments.router)
 app.include_router(scanner.router)

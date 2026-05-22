@@ -23,13 +23,13 @@ _ENV_PATH = Path(".env")
 
 
 class TradeRoutingResponse(BaseModel):
-    trade_routing: Literal["auto", "paper", "schwab", "webull", "both"]
-    active_broker: Literal["paper", "schwab", "webull"]
+    trade_routing: Literal["auto", "paper", "schwab", "webull", "zerodha", "both"]
+    active_broker: Literal["paper", "schwab", "webull", "zerodha"]
     effective_brokers: list[str]
 
 
 class TradeRoutingUpdate(BaseModel):
-    trade_routing: Literal["auto", "paper", "schwab", "webull", "both"]
+    trade_routing: Literal["auto", "paper", "schwab", "webull", "zerodha", "both"]
 
 
 def _effective_brokers(trade_routing: str, active_broker: str) -> list[str]:
@@ -81,6 +81,12 @@ def set_trade_routing(payload: TradeRoutingUpdate) -> TradeRoutingResponse:
         logger.warning(
             "[settings] trade_routing -> both: orders will fan out to Schwab + Webull. "
             "Webull execution is not implemented yet; expect Webull failures in logs."
+        )
+    if new_value == "zerodha":
+        logger.warning(
+            "[settings] trade_routing -> zerodha: ALL orders now route to the India "
+            "(Zerodha) broker. US symbols won't trade. Prefer per-assignment broker "
+            "routing if you only want some symbols on Zerodha."
         )
 
     _upsert_env("TRADE_ROUTING", new_value)
