@@ -89,44 +89,85 @@ else:
     max_dd = float(df_eq["drawdown"].max()) if "drawdown" in df_eq else 0.0
     max_dd_pct = df_eq["drawdown_pct"].max() if "drawdown_pct" in df_eq else None
 
+    # With <2 points Plotly can't draw a line — show markers so a single trade
+    # is visible. Also pad the x range so a lone point doesn't get zoomed to
+    # microseconds on the axis.
+    single_point = len(df_eq) < 2
+    mode = "lines+markers" if single_point else "lines"
+    ts = df_eq["at"]
+    if single_point:
+        t0 = ts.iloc[0]
+        x_range = [t0 - pd.Timedelta(hours=12), t0 + pd.Timedelta(hours=12)]
+    else:
+        span = ts.iloc[-1] - ts.iloc[0]
+        pad = max(span * 0.04, pd.Timedelta(minutes=30))
+        x_range = [ts.iloc[0] - pad, ts.iloc[-1] + pad]
+
     fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
         row_heights=[0.72, 0.28],
     )
     fig.add_trace(go.Scatter(
-        x=df_eq["at"], y=df_eq["realized_pnl"],
-        mode="lines", line=dict(color="#26a69a", width=2),
+        x=ts, y=df_eq["realized_pnl"],
+        mode=mode,
+        line=dict(color="#26a69a", width=2),
+        marker=dict(color="#26a69a", size=8),
         fill="tozeroy", fillcolor="rgba(38,166,154,0.15)",
-        hovertemplate="%{x}<br>P/L $%{y:,.2f}<extra></extra>",
+        hovertemplate="%{x|%b %d %Y %H:%M}<br>P/L $%{y:,.2f}<extra></extra>",
         name="Realized P/L",
     ), row=1, col=1)
+    if not single_point:
+        fig.add_trace(go.Scatter(
+            x=ts, y=df_eq["peak_pnl"],
+            mode="lines", line=dict(color="rgba(255,255,255,0.35)", width=1, dash="dot"),
+            hovertemplate="%{x|%b %d %Y %H:%M}<br>Peak $%{y:,.2f}<extra></extra>",
+            name="Peak",
+        ), row=1, col=1)
+    # Drawdown ribbon underneath. Hidden when there's nothing to show.
     fig.add_trace(go.Scatter(
-        x=df_eq["at"], y=df_eq["peak_pnl"],
-        mode="lines", line=dict(color="rgba(255,255,255,0.35)", width=1, dash="dot"),
-        hovertemplate="%{x}<br>Peak $%{y:,.2f}<extra></extra>",
-        name="Peak",
-    ), row=1, col=1)
-    # Drawdown as negative bars so the eye reads it as a loss from peak.
-    fig.add_trace(go.Scatter(
-        x=df_eq["at"], y=-df_eq["drawdown"],
-        mode="lines", line=dict(color="#ef5350", width=1.5),
+        x=ts, y=-df_eq["drawdown"],
+        mode=mode,
+        line=dict(color="#ef5350", width=1.5),
+        marker=dict(color="#ef5350", size=6),
         fill="tozeroy", fillcolor="rgba(239,83,80,0.22)",
-        hovertemplate="%{x}<br>DD $%{customdata:,.2f}<extra></extra>",
+        hovertemplate="%{x|%b %d %Y %H:%M}<br>DD $%{customdata:,.2f}<extra></extra>",
         customdata=df_eq["drawdown"],
         name="Drawdown",
     ), row=2, col=1)
 
+    # Y range padding so a single point isn't pasted on the gridline.
+    y_min = float(df_eq["realized_pnl"].min())
+    y_max = float(df_eq["peak_pnl"].max()) if "peak_pnl" in df_eq else float(df_eq["realized_pnl"].max())
+    y_span = max(y_max - y_min, abs(y_max), 1.0)
+    y_pad = y_span * 0.25
+
     fig.update_layout(
-        height=420,
-        margin=dict(l=8, r=8, t=8, b=8),
+        height=460,
+        margin=dict(l=8, r=8, t=12, b=8),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color="rgba(230,230,230,0.9)"),
         showlegend=False,
+        hovermode="x unified",
     )
-    fig.update_xaxes(gridcolor="rgba(255,255,255,0.06)")
-    fig.update_yaxes(gridcolor="rgba(255,255,255,0.06)", tickprefix="$", row=1, col=1)
-    fig.update_yaxes(gridcolor="rgba(255,255,255,0.06)", tickprefix="$", row=2, col=1)
+    fig.update_xaxes(
+        gridcolor="rgba(255,255,255,0.06)",
+        range=x_range,
+        tickformat="%b %d %H:%M",
+        showspikes=False,
+    )
+    fig.update_yaxes(
+        gridcolor="rgba(255,255,255,0.06)", tickprefix="$",
+        range=[min(0, y_min) - y_pad, y_max + y_pad],
+        row=1, col=1,
+    )
+    # Drawdown axis: always show 0 at the top, dynamic floor.
+    dd_floor = -max(float(df_eq["drawdown"].max()) * 1.25, 1.0)
+    fig.update_yaxes(
+        gridcolor="rgba(255,255,255,0.06)", tickprefix="$",
+        range=[dd_floor, 0],
+        row=2, col=1,
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     dd_pct_str = f" ({max_dd_pct * 100:.1f}%)" if max_dd_pct else ""

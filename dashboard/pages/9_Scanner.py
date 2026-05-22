@@ -43,6 +43,20 @@ def _tv_symbol(sym: str) -> str:
     return f"NYSE:{s}" if s in _NYSE_HINTS else f"NASDAQ:{s}"
 
 
+def _parse_strategies_from_reason(reason: str | None) -> list[str]:
+    """Extract strategy names from the scanner's reason string.
+
+    Reason format: "N strategies agree: A, B, C +K more" — we want A, B, C
+    so we can compare each against the recommended winner for the symbol.
+    """
+    if not reason or ":" not in reason:
+        return []
+    tail = reason.split(":", 1)[1]
+    # Drop the "+K more" suffix if present
+    tail = tail.split(" +")[0]
+    return [s.strip() for s in tail.split(",") if s.strip()]
+
+
 def _show_candidates(candidates, *, key_prefix: str = "cands"):
     # Direction filter — lets the user focus on buy-only or sell-only signals
     # without re-running the scan. ANY shows everything.
@@ -59,23 +73,84 @@ def _show_candidates(candidates, *, key_prefix: str = "cands"):
             st.info(f"No {direction_pick} candidates in this result set.")
             return
 
+    # Pull the cached "best historical strategy per symbol" so rows whose
+    # firing strategy matches the historical winner can be starred.
+    try:
+        recs = {r["symbol"]: r for r in (api.recommendations_list() or [])}
+    except Exception:
+        recs = {}
+
     rows = []
     for c in candidates:
         direction = c.get("direction", "")
-        dir_label = direction
+        sym = c.get("symbol", "")
+        rec = recs.get(sym)
+        firing_strats = _parse_strategies_from_reason(c.get("reason"))
+        is_match = bool(rec) and any(s == rec["strategy_name"] for s in firing_strats)
+
+        symbol_label = f"⭐ {sym}" if is_match else sym
+        reason_label = c.get("reason", "—") or "—"
+        if is_match:
+            reason_label = f"★ MATCHES RECOMMENDED — {reason_label}"
+
+        if rec:
+            wr = rec.get("win_rate_pct")
+            pf = rec.get("profit_factor")
+            tr = rec.get("total_return_pct")
+            best_label = rec["strategy_name"].replace("_", " ")
+            metrics_bits = []
+            if wr is not None: metrics_bits.append(f"WR {wr:.0f}%")
+            if pf is not None: metrics_bits.append(f"PF {pf:.2f}")
+            if tr is not None: metrics_bits.append(f"{tr:+.0f}%")
+            best_full = best_label + (f" ({', '.join(metrics_bits)})" if metrics_bits else "")
+        else:
+            best_full = "—"
+
         rows.append({
-            "Symbol":       c["symbol"],
-            "Direction":    dir_label,
+            "Symbol":       symbol_label,
+            "Direction":    direction,
             "Score":        f"{c['score']:.0f} / 100",
             "Strategies":   c["strategies_agreeing"],
             "Price":        f"${c['price']:,.2f}" if c.get("price") else "—",
             "Avg Volume":   f"{int(c['avg_volume'] or 0):,}" if c.get("avg_volume") else "—",
             "Universe":     c.get("universe", "—"),
-            "Reason":       c.get("reason", "—"),
+            "Reason":       reason_label,
+            "Best (hist.)": best_full,
             "Auto-Traded":  "yes" if c.get("auto_traded") else "—",
             "Scanned At":   _fmt_et(c.get("scanned_at")),
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # ── Recompute recommendations for the symbols on screen ─────────────────
+    cand_symbols = sorted({c["symbol"] for c in candidates if c.get("symbol")})
+    missing = [s for s in cand_symbols if s not in recs]
+    rc_cols = st.columns([3, 2, 2])
+    with rc_cols[0]:
+        st.caption(
+            f"{len(recs)} symbol(s) cached · {len(missing)} of {len(cand_symbols)} "
+            f"on-screen symbol(s) have no recommendation yet."
+        )
+    with rc_cols[1]:
+        period_pick = st.selectbox(
+            "Backtest period", ["2y", "5y", "1y"], index=1,
+            key=f"{key_prefix}_rec_period",
+            help="Period passed to Compare All. 5y is the dashboard default.",
+        )
+    with rc_cols[2]:
+        if missing and st.button(
+            f"⚙ Recompute {len(missing)} missing", key=f"{key_prefix}_rec_missing",
+            use_container_width=True,
+        ):
+            with st.spinner(
+                f"Running Compare All on {len(missing)} symbol(s) — "
+                "this takes ~30–90s each."
+            ):
+                try:
+                    api.recommendations_recompute_many(missing, period=period_pick)
+                    st.success(f"Recomputed {len(missing)} recommendation(s).")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Recompute failed: {exc}")
 
     # ── Inline candle drill-in for any candidate ──────────────────────────
     if not candidates:
@@ -156,6 +231,14 @@ with col1:
 with col2:
     min_price = st.number_input("Min price ($)", min_value=1.0, value=5.0, step=1.0)
     min_volume = st.number_input("Min avg daily volume", min_value=0, value=500000, step=100000)
+    scan_direction = st.radio(
+        "Scan direction",
+        ["ANY", "BUY", "SELL"],
+        index=0,
+        horizontal=True,
+        help="ANY ranks BUY + SELL together. BUY or SELL drops the other side entirely so "
+             "the Top N window is filled exclusively with the requested direction.",
+    )
     top_n = st.slider("Top N candidates to return", min_value=1, max_value=20, value=5)
     auto_trade = st.toggle(
         "Auto-trade top candidate",
@@ -187,6 +270,7 @@ if run_btn:
         "min_price": min_price,
         "min_avg_volume": min_volume,
         "top_n": top_n,
+        "scan_direction": scan_direction,
         "auto_trade_top": auto_trade,
         "auto_trade_direction": auto_trade_direction,
         "batch_size": 20,

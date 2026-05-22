@@ -14,6 +14,12 @@ class ScanConfig(BaseModel):
     min_price: float = 5.0
     min_avg_volume: float = 500_000.0
     top_n: int = 5
+    # Direction filter applied BEFORE the top-N slice. ANY keeps the legacy
+    # behavior (rank all matches together). BUY/SELL drops the other side
+    # entirely so the top_n window is filled exclusively with the requested
+    # direction — useful when you want, say, 20 BUY candidates and don't want
+    # SELL signals crowding them out.
+    scan_direction: Literal["ANY", "BUY", "SELL"] = "ANY"
     auto_trade_top: bool = False
     # When auto-trading, only act on signals in this direction.
     # ANY keeps the old behavior (top candidate fires regardless of side).

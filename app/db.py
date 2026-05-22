@@ -65,6 +65,7 @@ def init_db() -> None:
         scan_results,
         settings as settings_model,
         signals,
+        strategy_recommendations,
         strategy_runs,
     )
     Base.metadata.create_all(bind=engine)

@@ -488,6 +488,36 @@ def pnl_open_positions():
     return _get("/pnl/open-positions", timeout=30)
 
 
+# ── Recommendations (best historically-ranked strategy per symbol) ─────────
+
+def recommendations_list():
+    return _get("/recommendations", timeout=30)
+
+
+def recommendation_get(symbol: str):
+    return _get(f"/recommendations/{symbol}", timeout=30)
+
+
+def recommendations_recompute(symbol: str, period: str = "5y",
+                              initial_capital: float = 100_000.0):
+    return _post(
+        f"/recommendations/recompute/{symbol}",
+        params={"period": period, "initial_capital": initial_capital},
+        timeout=300,
+    )
+
+
+def recommendations_recompute_many(symbols: list[str], period: str = "5y",
+                                   initial_capital: float = 100_000.0,
+                                   timeout: int = 1800):
+    return _post(
+        "/recommendations/recompute",
+        json={"symbols": symbols, "period": period,
+              "initial_capital": initial_capital},
+        timeout=timeout,
+    )
+
+
 def backtest_custom_consensus(symbol: str, min_agreement: int = 2,
                               period: str = "1y", initial_capital: float = 100_000.0,
                               timeout: int = 120):

@@ -190,10 +190,20 @@ def run_scan(config: ScanConfig) -> ScanSummary:
 
     # Sort by score descending
     candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    # Apply direction filter BEFORE the top-N slice so the top window is
+    # filled exclusively with the requested side. Without this, SELLs can
+    # crowd out BUYs (or vice versa) when one side dominates a given day.
+    wanted_dir = (config.scan_direction or "ANY").upper()
+    if wanted_dir in {"BUY", "SELL"}:
+        candidates = [c for c in candidates if str(c.get("direction", "")).upper() == wanted_dir]
+
     top = candidates[: config.top_n]
 
-    logger.info("[scanner] %s symbols scanned, %s passed filters, %s matches, top %s selected",
-                total_scanned, total_passed_filters, len(candidates), len(top))
+    logger.info(
+        "[scanner] %s symbols scanned, %s passed filters, %s matches (direction=%s), top %s selected",
+        total_scanned, total_passed_filters, len(candidates), wanted_dir, len(top),
+    )
 
     # ── Step 6: Persist to DB ────────────────────────────────────────────────
     saved_rows: list[ScanResult] = []
