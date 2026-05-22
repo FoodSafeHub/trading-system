@@ -308,7 +308,8 @@ try:
     if results:
         _show_candidates(results, key_prefix="recent_cands")
     else:
-        st.info("No scan results yet. Run a scan above or wait for the auto-scheduler (runs every 15 min during market hours).")
+        st.info("No scan results yet. Run a scan above or wait for the auto-scheduler "
+                "(watchlist every 15 min, S&P 500 + NASDAQ 100 every 4 h, market hours only).")
 except Exception as e:
     st.warning(f"Could not load scan results: {e}")
 
@@ -334,7 +335,10 @@ with st.expander("How the scanner works"):
 5. Score and rank — top N returned
 6. Results saved to database
 
-**Auto-scan:** Runs automatically every 15 minutes during market hours (9:30am–4pm ET) on your watchlist.
+**Auto-scan:** During market hours (9:30am–4pm ET) the scheduler runs
+- watchlist every 15 minutes
+- NASDAQ 100 every 4 hours
+- S&P 500 every 4 hours (staggered 10 min after NASDAQ 100)
 
 **Large universe scans** (S&P 500 = ~500 stocks) take 2–5 minutes and run in the background.
     """)

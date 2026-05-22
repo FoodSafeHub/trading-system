@@ -310,6 +310,52 @@ def _run_cycle() -> None:
                                     ))
                                     logger.info("[scheduler] Assigned %s → %s: %s", strategy_name, symbol, s.direction)
 
+                    elif system == "scanner":
+                        # Scanner-system assignments use the 5 generic strategies the
+                        # scanner builds via _make_generic_configs (e.g. SO_Pullback_EMA50).
+                        # Those configs aren't in strategies.json, so we rebuild them
+                        # here and evaluate the named one directly against full OHLCV
+                        # — rule_pullback_ema50 and rule_vix_spike_reversal need High/Low
+                        # bars, which `_engine.run(config, prices)` cannot supply.
+                        from app.services.scanner.scanner_service import _make_generic_configs
+                        from app.services.strategy.rules import evaluate_strategy
+
+                        df = get_ohlcv(symbol, period="1y")
+                        if df.empty or len(df) < 60:
+                            logger.info(
+                                "[scheduler] scanner-assigned %s skipped — insufficient data (len=%d)",
+                                symbol, len(df),
+                            )
+                        else:
+                            generic = _make_generic_configs(symbol)
+                            match = next((c for c in generic if c.name == strategy_name and c.enabled), None)
+                            if match is None:
+                                logger.warning(
+                                    "[scheduler] scanner-assigned %s: strategy %r not in generic set — "
+                                    "remove or rename the assignment",
+                                    symbol, strategy_name,
+                                )
+                            else:
+                                # Patch latest close with Schwab live price so the signal
+                                # uses the same entry the order will be sized against.
+                                live = live_prices.get(symbol)
+                                if live:
+                                    df = df.copy()
+                                    df.iloc[-1, df.columns.get_loc("Close")] = live
+                                prices = df["Close"].dropna()
+                                sig = evaluate_strategy(match.type, symbol, prices, match.params, ohlcv=df)
+                                if sig.direction != "HOLD":
+                                    entry = live or sig.price_at_signal or float(prices.iloc[-1])
+                                    signals_to_act.append((
+                                        symbol, sig.direction,
+                                        f"scanner:{strategy_name}",
+                                        entry, None,
+                                    ))
+                                    logger.info(
+                                        "[scheduler] Assigned scanner %s → %s: %s entry=%.2f",
+                                        strategy_name, symbol, sig.direction, entry,
+                                    )
+
                 except Exception as exc:
                     logger.error("[scheduler] Assigned strategy %s on %s failed: %s", strategy_name, symbol, exc)
 
@@ -469,21 +515,34 @@ def _run_cycle() -> None:
 
 
 _scheduler: BackgroundScheduler | None = None
-_SCANNER_INTERVAL_SECONDS = 900  # scan every 15 minutes during market hours
+_SCANNER_WATCHLIST_INTERVAL_SECONDS = 900    # 15 min — small universe, cheap
+_SCANNER_LARGE_INTERVAL_SECONDS = 4 * 3600   # 4 h — sp500/nasdaq100 each take 2–5 min
 
 
-def _run_scanner_job() -> None:
-    """Scheduled scanner job — scans watchlist every 15 min during market hours."""
+def _run_scanner_job_universe(universe: str, top_n: int = 5) -> None:
+    """Scheduled scanner job — scans the given universe during market hours.
+
+    Skips silently outside market hours so the job can stay registered on a
+    plain interval trigger without spinning yfinance overnight.
+    """
     settings = get_settings()
     if not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
         return
     try:
         from app.schemas.scanner import ScanConfig
         from app.services.scanner.scanner_service import run_scan
-        summary = run_scan(ScanConfig(universe="watchlist", top_n=5, auto_trade_top=False))
-        logger.info("[scheduler] Scanner — %d scanned, %d matches", summary.total_scanned, summary.total_matches)
+        summary = run_scan(ScanConfig(universe=universe, top_n=top_n, auto_trade_top=False))
+        logger.info(
+            "[scheduler] Scanner[%s] — %d scanned, %d matches",
+            universe, summary.total_scanned, summary.total_matches,
+        )
     except Exception as e:
-        logger.error("[scheduler] Scanner job failed: %s", e)
+        logger.error("[scheduler] Scanner[%s] job failed: %s", universe, e)
+
+
+def _run_scanner_job() -> None:
+    """Back-compat shim — old call site still pointed at watchlist."""
+    _run_scanner_job_universe("watchlist", top_n=5)
 
 
 def start_scheduler() -> None:
@@ -493,6 +552,8 @@ def start_scheduler() -> None:
     if not settings.scheduler_enabled:
         logger.info("[scheduler] Scheduler disabled by config")
         return
+
+    from datetime import datetime, timedelta, timezone as _tz
 
     _scheduler = BackgroundScheduler(timezone="UTC")
     _scheduler.add_job(
@@ -504,15 +565,48 @@ def start_scheduler() -> None:
         max_instances=1,
     )
     _scheduler.add_job(
-        _run_scanner_job,
-        trigger=IntervalTrigger(seconds=_SCANNER_INTERVAL_SECONDS),
-        id="scanner_cycle",
-        name="Market Scanner",
+        _run_scanner_job_universe,
+        args=["watchlist", 5],
+        trigger=IntervalTrigger(seconds=_SCANNER_WATCHLIST_INTERVAL_SECONDS),
+        id="scanner_cycle_watchlist",
+        name="Market Scanner — Watchlist",
+        replace_existing=True,
+        max_instances=1,
+    )
+    # Stagger sp500 and nasdaq100 so they don't both hit yfinance at once.
+    # Each scan takes 2–5 min; a 10-min offset gives the first one room to
+    # finish before the next starts.
+    now = datetime.now(_tz.utc)
+    _scheduler.add_job(
+        _run_scanner_job_universe,
+        args=["nasdaq100", 10],
+        trigger=IntervalTrigger(
+            seconds=_SCANNER_LARGE_INTERVAL_SECONDS,
+            start_date=now + timedelta(minutes=2),
+        ),
+        id="scanner_cycle_nasdaq100",
+        name="Market Scanner — NASDAQ 100",
+        replace_existing=True,
+        max_instances=1,
+    )
+    _scheduler.add_job(
+        _run_scanner_job_universe,
+        args=["sp500", 10],
+        trigger=IntervalTrigger(
+            seconds=_SCANNER_LARGE_INTERVAL_SECONDS,
+            start_date=now + timedelta(minutes=12),
+        ),
+        id="scanner_cycle_sp500",
+        name="Market Scanner — S&P 500",
         replace_existing=True,
         max_instances=1,
     )
     _scheduler.start()
-    logger.info(f"[scheduler] Started — interval={settings.scheduler_interval_seconds}s")
+    logger.info(
+        f"[scheduler] Started — strategy_cycle={settings.scheduler_interval_seconds}s, "
+        f"scanner watchlist={_SCANNER_WATCHLIST_INTERVAL_SECONDS}s, "
+        f"scanner sp500/nasdaq100={_SCANNER_LARGE_INTERVAL_SECONDS}s"
+    )
 
 
 def stop_scheduler() -> None:
