@@ -8,6 +8,37 @@ from _theme import apply_theme
 import _charts as charts
 import _lightweight_chart as lwc
 
+# India detection — UI-only copy kept in sync with app.services.markets, so the
+# dashboard never imports backend modules (same convention as 11_India.py).
+_NIFTY_50 = {
+    "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "HINDUNILVR", "ITC",
+    "SBIN", "BHARTIARTL", "KOTAKBANK", "LT", "BAJFINANCE", "AXISBANK", "ASIANPAINT",
+    "MARUTI", "SUNPHARMA", "TITAN", "ULTRACEMCO", "WIPRO", "NESTLEIND", "ONGC",
+    "NTPC", "POWERGRID", "M&M", "TATAMOTORS", "TATASTEEL", "JSWSTEEL", "ADANIENT",
+    "ADANIPORTS", "COALINDIA", "HCLTECH", "BAJAJFINSV", "TECHM", "GRASIM",
+    "INDUSINDBK", "DRREDDY", "CIPLA", "EICHERMOT", "HEROMOTOCO", "BRITANNIA",
+    "DIVISLAB", "HINDALCO", "BPCL", "APOLLOHOSP", "BAJAJ-AUTO", "TATACONSUM",
+    "SBILIFE", "HDFCLIFE", "LTIM", "SHRIRAMFIN",
+}
+_INDIA_PREFIXES = ("NSE:", "BSE:")
+_INDIA_SUFFIXES = (".NS", ".BO")
+
+def _normalize_sym(symbol: str) -> str:
+    s = (symbol or "").upper().strip()
+    for p in _INDIA_PREFIXES:
+        if s.startswith(p):
+            return s[len(p):]
+    for suf in _INDIA_SUFFIXES:
+        if s.endswith(suf):
+            return s[: -len(suf)]
+    return s
+
+def is_india_symbol(symbol: str) -> bool:
+    s = (symbol or "").upper().strip()
+    if s.startswith(_INDIA_PREFIXES) or s.endswith(_INDIA_SUFFIXES):
+        return True
+    return _normalize_sym(s) in _NIFTY_50
+
 apply_theme("Charts")
 st.title("Price Charts")
 
@@ -37,6 +68,11 @@ except Exception:
     _assigned_syms = []
 
 def _tv_sym(sym):
+    # India (NSE) symbols must carry the NSE: prefix or TradingView resolves
+    # them to a non-existent US ticker. NSE intraday on TradingView needs a paid
+    # data add-on, but the symbol at least loads (delayed/EOD) with the prefix.
+    if is_india_symbol(sym):
+        return f"NSE:{_normalize_sym(sym)}"
     if sym in _EXCHANGE_MAP:
         return f"{_EXCHANGE_MAP[sym]}:{sym}"
     _nyse = {"JPM","BAC","GS","MS","WFC","XOM","CVX","JNJ","UNH","V","MA"}
@@ -52,6 +88,14 @@ tv_tab, native_tab, live_tab = st.tabs(
 
 with tv_tab:
     tv_symbol = _tv_sym(symbol)
+    if is_india_symbol(symbol):
+        st.info(
+            f"**{tv_symbol}** — TradingView's live NSE feed needs their paid India "
+            "data add-on, so intraday may show *“This symbol is only available on "
+            "TradingView.”* The daily chart still loads. For full India candles + our "
+            "indicators on free data, use the **Native Candles + Signals** tab "
+            "(backend data via Upstox → yfinance .NS)."
+        )
     charts.tradingview_embed(tv_symbol, interval="D", watchlist=_watchlist, height=820)
 
 with native_tab:
@@ -285,12 +329,14 @@ if not fund:
     st.caption(f"No fundamental data available for {symbol}.")
     st.stop()
 
+_CUR = "₹" if is_india_symbol(symbol) else "$"
+
 def _fmt_large(v):
     if v is None: return "—"
-    if v >= 1e12: return f"${v/1e12:.2f}T"
-    if v >= 1e9:  return f"${v/1e9:.2f}B"
-    if v >= 1e6:  return f"${v/1e6:.2f}M"
-    return f"${v:,.0f}"
+    if v >= 1e12: return f"{_CUR}{v/1e12:.2f}T"
+    if v >= 1e9:  return f"{_CUR}{v/1e9:.2f}B"
+    if v >= 1e6:  return f"{_CUR}{v/1e6:.2f}M"
+    return f"{_CUR}{v:,.0f}"
 
 def _pct(v):
     return f"{v*100:.2f}%" if v is not None else "—"
@@ -311,12 +357,12 @@ vc[0].metric("Market Cap",   _fmt_large(fund.get("market_cap")))
 vc[1].metric("P/E (TTM)",    _val(fund.get("pe_ratio"),   "{:.2f}"))
 vc[2].metric("Forward P/E",  _val(fund.get("forward_pe"), "{:.2f}"))
 vc[3].metric("PEG Ratio",    _val(fund.get("peg_ratio"),  "{:.2f}"))
-vc[4].metric("EPS (TTM)",    _val(fund.get("eps"),        "${:.2f}"))
+vc[4].metric("EPS (TTM)",    _val(fund.get("eps"),        _CUR + "{:.2f}"))
 
 st.markdown("#### Price Statistics")
 pc = st.columns(5)
-pc[0].metric("52W High",       _val(fund.get("52w_high"),    "${:.2f}"))
-pc[1].metric("52W Low",        _val(fund.get("52w_low"),     "${:.2f}"))
+pc[0].metric("52W High",       _val(fund.get("52w_high"),    _CUR + "{:.2f}"))
+pc[1].metric("52W Low",        _val(fund.get("52w_low"),     _CUR + "{:.2f}"))
 pc[2].metric("Beta",           _val(fund.get("beta"),        "{:.2f}"))
 pc[3].metric("Dividend Yield", _pct(fund.get("dividend_yield")))
 pc[4].metric("Short Ratio",    _val(fund.get("short_ratio"), "{:.2f}x"))
@@ -336,5 +382,5 @@ target     = fund.get("analyst_target")
 last_price = next((v for v in reversed(data_fin.get("close", [])) if v), None)
 upside     = round((target - last_price) / last_price * 100, 1) if target and last_price else None
 ac[0].metric("Rating",       rating)
-ac[1].metric("Price Target", f"${target:.2f}" if target else "—")
+ac[1].metric("Price Target", f"{_CUR}{target:.2f}" if target else "—")
 ac[2].metric("Upside",       f"{upside:+.1f}%" if upside is not None else "—")

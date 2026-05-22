@@ -207,15 +207,24 @@ def chart_data(symbol: str, period: str = "3mo"):
         lows   = df["Low"]
 
         # ── Standard indicators ──────────────────────────────────
-        sma10 = _safe_list(compute_sma(closes, 10), n)
-        sma20 = _safe_list(compute_sma(closes, 20), n)
-        sma50 = _safe_list(compute_sma(closes, 50), n)
-        sma200= _safe_list(compute_sma(closes, 200), n)
-        ema9  = _safe_list(compute_ema(closes, 9), n)
-        ema21 = _safe_list(compute_ema(closes, 21), n)
-        ema50 = _safe_list(compute_ema(closes, 50), n)
-        ema200= _safe_list(compute_ema(closes, 200), n)
-        rsi14 = _safe_list(compute_rsi(closes, 14), n)
+        # Long-window MAs raise on short periods (e.g. SMA(200) on a 3mo window
+        # of ~60 bars). Guard each so a short chart degrades to a flat [None]
+        # line instead of failing the whole request with a 400.
+        def _ma(fn, length):
+            try:
+                return _safe_list(fn(closes, length), n)
+            except Exception:
+                return [None] * n
+
+        sma10 = _ma(compute_sma, 10)
+        sma20 = _ma(compute_sma, 20)
+        sma50 = _ma(compute_sma, 50)
+        sma200= _ma(compute_sma, 200)
+        ema9  = _ma(compute_ema, 9)
+        ema21 = _ma(compute_ema, 21)
+        ema50 = _ma(compute_ema, 50)
+        ema200= _ma(compute_ema, 200)
+        rsi14 = _ma(compute_rsi, 14)
 
         try:
             bb = compute_bollinger(closes, 20, 2.0)
