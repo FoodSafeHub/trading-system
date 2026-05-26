@@ -1,5 +1,6 @@
 import secrets
 import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -22,6 +23,61 @@ def _purge_expired_states() -> None:
     for s, exp in list(_PENDING_STATES.items()):
         if exp < now:
             _PENDING_STATES.pop(s, None)
+
+
+@router.get("/status")
+async def schwab_status():
+    """Report Schwab connection health without leaking token material.
+
+    The dashboard polls this so an expired token shows as a clear 'reconnect'
+    nudge instead of Schwab silently vanishing from the broker tabs (an expired
+    token makes get_accounts() raise, which the Home page swallows).
+
+    `state` is one of:
+      - "connected"     : access token present and not past expiry
+      - "expiring"       : within the refresh buffer window (auto-refresh should kick in)
+      - "expired"        : past expiry — needs a working refresh token or re-auth
+      - "disconnected"   : no token row at all — never authorized
+      - "not_configured" : SCHWAB_CLIENT_ID missing from .env
+    """
+    settings = get_settings()
+    if not settings.schwab_client_id:
+        return {"state": "not_configured", "detail": "SCHWAB_CLIENT_ID not set in .env"}
+
+    from app.db import SessionLocal
+    from app.models.broker_tokens import BrokerToken
+
+    with SessionLocal() as db:
+        row = db.query(BrokerToken).filter_by(broker="schwab").first()
+
+    if not row or not row.access_token:
+        return {"state": "disconnected", "has_refresh_token": False, "expires_at": None}
+
+    expiry = row.token_expiry
+    if expiry and expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    now = datetime.now(tz=timezone.utc)
+    has_refresh = bool(row.refresh_token)
+
+    if expiry is None:
+        state = "connected"
+        seconds_left = None
+    else:
+        seconds_left = (expiry - now).total_seconds()
+        if seconds_left <= 0:
+            state = "expired"
+        elif seconds_left <= 300:  # mirrors TOKEN_REFRESH_BUFFER_SECONDS in schwab.py
+            state = "expiring"
+        else:
+            state = "connected"
+
+    return {
+        "state": state,
+        "has_refresh_token": has_refresh,
+        "expires_at": expiry.isoformat() if expiry else None,
+        "seconds_left": seconds_left,
+        "account_number": settings.schwab_account_number or None,
+    }
 
 
 @router.get("/auth")

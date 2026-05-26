@@ -98,10 +98,13 @@ def scanner_latest():
     return _get("/scanner/latest")
 
 def account_summary():
-    return _get("/account/summary")
+    # Longer timeout: under trade_routing=both this fans out to every broker, and
+    # the Webull leg can take ~15s. The default 10s timeout would fire first,
+    # making Home's _safe() wrapper drop ALL broker tabs (Schwab included).
+    return _get("/account/summary", timeout=30)
 
 def positions():
-    return _get("/account/positions")
+    return _get("/account/positions", timeout=30)
 
 def broker_account_summary(broker: str):
     """Accounts for a specific broker, independent of global routing."""
@@ -110,6 +113,14 @@ def broker_account_summary(broker: str):
 def broker_positions(broker: str):
     """Positions for a specific broker, independent of global routing."""
     return _get(f"/account/{broker}/positions")
+
+def schwab_status():
+    """Schwab connection health (token presence/expiry), no token material."""
+    return _get("/schwab/status")
+
+def schwab_auth_url():
+    """Get the Schwab OAuth authorization URL to open in the browser."""
+    return _get("/schwab/auth")
 
 def risk_status():
     return _get("/risk/status")

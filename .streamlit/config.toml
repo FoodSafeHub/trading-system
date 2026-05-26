@@ -1,6 +1,18 @@
 [theme]
+# Institutional terminal palette. These drive Streamlit's NATIVE widgets
+# (buttons, selects, sidebar, links); the richer styling lives in
+# dashboard/_theme.py CSS. Keep the two in sync — values mirror the tokens
+# documented at the top of _theme.py.
 base = "dark"
-primaryColor = "#00d4aa"
+# Muted brushed teal — restrained, not the old neon #00d4aa.
+primaryColor = "#3fb6a8"
+# Deep graphite, not pure black.
+backgroundColor = "#0e1117"
+# Layered panel surface, a touch lifted off the background.
+secondaryBackgroundColor = "#161a22"
+# Soft off-white primary text.
+textColor = "#e6e8ec"
+font = "sans serif"
 
 [server]
 port = 8501

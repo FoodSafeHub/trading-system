@@ -46,93 +46,325 @@ def market_status_bar() -> None:
     st.caption("&nbsp;&nbsp;|&nbsp;&nbsp;".join(bits), unsafe_allow_html=True)
 
 
-# ── CSS overrides ────────────────────────────────────────────────────────────
-# Reasoning behind specific rules:
-#  - Streamlit's default metric padding is too generous → tightens scan density.
-#  - Section dividers are full-bleed black bars; replaced with hairline grey.
-#  - Monospace numeric values in metric/table cells make column alignment obvious.
-#  - Tabs get a quieter underline + readable letter-spacing so a 4-tab page
-#    doesn't read like browser chrome.
+# ── CSS overrides — "institutional terminal" design system ─────────────────────
+# One cohesive premium dark theme. Strategy:
+#  - All colour decisions live in CSS custom properties (:root) so the palette is
+#    tunable in one place and reused by the pill/section helpers below.
+#  - Palette: deep graphite background, layered slate panels, soft off-white text,
+#    muted warm-grey secondary text, restrained brushed-teal primary accent, and a
+#    very subtle brushed-gold reserved for the section accent rule only.
+#  - Positive = elegant teal-green, Negative = muted (not saturated) red.
+#  - Native Streamlit widgets (buttons, selects, sidebar, tabs, banners, tables,
+#    progress) are retargeted by their data-testid / baseweb hooks so nothing
+#    reads as a default admin dashboard. Functionality is untouched — this is
+#    purely presentational.
+#
+# Token reference (mirrored in .streamlit/config.toml for native widgets):
+#   --bg        #0e1117  app background (graphite, not black)
+#   --panel     #161a22  card / surface
+#   --panel-2   #1c212c  raised surface (hover, headers)
+#   --line      hairline borders
+#   --text      #e6e8ec  primary
+#   --text-2    #9aa3b2  secondary / labels
+#   --text-3    #6b7382  tertiary / helper
+#   --teal      #3fb6a8  primary accent
+#   --gold      #c2a878  reserved highlight
+#   --pos / --neg        gains / losses
 _CSS = """
 <style>
-/* ── Layout ──────────────────────────────────────────────────────────── */
+/* Inter — professional fintech sans. Falls back to the system stack offline. */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+    --bg:       #0e1117;
+    --panel:    #161a22;
+    --panel-2:  #1c212c;
+    --line:     rgba(255,255,255,0.07);
+    --line-2:   rgba(255,255,255,0.12);
+    --text:     #e6e8ec;
+    --text-2:   #9aa3b2;
+    --text-3:   #6b7382;
+    --teal:     #3fb6a8;
+    --teal-dim: rgba(63,182,168,0.14);
+    --gold:     #c2a878;
+    --pos:      #5ec8a0;
+    --pos-bg:   rgba(94,200,160,0.12);
+    --neg:      #d98a8a;
+    --neg-bg:   rgba(217,138,138,0.12);
+    --font:     "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono:     "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+    --radius:   10px;
+    --shadow:   0 1px 2px rgba(0,0,0,0.35), 0 8px 24px rgba(0,0,0,0.22);
+
+    /* Spacing scale — 4px base ramp, used for all vertical rhythm. */
+    --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
+    --sp-5: 24px; --sp-6: 32px; --sp-7: 48px;
+}
+
+/* Tabular-figures numerics: aligns columns without a code/mono look. */
+.stApp { font-feature-settings: "tnum" 0; }
+
+/* ── App canvas ──────────────────────────────────────────────────────── */
+.stApp { background: var(--bg); font-family: var(--font); }
 section.main > div.block-container {
-    padding-top: 1.25rem;
-    padding-bottom: 2.5rem;
-    max-width: 1500px;
+    padding-top: var(--sp-6);
+    padding-bottom: var(--sp-7);
+    max-width: 1520px;
 }
+body, .stApp, .stMarkdown, p, span, label, div { color: var(--text); font-family: var(--font); }
+/* Body copy: generous line-height for readability. */
+.stMarkdown p, .stApp p { font-size: 0.9rem; line-height: 1.6; }
 
-/* ── Headings ────────────────────────────────────────────────────────── */
-h1 { font-weight: 600; letter-spacing: -0.01em; margin-bottom: 0.25rem; }
-h2 { font-weight: 600; letter-spacing: -0.005em; margin-top: 1.5rem; }
-h3 { font-weight: 500; color: rgba(250,250,250,0.85); margin-top: 1rem; }
-
-/* ── Metrics ─────────────────────────────────────────────────────────── */
-div[data-testid="stMetric"] {
-    background: rgba(255,255,255,0.025);
-    border: 1px solid rgba(255,255,255,0.06);
+/* ── Sidebar — slim premium nav rail ─────────────────────────────────── */
+section[data-testid="stSidebar"] {
+    background: #0b0e14;
+    border-right: 1px solid var(--line);
+}
+section[data-testid="stSidebar"] .block-container { padding-top: 1.25rem; }
+/* Nav links: quiet by default, teal accent + raised surface on hover/active. */
+section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"] {
     border-radius: 8px;
-    padding: 0.65rem 0.85rem;
-}
-div[data-testid="stMetricLabel"] {
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: rgba(250,250,250,0.55);
-}
-div[data-testid="stMetricValue"] {
-    font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-    font-size: 1.35rem;
+    padding: var(--sp-1) var(--sp-3);
+    margin: 1px 0;
+    color: var(--text-2);
+    font-size: 0.85rem;
     font-weight: 500;
+    letter-spacing: 0.005em;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"]:hover {
+    background: rgba(255,255,255,0.04);
+    color: var(--text);
+}
+section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"][aria-current="page"] {
+    background: var(--teal-dim);
+    color: var(--text);
+    box-shadow: inset 2px 0 0 var(--teal);
+}
+
+/* ── Headings — strict 3-step hierarchy (H1 ≫ H2 > H3) ───────────────── */
+h1 {
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    font-size: 1.75rem;
+    line-height: 1.15;
+    margin: 0 0 var(--sp-1) 0;
+    color: #f3f5f8;
+}
+h2 {
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    font-size: 1.15rem;
+    line-height: 1.25;
+    margin: var(--sp-6) 0 var(--sp-3) 0;
+    color: var(--text);
+    padding-left: var(--sp-2);
+    border-left: 2px solid var(--gold);   /* subtle brushed-gold section rule */
+}
+h3 {
+    font-weight: 600;
+    font-size: 0.95rem;
+    line-height: 1.3;
+    letter-spacing: 0;
+    color: var(--text);
+    margin: var(--sp-4) 0 var(--sp-2) 0;
+}
+
+/* ── Metric / KPI cards — illuminated dark surfaces ──────────────────── */
+div[data-testid="stMetric"] {
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: var(--sp-3) var(--sp-4);
+    box-shadow: var(--shadow);
+    transition: border-color 0.15s ease;
+}
+div[data-testid="stMetric"]:hover { border-color: var(--line-2); }
+div[data-testid="stMetricLabel"] {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-2);
+    font-weight: 600;
+    margin-bottom: var(--sp-1);
+}
+/* Tabular figures keep multi-card rows vertically aligned without a mono look. */
+div[data-testid="stMetricValue"] {
+    font-family: var(--font);
+    font-variant-numeric: tabular-nums;
+    font-size: 1.45rem;
+    font-weight: 650;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    color: #f3f5f8;
 }
 div[data-testid="stMetricDelta"] {
-    font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-family: var(--font);
+    font-variant-numeric: tabular-nums;
     font-size: 0.78rem;
 }
 
 /* ── Dividers ────────────────────────────────────────────────────────── */
-hr {
-    margin: 1.5rem 0 1rem 0;
-    border: 0;
-    border-top: 1px solid rgba(255,255,255,0.08);
-}
+hr { margin: var(--sp-5) 0 var(--sp-4) 0; border: 0; border-top: 1px solid var(--line); }
 
-/* ── Tabs ────────────────────────────────────────────────────────────── */
+/* ── Tabs — quiet, terminal-like ─────────────────────────────────────── */
+div[data-baseweb="tab-list"] {
+    border-bottom: 1px solid var(--line);
+    gap: 0.25rem;
+}
 button[data-baseweb="tab"] {
-    font-size: 0.92rem;
+    font-size: 0.9rem;
+    letter-spacing: 0.02em;
+    padding: 0.45rem 1rem;
+    color: var(--text-2);
+}
+button[data-baseweb="tab"]:hover { color: var(--text); }
+button[data-baseweb="tab"][aria-selected="true"] { color: var(--text); font-weight: 550; }
+div[data-baseweb="tab-highlight"] { background: var(--teal); height: 2px; }
+
+/* ── Buttons — restrained, precise, consistent height ────────────────── */
+div[data-testid="stButton"] > button,
+div[data-testid="stLinkButton"] > a,
+div[data-testid="stFormSubmitButton"] > button {
+    border-radius: 8px;
+    border: 1px solid var(--line-2);
+    background: var(--panel-2);
+    color: var(--text);
+    font-weight: 500;
+    font-size: 0.86rem;
     letter-spacing: 0.01em;
-    padding: 0.4rem 1rem;
+    min-height: 38px;                 /* aligns with selects/inputs in filter rows */
+    transition: background 0.12s ease, border-color 0.12s ease;
+}
+div[data-testid="stButton"] > button:hover,
+div[data-testid="stLinkButton"] > a:hover,
+div[data-testid="stFormSubmitButton"] > button:hover {
+    background: #232936;
+    border-color: var(--teal);
+    color: #fff;
+}
+/* Primary buttons: a calm filled teal, no glow. */
+div[data-testid="stButton"] > button[kind="primary"],
+div[data-testid="stFormSubmitButton"] > button[kind="primary"] {
+    background: var(--teal);
+    border-color: var(--teal);
+    color: #07110f;
+    font-weight: 600;
+}
+div[data-testid="stButton"] > button[kind="primary"]:hover,
+div[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover {
+    background: #4cc7b8; border-color: #4cc7b8; color: #06100e;
 }
 
-/* ── Tables ──────────────────────────────────────────────────────────── */
+/* ── Inputs / selects — consistent height for scannable filter rows ──── */
+div[data-baseweb="select"] > div,
+div[data-baseweb="input"] > div,
+div[data-testid="stNumberInput"] input,
+div[data-testid="stTextInput"] input {
+    background: var(--panel) !important;
+    border-color: var(--line-2) !important;
+    border-radius: 8px !important;
+    min-height: 38px;
+    font-size: 0.86rem !important;
+}
+div[data-baseweb="select"] > div:focus-within,
+div[data-baseweb="input"] > div:focus-within { border-color: var(--teal) !important; }
+/* Widget labels: quiet secondary text, tight to their control. */
+div[data-testid="stWidgetLabel"] label, label[data-testid="stWidgetLabel"] {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-2);
+    margin-bottom: var(--sp-1);
+}
+
+/* ── Radio / horizontal toggles ──────────────────────────────────────── */
+div[role="radiogroup"] label { color: var(--text-2); font-size: 0.86rem; }
+
+/* ── Tables — aligned numerics, header hierarchy, subtle hover ───────── */
+div[data-testid="stDataFrame"] {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin: var(--sp-4) 0 var(--sp-5) 0;   /* breathing room above & below */
+}
 div[data-testid="stDataFrame"] td,
 div[data-testid="stDataFrame"] th {
-    font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-    font-size: 0.85rem;
+    font-family: var(--font);
+    font-variant-numeric: tabular-nums;     /* numeric columns stay aligned */
+    font-size: 0.84rem;
 }
+div[data-testid="stDataFrame"] th {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.7rem;
+    color: var(--text-2);
+    background: var(--panel-2);
+    font-weight: 600;
+}
+div[data-testid="stDataFrame"] [role="row"]:hover { background: rgba(255,255,255,0.03); }
+
+/* ── Progress bars (risk gauges) ─────────────────────────────────────── */
+div[data-testid="stProgress"] > div > div > div { background: var(--teal); }
+
+/* ── Banners / notices — also the polished empty-state surface ───────── */
+div[data-testid="stAlert"] {
+    border-radius: var(--radius);
+    border: 1px solid var(--line-2);
+    background: var(--panel);
+    padding: var(--sp-3) var(--sp-4);
+}
+div[data-testid="stAlert"] p { font-size: 0.85rem; line-height: 1.5; color: var(--text-2); }
 
 /* ── Pills (status badges built via st.markdown) ─────────────────────── */
 .tx-pill {
     display: inline-block;
-    padding: 0.15rem 0.55rem;
-    border-radius: 999px;
-    font-size: 0.78rem;
-    font-weight: 500;
-    letter-spacing: 0.02em;
+    padding: var(--sp-1) var(--sp-2);
+    border-radius: 6px;          /* squared, terminal-credible — not bubbly */
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
     line-height: 1.4;
     border: 1px solid transparent;
+    font-family: var(--font);
 }
-.tx-pill.green { background: rgba(0, 200, 120, 0.12); color: #4ade80; border-color: rgba(0, 200, 120, 0.35); }
-.tx-pill.red   { background: rgba(240, 65, 65, 0.12); color: #f87171; border-color: rgba(240, 65, 65, 0.35); }
-.tx-pill.amber { background: rgba(240, 170, 50, 0.14); color: #fbbf24; border-color: rgba(240, 170, 50, 0.40); }
-.tx-pill.grey  { background: rgba(160, 160, 160, 0.10); color: #a3a3a3; border-color: rgba(160, 160, 160, 0.30); }
-.tx-pill.blue  { background: rgba(60, 130, 240, 0.12); color: #60a5fa; border-color: rgba(60, 130, 240, 0.35); }
+.tx-pill.green { background: var(--pos-bg);             color: var(--pos);  border-color: rgba(94,200,160,0.3); }
+.tx-pill.red   { background: var(--neg-bg);             color: var(--neg);  border-color: rgba(217,138,138,0.3); }
+.tx-pill.amber { background: rgba(194,168,120,0.14);    color: var(--gold); border-color: rgba(194,168,120,0.34); }
+.tx-pill.grey  { background: rgba(154,163,178,0.10);    color: var(--text-2); border-color: rgba(154,163,178,0.24); }
+.tx-pill.blue  { background: var(--teal-dim);           color: var(--teal); border-color: rgba(63,182,168,0.32); }
 
-/* ── Section subtitles (caption-sized helper text under section()) ───── */
+/* ── Status strip (top command bar) ──────────────────────────────────── */
+/* Sits between the page title and the first section — token margins set the
+   title→bar→content rhythm. */
+.tx-statusbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sp-5);
+    padding: var(--sp-3) var(--sp-4);
+    margin: var(--sp-4) 0 var(--sp-2) 0;
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+.tx-stat { display: inline-flex; align-items: center; gap: var(--sp-2); }
+.tx-stat-label { color: var(--text-3); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+
+/* ── Section subtitles (helper text under section()) ─────────────────── */
 .tx-subtle {
-    color: rgba(250,250,250,0.55);
-    font-size: 0.85rem;
-    margin: -0.5rem 0 0.75rem 0;
+    color: var(--text-2);
+    font-size: 0.8rem;
+    line-height: 1.5;
+    margin: calc(-1 * var(--sp-1)) 0 var(--sp-3) var(--sp-2);
+}
+
+/* ── Captions / help text — the micro/meta tier ──────────────────────── */
+div[data-testid="stCaptionContainer"], .stCaption {
+    color: var(--text-3);
+    font-size: 0.78rem;
+    line-height: 1.5;
 }
 </style>
 """
@@ -209,14 +441,23 @@ def pill(text: str, color: str = "grey") -> str:
 
 
 def status_row(items: Iterable[tuple[str, str, str]]) -> None:
-    """Render a horizontal row of `(label, pill_text, color)` status indicators.
+    """Render the top command/status bar from `(label, pill_text, color)` tuples.
 
     Use for the top strip on Home / status bars: API up, market open, etc.
+    Renders as a single elevated panel so it reads as a command bar rather than
+    a loose line of text.
     """
     parts = []
     for label, text, color in items:
-        parts.append(f"<span style='margin-right:1.5rem;'><span style='color:rgba(250,250,250,0.55);font-size:0.78rem;'>{label}</span> {pill(text, color)}</span>")
-    st.markdown("<div style='margin-bottom:0.5rem;'>" + "".join(parts) + "</div>", unsafe_allow_html=True)
+        parts.append(
+            f"<span class='tx-stat'>"
+            f"<span class='tx-stat-label'>{label}</span>{pill(text, color)}"
+            f"</span>"
+        )
+    st.markdown(
+        "<div class='tx-statusbar'>" + "".join(parts) + "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ── Formatters ───────────────────────────────────────────────────────────────
