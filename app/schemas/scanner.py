@@ -9,7 +9,11 @@ from app.schemas._serializers import serialize_et
 
 
 class ScanConfig(BaseModel):
-    universe: Literal["watchlist", "sp500", "nasdaq100", "nifty50", "custom"] = "watchlist"
+    universe: Literal[
+        "watchlist", "sp500", "nasdaq100",
+        "nifty50", "nifty100", "nifty200", "nifty500", "nse_all",
+        "custom",
+    ] = "watchlist"
     custom_symbols: List[str] = Field(default_factory=list)
     min_price: float = 5.0
     min_avg_volume: float = 500_000.0

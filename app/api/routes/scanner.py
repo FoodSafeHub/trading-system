@@ -37,7 +37,10 @@ async def trigger_scan(config: ScanConfig, background_tasks: BackgroundTasks):
         _scan_running = True
     started = True
     try:
-        is_large = config.universe in ("sp500", "nasdaq100", "nifty50") or len(config.custom_symbols) > 20
+        is_large = config.universe in (
+            "sp500", "nasdaq100",
+            "nifty50", "nifty100", "nifty200", "nifty500", "nse_all",
+        ) or len(config.custom_symbols) > 20
 
         if is_large:
             # Hand off to background — _run_scan_bg owns the flag from here.

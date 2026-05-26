@@ -97,6 +97,18 @@ def scanner_results(limit: int = 50):
 def scanner_latest():
     return _get("/scanner/latest")
 
+def upstox_resolve(symbol: str):
+    """Validate a free-typed NSE ticker. Returns {symbol, tradeable, instrument_key}."""
+    return _get(f"/upstox/resolve/{symbol}")
+
+def upstox_universe(tier: str):
+    """India tier symbol list: nifty50/nifty100/nifty200/nifty500/nse_all."""
+    return _get(f"/upstox/universe/{tier}")
+
+def momentum_regime(market: str = "india"):
+    """Momentum regime snapshot for a market ('india' or 'us')."""
+    return _get(f"/perplexity/regime/{market}")
+
 def account_summary():
     # Longer timeout: under trade_routing=both this fans out to every broker, and
     # the Webull leg can take ~15s. The default 10s timeout would fire first,
@@ -159,8 +171,8 @@ def update_scheduler_config(run_bollinger: bool | None = None, run_perplexity: b
     r.raise_for_status()
     return r.json()
 
-def chart_data(symbol: str, period: str = "3mo"):
-    return _get(f"/strategy/chart/{symbol}", params={"period": period})
+def chart_data(symbol: str, period: str = "3mo", interval: str = "1d"):
+    return _get(f"/strategy/chart/{symbol}", params={"period": period, "interval": interval})
 
 
 def intraday_chart(symbol: str, timeframe: str = "5m", strategies: str = "all",
@@ -593,3 +605,23 @@ def backtest_live_signals(symbol: str, period: str = "1y", timeout: int = 60):
         params={"period": period},
         timeout=timeout,
     )
+
+
+def scanner_calibrate(symbol: str, strategy_type: str, period: str = "5y",
+                      initial_capital: float = 10_000.0, timeout: int = 600):
+    """Optimize-Filters-and-save for a scanner strategy (tightens per-symbol params)."""
+    return _get(
+        f"/backtest/scanner-calibrate/{symbol}/{strategy_type}",
+        params={"period": period, "initial_capital": initial_capital},
+        timeout=timeout,
+    )
+
+
+def scanner_profile_get(symbol: str, strategy_type: str, timeout: int = 15):
+    """Return the saved calibration profile for a symbol+strategy, or {}."""
+    return _get(f"/backtest/scanner-profiles/{symbol}/{strategy_type}", timeout=timeout)
+
+
+def scanner_profile_delete(symbol: str, strategy_type: str, timeout: int = 15):
+    """Delete a saved scanner calibration profile (reverts to factory defaults)."""
+    return _delete(f"/backtest/scanner-profiles/{symbol}/{strategy_type}", timeout=timeout)

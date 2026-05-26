@@ -1,0 +1,54 @@
+{
+  "pullback_ema50:AAPL": {
+    "symbol": "AAPL",
+    "strategy_type": "pullback_ema50",
+    "calibrated_at": "2026-05-26",
+    "n_trades": 12,
+    "n_wins": 11,
+    "win_rate_pct": 91.7,
+    "param_overrides": {
+      "wick_ratio_min": 0.6
+    },
+    "survival_rate_pct": 92.3,
+    "improved_by": [
+      "win_rate",
+      "expectancy",
+      "total_return"
+    ],
+    "notes": "grid-search winner from 14 combos vs 13 baseline round-trips over 5y"
+  },
+  "pullback_ema50:RELIANCE": {
+    "symbol": "RELIANCE",
+    "strategy_type": "pullback_ema50",
+    "calibrated_at": "2026-05-26",
+    "n_trades": 29,
+    "n_wins": 24,
+    "win_rate_pct": 82.8,
+    "param_overrides": {
+      "wick_ratio_min": 0.3
+    },
+    "survival_rate_pct": 107.4,
+    "improved_by": [
+      "expectancy",
+      "total_return"
+    ],
+    "notes": "grid-search winner from 14 combos vs 27 baseline round-trips over 10y"
+  },
+  "pullback_ema50:BHARTIARTL": {
+    "symbol": "BHARTIARTL",
+    "strategy_type": "pullback_ema50",
+    "calibrated_at": "2026-05-26",
+    "n_trades": 21,
+    "n_wins": 19,
+    "win_rate_pct": 90.5,
+    "param_overrides": {
+      "wick_ratio_min": 0.5
+    },
+    "survival_rate_pct": 75.0,
+    "improved_by": [
+      "win_rate",
+      "expectancy"
+    ],
+    "notes": "grid-search winner from 14 combos vs 28 baseline round-trips over 10y"
+  }
+}

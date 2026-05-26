@@ -179,6 +179,147 @@ def _render_filter_summary(symbol: str) -> None:
         st.markdown(f"- {item}")
 
 
+# Scanner strategy types that support per-symbol calibration (Optimize Filters).
+_CALIBRATABLE_TYPES = {
+    "rsi2_mean_reversion", "ema_macd_crossover", "bb_squeeze_breakout",
+    "pullback_ema50", "vix_spike_reversal",
+}
+
+# Human labels for the param overrides shown in the "applied filters" table.
+_PARAM_LABELS = {
+    "rsi_entry_threshold": "RSI(2) entry ceiling",
+    "atr_skip_threshold":  "Max ATR% (skip if calmer needed)",
+    "vol_ratio_min":       "Min volume vs 20d avg",
+    "rsi_min":             "Min RSI at entry",
+    "rsi_entry_min":       "Min RSI at breakout",
+    "rsi_entry_max":       "Max RSI at entry (panic depth)",
+    "wick_ratio_min":      "Min reclaim wick ratio",
+    "price_ema_proximity_pct": "Max distance from EMA50 (%)",
+    "atr_spike_threshold": "Min ATR% panic spike",
+}
+
+
+def _render_optimize_filters(symbol: str, strategy_type: str, period: str) -> None:
+    """
+    Perplexity-style Optimize-Filters-and-save for scanner strategies.
+    Analyzes winning vs losing entries, proposes tighter per-symbol params,
+    re-runs, and saves only if it improves win-rate OR expectancy OR return
+    with >=40% trade survival. Saved params flow straight into the live
+    scheduler/scanner via _make_generic_configs.
+    """
+    if strategy_type not in _CALIBRATABLE_TYPES:
+        return
+
+    st.divider()
+    st.markdown("##### 🔬 Analyze & Optimize Filters")
+    st.caption(
+        "Grid-searches this strategy's own entry params for **this symbol** "
+        "(pullback proximity, RSI window, reclaim wick, volume/ATR thresholds — "
+        "whatever the rule actually gates on), maximising per-trade expectancy with "
+        "≥40% of trades surviving. Saves only if it materially beats the factory "
+        "defaults on win rate, expectancy, or total return. Saved params take effect "
+        "immediately in the live scanner and scheduler — no restart. (~30–60s.)"
+    )
+
+    # Show the currently-saved profile (if any) with a revert button.
+    try:
+        existing = api.scanner_profile_get(symbol, strategy_type)
+    except Exception:
+        existing = {}
+    if existing and existing.get("param_overrides"):
+        ov = existing["param_overrides"]
+        st.info(
+            f"📌 Saved profile active for **{symbol} / {strategy_type}** "
+            f"(calibrated {existing.get('calibrated_at','?')}, "
+            f"{existing.get('win_rate_pct','?')}% win rate). "
+            f"Overrides: " + ", ".join(f"{_PARAM_LABELS.get(k,k)} = {v}" for k, v in ov.items())
+        )
+        if st.button("🗑 Revert to factory defaults", key=f"revert_{symbol}_{strategy_type}"):
+            try:
+                api.scanner_profile_delete(symbol, strategy_type)
+                st.success("Reverted. Re-run the backtest to see factory-default results.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Revert failed: {e}")
+
+    cal_period = st.selectbox(
+        "Calibration period (more history = more trades to learn from)",
+        ["2y", "5y", "10y"], index=1, key=f"cal_period_{symbol}_{strategy_type}",
+    )
+    if not st.button("⚡ Optimize Filters → Save Profile", type="primary",
+                     key=f"optimize_{symbol}_{strategy_type}"):
+        return
+
+    with st.spinner(f"Analyzing {symbol} / {strategy_type} over {cal_period}..."):
+        try:
+            cal = api.scanner_calibrate(symbol, strategy_type, period=cal_period)
+        except Exception as e:
+            st.error(f"Optimization failed: {e}")
+            return
+
+    if cal.get("saved"):
+        cmp = cal.get("comparison", {})
+        b, f = cmp.get("baseline", {}), cmp.get("filtered", {})
+        bwr, fwr = b.get("win_rate_pct", 0), f.get("win_rate_pct", 0)
+        st.success(
+            f"✅ Profile saved for **{symbol} / {strategy_type}** — "
+            f"Win rate **{bwr:.1f}% → {fwr:.1f}%**  |  "
+            f"Trades kept: {f.get('round_trips','?')} "
+            f"({cmp.get('survival_rate_pct','?')}% survival)"
+        )
+        st.caption("These params are now live in the scanner and scheduler for this symbol.")
+    else:
+        st.warning(cal.get("skip_reason") or "No improvement — factory defaults kept.")
+
+    # Proposed param changes (what the optimizer decided to tighten).
+    overrides = cal.get("param_overrides") or cal.get("proposed_overrides") or {}
+    if overrides:
+        import pandas as _pd
+        st.markdown("**Param changes proposed**" + ("" if cal.get("saved") else " (not saved)"))
+        prows = [{"Param": _PARAM_LABELS.get(k, k), "New value": v} for k, v in overrides.items()]
+        st.dataframe(_pd.DataFrame(prows), use_container_width=True, hide_index=True)
+
+    # With/without comparison table — always shown so the user sees the effect.
+    cmp = cal.get("comparison") or {}
+    if cmp.get("baseline") and cmp.get("filtered"):
+        b, f = cmp["baseline"], cmp["filtered"]
+        improved = set(cmp.get("improved_by") or [])
+        st.markdown("##### With vs without optimization")
+        if improved:
+            st.caption("Improved on: " + ", ".join(
+                {"win_rate": "win rate", "expectancy": "expectancy",
+                 "total_return": "total return"}.get(m, m) for m in improved))
+
+        def _d(key, suffix=""):
+            bv, fv = b.get(key), f.get(key)
+            if bv is None or fv is None:
+                return "—", "—", ""
+            delta = fv - bv
+            arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "·")
+            return f"{bv:g}{suffix}", f"{fv:g}{suffix}", f"{arrow} {delta:+.2f}{suffix}"
+
+        import pandas as _pd
+        rows = []
+        for label, key, suf in [
+            ("Round trips",   "round_trips",      ""),
+            ("Win rate",      "win_rate_pct",     "%"),
+            ("Avg win",       "avg_win_pct",      "%"),
+            ("Avg loss",      "avg_loss_pct",     "%"),
+            ("Expectancy",    "expectancy_pct",   "%"),
+            ("Total return",  "total_return_pct", "%"),
+            ("Profit factor", "profit_factor",    ""),
+            ("Max drawdown",  "max_drawdown_pct", "%"),
+        ]:
+            bs, fs, dl = _d(key, suf)
+            rows.append({"Metric": label, "Factory defaults": bs,
+                         "Optimized": fs, "Δ": dl})
+        st.dataframe(_pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption(
+            f"Optimized run kept {cmp.get('survival_rate_pct','—')}% of the baseline trades. "
+            "Δ is optimized minus factory; for max drawdown, closer to zero is better."
+        )
+
+
 def _render_strategy_description(strategy_name: str) -> None:
     for key, desc in NEW_STRATEGY_DESCRIPTIONS.items():
         if key in strategy_name.lower().replace("-", "_"):
@@ -670,6 +811,9 @@ if mode == "Single Strategy":
     _equity_chart(r, symbol=chosen_sym, period=period)
     _price_action_chart(r, chosen_sym, period)
     _single_trades_table(r["trades"])
+
+    # Analyze winners/losers and auto-tune this symbol's entry params.
+    _render_optimize_filters(chosen_sym, chosen_type, period)
 
     # ── Promote this exact strategy/symbol pair to auto-trade ──────────
     # Lives after the trades table so the user has full context (equity

@@ -631,6 +631,7 @@ class FibPullbackSupport(PerplexityStrategy):
         # ── Calibration filters ──
         "filter_lower_wick_min": 0.0,
         "filter_vol_min":        0.0,
+        "filter_body_max":       0.0,   # max candle body (× ATR); small body = absorption at support
     }
 
     def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None, **kwargs) -> PerplexitySignal:
@@ -673,6 +674,23 @@ class FibPullbackSupport(PerplexityStrategy):
         wick_ratio = lower_wick / bar_range if bar_range > 0 else 0.0
         if wick_ratio < cfg["wick_ratio_min"]:
             return self._hold(symbol, f"wick ratio {wick_ratio:.2f} < {cfg['wick_ratio_min']} — no reversal candle")
+
+        # ── Calibrated filters (per-symbol, 0.0 = disabled) ──
+        # Tighter rejection wick than the base gate.
+        if cfg.get("filter_lower_wick_min", 0.0) > 0 and wick_ratio < cfg["filter_lower_wick_min"]:
+            return self._hold(symbol, f"wick {wick_ratio:.2f} < calibrated min {cfg['filter_lower_wick_min']}")
+        # Small candle body relative to ATR = indecision/absorption at support (top discriminator).
+        body = abs(c_now - o_now)
+        body_pct = body / atr_v if atr_v > 0 else 0.0
+        if cfg.get("filter_body_max", 0.0) > 0 and body_pct > cfg["filter_body_max"]:
+            return self._hold(symbol, f"body {body_pct:.2f}×ATR > calibrated max {cfg['filter_body_max']}")
+        # Volume confirmation.
+        if cfg.get("filter_vol_min", 0.0) > 0:
+            v_avg = float(df["Volume"].rolling(20).mean().iloc[-1])
+            v_now = float(df["Volume"].iloc[-1])
+            v_ratio = v_now / v_avg if v_avg > 0 else 1.0
+            if v_ratio < cfg["filter_vol_min"]:
+                return self._hold(symbol, f"vol {v_ratio:.2f} < calibrated min {cfg['filter_vol_min']}")
 
         # Prior decline guard (must have sold off to create panic)
         n_dec = cfg["prior_decline_bars"]
@@ -729,6 +747,7 @@ class RsiSwingReversal(PerplexityStrategy):
         "vol_ratio_min":     0.8,
         "max_hold_bars":     15,
         "filter_vol_min":    0.0,
+        "filter_swing_rsi_min": 0.0,   # min RSI(14) at entry — deeper genuine pullback
     }
 
     def run(self, symbol: str, df: pd.DataFrame, regime: MarketRegime | None = None, **kwargs) -> PerplexitySignal:
@@ -761,6 +780,11 @@ class RsiSwingReversal(PerplexityStrategy):
 
         if cfg.get("filter_vol_min", 0.0) > 0 and vol_ratio < cfg["filter_vol_min"]:
             return self._hold(symbol, f"vol ratio {vol_ratio:.2f} < calibrated min {cfg['filter_vol_min']}")
+
+        # Calibrated RSI floor: winners turn up from a higher RSI (the dip already recovering),
+        # not from a free-fall. 0.0 = disabled.
+        if cfg.get("filter_swing_rsi_min", 0.0) > 0 and rsi_now < cfg["filter_swing_rsi_min"]:
+            return self._hold(symbol, f"RSI {rsi_now:.0f} < calibrated min {cfg['filter_swing_rsi_min']}")
 
         # BUY: prior bar dipped into oversold, now turning up
         if rsi_prev < cfg["rsi_oversold"] and rsi_now > rsi_prev:

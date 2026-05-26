@@ -48,6 +48,10 @@ class SymbolFilterProfile:
 
     # Fib_Pullback_Support
     lower_wick_min: float = 0.0   # min lower wick % of bar range (quality of rejection candle)
+    body_max: float = 0.0         # max candle body as % of ATR (small body = indecision/rejection → wins)
+
+    # RSI_Swing_Reversal — dedicated field (rsi_min above is used by BB_Mean_Reversion)
+    swing_rsi_min: float = 0.0    # min RSI(14) at entry for the swing-reversal pullback
 
     # Evidence means (filled with available indicators)
     win_ema_dist_mean: float = 0.0
@@ -266,6 +270,8 @@ def calibrate_from_snapshots(
     rsi_min          = 0.0
     bb_pct_min       = 0.0
     ema_dist_pct_min = 0.0
+    body_max         = 0.0
+    swing_rsi_min    = 0.0
 
     if strategy == "EMA_Mean_Reversion":
         # Higher EMA distance and higher BB position both correlate with stronger pullback quality
@@ -338,8 +344,15 @@ def calibrate_from_snapshots(
         atr_pct_max      = filters_bb["atr_pct"][0]
 
     elif strategy == "Fib_Pullback_Support":
-        # Larger lower wick = stronger rejection candle at Fib level
+        # Larger lower wick = stronger rejection candle at the level.
+        # Smaller candle body (body_pct, the d~0.7 discriminator) = indecision/absorption → wins.
+        # (No atr filter here — the rule already gates on an ATR spike, so it'd double-count.)
         lower_wick_min = _calibrate_indicator("lower_wick_pct", higher_is_better=True)
+        body_max       = _calibrate_indicator("body_pct",       higher_is_better=False)
+
+    elif strategy == "RSI_Swing_Reversal":
+        # Deeper RSI dip on the entry bar = a more genuine oversold pullback in the uptrend.
+        swing_rsi_min = _calibrate_indicator("rsi", higher_is_better=True)
 
     # ── Evidence means ─────────────────────────────────────────
     w_ema = _vals(wins,   "ema_dist_pct")
@@ -368,6 +381,8 @@ def calibrate_from_snapshots(
         rsi_min=rsi_min,
         bb_pct_min=bb_pct_min,
         ema_dist_pct_min=ema_dist_pct_min,
+        body_max=body_max,
+        swing_rsi_min=swing_rsi_min,
         win_ema_dist_mean=round(_mean(w_ema), 3),
         loss_ema_dist_mean=round(_mean(l_ema), 3),
         win_vol_mean=round(_mean(w_vol), 3),
@@ -403,5 +418,8 @@ def get_filters_for_symbol(strategy: str, symbol: str) -> dict:
             "ema_dist_pct_min": profile.ema_dist_pct_min,
         }
     if strategy == "Fib_Pullback_Support":
-        return {"lower_wick_min": profile.lower_wick_min, "vol_min": profile.vol_min}
+        return {"lower_wick_min": profile.lower_wick_min, "vol_min": profile.vol_min,
+                "body_max": profile.body_max}
+    if strategy == "RSI_Swing_Reversal":
+        return {"vol_min": profile.vol_min, "swing_rsi_min": profile.swing_rsi_min}
     return {}

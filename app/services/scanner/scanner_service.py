@@ -364,56 +364,74 @@ def _make_generic_configs(symbol: str):
     Returns all 5 new strategy types so the backtest page can run the same
     set on any user-typed ticker (e.g. BRK-B) and the scanner's signals are
     directly reproducible there.
+
+    If a per-symbol calibrated profile exists (saved from the Backtest page's
+    Optimize Filters flow), its param overrides are merged onto the factory
+    defaults here — so the scheduler, the live scanner, and backtests all run
+    the tuned params with no extra wiring. The rule logic is never changed;
+    only the params dict it receives.
     """
     from app.services.strategy.models import StrategyConfig
+    from app.services.backtest.scanner_profiles import get_param_overrides
+
+    def _p(strategy_type: str, defaults: dict) -> dict:
+        merged = dict(defaults)
+        merged.update(get_param_overrides(strategy_type, symbol))
+        return merged
+
     return [
         StrategyConfig(
             name=f"{symbol}_RSI2_Mean_Reversion",
             symbol=symbol,
             type="rsi2_mean_reversion",
             enabled=True,
-            params={"rsi_period": 2, "rsi_entry_threshold": 10, "rsi_exit_threshold": 70,
+            params=_p("rsi2_mean_reversion",
+                    {"rsi_period": 2, "rsi_entry_threshold": 10, "rsi_exit_threshold": 70,
                     "sma_trend": 200, "exit_sma": 5, "hard_stop_pct": 5.0,
-                    "take_profit_pct": 8.0, "max_hold_bars": 10, "atr_skip_threshold": 5.0},
+                    "take_profit_pct": 8.0, "max_hold_bars": 10, "atr_skip_threshold": 5.0}),
         ),
         StrategyConfig(
             name=f"{symbol}_EMA_MACD_Crossover",
             symbol=symbol,
             type="ema_macd_crossover",
             enabled=True,
-            params={"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26,
+            params=_p("ema_macd_crossover",
+                    {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26,
                     "macd_signal": 9, "rsi_period": 14, "rsi_min": 45, "rsi_max": 65,
                     "vol_ratio_min": 1.1, "atr_stop_multiplier": 1.5,
-                    "atr_tp_multiplier": 2.0, "max_hold_bars": 20},
+                    "atr_tp_multiplier": 2.0, "max_hold_bars": 20}),
         ),
         StrategyConfig(
             name=f"{symbol}_BB_Squeeze_Breakout",
             symbol=symbol,
             type="bb_squeeze_breakout",
             enabled=True,
-            params={"bb_period": 20, "bb_std": 2.0, "squeeze_bars": 5,
+            params=_p("bb_squeeze_breakout",
+                    {"bb_period": 20, "bb_std": 2.0, "squeeze_bars": 5,
                     "vol_ratio_min": 1.3, "rsi_period": 14,
-                    "rsi_entry_min": 50, "rsi_overbought": 80},
+                    "rsi_entry_min": 50, "rsi_overbought": 80}),
         ),
         StrategyConfig(
             name=f"{symbol}_Pullback_EMA50",
             symbol=symbol,
             type="pullback_ema50",
             enabled=True,
-            params={"ema_trend": 50, "ema_slope_bars": 5, "price_ema_proximity_pct": 1.0,
+            params=_p("pullback_ema50",
+                    {"ema_trend": 50, "ema_slope_bars": 5, "price_ema_proximity_pct": 1.0,
                     "rsi_period": 14, "rsi_min": 35, "rsi_max": 55, "wick_ratio_min": 0.4,
                     "exit_rsi": 65, "exit_extension_pct": 3.0, "hard_stop_pct": 2.0,
-                    "max_hold_bars": 20, "bear_skip_threshold_pct": 10.0},
+                    "max_hold_bars": 20, "bear_skip_threshold_pct": 10.0}),
         ),
         StrategyConfig(
             name=f"{symbol}_VIX_Spike_Reversal",
             symbol=symbol,
             type="vix_spike_reversal",
             enabled=True,
-            params={"atr_period": 14, "atr_spike_threshold": 3.0, "atr_exit_threshold": 2.0,
+            params=_p("vix_spike_reversal",
+                    {"atr_period": 14, "atr_spike_threshold": 3.0, "atr_exit_threshold": 2.0,
                     "rsi_period": 14, "rsi_entry_max": 30, "rsi_exit": 55,
                     "bb_pos_max": 0.15, "wick_ratio_min": 0.5,
-                    "prior_decline_pct": 2.0, "prior_decline_bars": 3},
+                    "prior_decline_pct": 2.0, "prior_decline_bars": 3}),
         ),
     ]
 

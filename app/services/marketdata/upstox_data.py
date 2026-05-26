@@ -51,9 +51,13 @@ _INTERVAL_MAP = {
 }
 
 # period string → how many days of history to request.
+# NOTE: every period the app can request must be listed. A missing key falls
+# back to 366 days, which silently truncates long windows — e.g. a "10y"
+# request would return only ~1y of bars, starving backtests/calibration.
 _PERIOD_DAYS = {
     "1d": 1, "2d": 2, "5d": 5, "1mo": 31, "3mo": 93,
     "6mo": 186, "1y": 366, "2y": 731, "5y": 1827,
+    "10y": 3653, "max": 3653,
 }
 
 

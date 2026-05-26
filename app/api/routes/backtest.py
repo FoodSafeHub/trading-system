@@ -444,6 +444,225 @@ def backtest_custom_compare_all(
     return results
 
 
+# ── Scanner calibration (Optimize Filters for the Backtest page) ───────────────
+
+_SCANNER_CALIBRATABLE = {
+    "rsi2_mean_reversion", "ema_macd_crossover", "bb_squeeze_breakout",
+    "pullback_ema50", "vix_spike_reversal",
+}
+
+
+def _trade_metrics(r) -> dict:
+    """Derive win-rate/expectancy/profit-factor/avg-win-loss from a BacktestResult."""
+    buys = [t for t in r.trades if t.side == "BUY"]
+    sells = [t for t in r.trades if "SELL" in t.side]
+    n_rt = min(len(buys), len(sells))
+    win_pct, loss_pct, gross_win, gross_loss = [], [], 0.0, 0.0
+    for b, s in zip(buys[:n_rt], sells[:n_rt]):
+        pnl = s.value - b.value
+        pct = (pnl / b.value * 100) if b.value > 0 else 0.0
+        if pnl > 0:
+            win_pct.append(pct); gross_win += pnl
+        else:
+            loss_pct.append(pct); gross_loss += abs(pnl)
+    avg_win = sum(win_pct) / len(win_pct) if win_pct else 0.0
+    avg_loss = sum(loss_pct) / len(loss_pct) if loss_pct else 0.0
+    wr_frac = (r.win_rate_pct / 100.0) if r.win_rate_pct else 0.0
+    expectancy = wr_frac * avg_win + (1 - wr_frac) * avg_loss
+    pf = (gross_win / gross_loss) if gross_loss > 0 else (None if not win_pct else None)
+    return {
+        "trades": r.total_trades,
+        "round_trips": n_rt,
+        "win_rate_pct": round(r.win_rate_pct, 1),
+        "avg_win_pct": round(avg_win, 2),
+        "avg_loss_pct": round(avg_loss, 2),
+        "expectancy_pct": round(expectancy, 3),
+        "total_return_pct": round(r.total_return_pct, 2),
+        "profit_factor": round(pf, 2) if pf is not None else None,
+        "max_drawdown_pct": round(r.max_drawdown_pct, 2),
+    }
+
+
+@router.get("/scanner-calibrate/{symbol}/{strategy_type}")
+def scanner_calibrate(
+    symbol: str,
+    strategy_type: str,
+    period: str = "5y",
+    initial_capital: float = 10_000.0,
+):
+    """
+    Optimize-Filters-and-save for a scanner strategy. Grid-searches (coordinate
+    descent) the entry PARAMS each rule actually gates on — pullback proximity +
+    RSI floor + reclaim wick for pullback_ema50, RSI(2) depth + ATR skip for rsi2,
+    volume + RSI band for the crossover/squeeze strats, panic depth + wick for
+    vix_spike — maximising per-trade expectancy with a >=40% trade-survival floor.
+    Saves only if the winner materially beats the factory baseline on win-rate OR
+    expectancy OR total return. The rule logic is untouched — only params change.
+
+    This replaces the earlier indicator-separation heuristic, which analysed
+    generic indicators the scanner rules don't use and failed on high-win-rate
+    strategies that have too few losers to learn from.
+    """
+    from app.services.scanner.scanner_service import _make_generic_configs
+    from app.services.backtest.scanner_profiles import (
+        ScannerParamProfile, coordinate_descent_search, grid_for, save_profile,
+    )
+    from app.services.market_data.provider import get_ohlcv
+    from datetime import datetime
+
+    sym = symbol.upper().strip()
+    stype = (strategy_type or "").strip().lower()
+    if stype not in _SCANNER_CALIBRATABLE:
+        raise HTTPException(400, f"strategy_type '{strategy_type}' is not calibratable. "
+                                 f"Valid: {sorted(_SCANNER_CALIBRATABLE)}")
+
+    # cfg.params already reflects current LIVE behaviour (factory defaults plus any
+    # previously-saved override) — the right baseline for "can we do better?".
+    cfg = next((c for c in _make_generic_configs(sym) if c.type == stype), None)
+    if cfg is None:
+        raise HTTPException(404, f"strategy_type '{stype}' not in generic set")
+    if not grid_for(stype):
+        raise HTTPException(400, f"No tunable param grid defined for '{stype}'")
+
+    try:
+        df = get_ohlcv(sym, period=period)
+        if df is None or df.empty or len(df) < 120:
+            raise HTTPException(400, f"Not enough data for {sym}")
+
+        base_params = dict(cfg.params)
+
+        # ── Baseline ──────────────────────────────────────────────────────────
+        baseline = run_backtest(
+            strategy_name=cfg.name, symbol=sym, strategy_type=stype,
+            params=base_params, period=period, initial_capital=initial_capital,
+            quantity=0, df=df,
+        )
+        baseline_m = _trade_metrics(baseline)
+        baseline_rt = baseline_m["round_trips"]
+        if baseline_rt < 6:
+            raise HTTPException(400, f"Not enough trades to calibrate "
+                                     f"({baseline_rt} round-trips, need >= 6)")
+
+        # ── Coordinate-descent search over the real gating params ───────────────
+        # Objective: per-trade expectancy. Survival floor: a combo must keep >=40%
+        # of the baseline round-trips, else it's disqualified (score = -inf) so we
+        # never "improve" returns by simply taking far fewer (lucky) trades.
+        MIN_SURVIVAL = 0.40
+        MIN_RT = 5
+        NEG = float("-inf")
+
+        def _evaluate(params):
+            r = run_backtest(
+                strategy_name=cfg.name, symbol=sym, strategy_type=stype,
+                params=params, period=period, initial_capital=initial_capital,
+                quantity=0, df=df,
+            )
+            m = _trade_metrics(r)
+            rt = m["round_trips"]
+            survival = (rt / baseline_rt) if baseline_rt > 0 else 0.0
+            if rt < MIN_RT or survival < MIN_SURVIVAL:
+                return NEG, m
+            return m["expectancy_pct"], m
+
+        overrides, best_score, best_m, n_evals = coordinate_descent_search(
+            stype, base_params, _evaluate, rounds=2,
+        )
+
+        # If search found nothing distinct from baseline, report cleanly.
+        if not overrides:
+            return {
+                "symbol": sym, "strategy_type": stype, "saved": False,
+                "skip_reason": (f"Searched {n_evals} param combos; the factory "
+                                f"defaults already give the best expectancy for "
+                                f"{sym} over {period} — no change improves it."),
+                "proposed_overrides": {}, "evals": n_evals,
+                "comparison": {"baseline": baseline_m, "filtered": baseline_m,
+                               "survival_rate_pct": 100.0, "improved_by": []},
+            }
+
+        filtered_m = best_m
+        survival = (filtered_m["round_trips"] / baseline_rt) if baseline_rt > 0 else 0.0
+
+        # ── Save gate (same multi-metric thresholds as Perplexity) ──────────────
+        WR_GAIN_MIN, EXP_GAIN_MIN, RET_GAIN_MIN = 3.0, 0.05, 2.0
+        wr_improved  = filtered_m["win_rate_pct"]     >= baseline_m["win_rate_pct"]     + WR_GAIN_MIN
+        exp_improved = filtered_m["expectancy_pct"]   >= baseline_m["expectancy_pct"]   + EXP_GAIN_MIN
+        ret_improved = filtered_m["total_return_pct"] >= baseline_m["total_return_pct"] + RET_GAIN_MIN
+        has_survival = survival >= MIN_SURVIVAL
+        improved_by = [m for m, ok in (("win_rate", wr_improved), ("expectancy", exp_improved),
+                                       ("total_return", ret_improved)) if ok]
+        is_improvement = has_survival and bool(improved_by)
+
+        comparison = {
+            "baseline": baseline_m, "filtered": filtered_m,
+            "survival_rate_pct": round(survival * 100, 1),
+            "improved_by": improved_by,
+        }
+
+        if not is_improvement:
+            reason = (f"Best of {n_evals} param combos "
+                      f"({', '.join(f'{k}={v}' for k, v in overrides.items())}) "
+                      f"didn't materially beat the factory defaults "
+                      f"(win rate {baseline_m['win_rate_pct']:.1f}%->{filtered_m['win_rate_pct']:.1f}%, "
+                      f"expectancy {baseline_m['expectancy_pct']:.2f}%->{filtered_m['expectancy_pct']:.2f}%, "
+                      f"return {baseline_m['total_return_pct']:.1f}%->{filtered_m['total_return_pct']:.1f}%). "
+                      f"Defaults kept.")
+            return {
+                "symbol": sym, "strategy_type": stype, "saved": False,
+                "skip_reason": reason, "proposed_overrides": overrides,
+                "evals": n_evals, "comparison": comparison,
+            }
+
+        profile = ScannerParamProfile(
+            symbol=sym, strategy_type=stype,
+            calibrated_at=datetime.utcnow().strftime("%Y-%m-%d"),
+            n_trades=filtered_m["round_trips"],
+            n_wins=int(round(filtered_m["round_trips"] * filtered_m["win_rate_pct"] / 100)),
+            win_rate_pct=filtered_m["win_rate_pct"],
+            param_overrides=overrides,
+            survival_rate_pct=round(survival * 100, 1),
+            improved_by=improved_by,
+            notes=f"grid-search winner from {n_evals} combos vs {baseline_rt} baseline round-trips over {period}",
+        )
+        save_profile(profile)
+        return {
+            "symbol": sym, "strategy_type": stype, "saved": True,
+            "param_overrides": overrides, "comparison": comparison,
+            "evals": n_evals, "calibrated_at": profile.calibrated_at,
+            "n_trades": profile.n_trades, "n_wins": profile.n_wins,
+            "win_rate_pct": profile.win_rate_pct,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+@router.get("/scanner-profiles")
+def list_scanner_profiles(strategy_type: Optional[str] = None):
+    """List saved scanner calibration profiles (optionally filtered by type)."""
+    from app.services.backtest.scanner_profiles import list_profiles
+    from dataclasses import asdict
+    return [asdict(p) for p in list_profiles(strategy_type)]
+
+
+@router.get("/scanner-profiles/{symbol}/{strategy_type}")
+def get_scanner_profile(symbol: str, strategy_type: str):
+    """Get one saved scanner profile, or {} if none exists."""
+    from app.services.backtest.scanner_profiles import load_profile
+    from dataclasses import asdict
+    p = load_profile(strategy_type.strip().lower(), symbol.upper())
+    return asdict(p) if p else {}
+
+
+@router.delete("/scanner-profiles/{symbol}/{strategy_type}")
+def delete_scanner_profile(symbol: str, strategy_type: str):
+    """Delete a saved scanner calibration profile (reverts to factory defaults)."""
+    from app.services.backtest.scanner_profiles import delete_profile
+    deleted = delete_profile(strategy_type.strip().lower(), symbol.upper())
+    return {"deleted": deleted}
+
+
 @router.get("/strategies")
 def list_backtest_strategies(new_only: bool = False):
     """

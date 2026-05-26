@@ -43,6 +43,20 @@ def list_strategies():
     return [{"name": s.name, "enabled": s.enabled} for s in PERPLEXITY_STRATEGIES]
 
 
+@router.get("/regime/{market}")
+def momentum_regime(market: str = "us"):
+    """Current momentum regime for a market (``us`` or ``india``).
+
+    Tells the UI whether momentum strategies should be firing — India gates on
+    Nifty 50 / India VIX, US on SPY / ^VIX.
+    """
+    from app.services.market_regime_advanced import get_momentum_regime
+    snap = get_momentum_regime(market="india" if market.lower() == "india" else "us")
+    d = snap.as_dict()
+    d["market"] = "india" if market.lower() == "india" else "us"
+    return d
+
+
 @router.post("/strategies/{name}/toggle")
 def toggle_strategy(name: str, enabled: bool = True):
     s = _STRATEGY_MAP.get(name)
@@ -588,6 +602,10 @@ def _apply_profile_to_config(strategy_name: str, config: dict, profile) -> None:
     elif strategy_name == "Fib_Pullback_Support":
         config["filter_lower_wick_min"] = profile.lower_wick_min
         config["filter_vol_min"]        = profile.vol_min
+        config["filter_body_max"]       = profile.body_max
+    elif strategy_name == "RSI_Swing_Reversal":
+        config["filter_vol_min"]      = profile.vol_min
+        config["filter_swing_rsi_min"] = profile.swing_rsi_min
 
 
 def _profile_thresholds_dict(strategy_name: str, profile) -> dict:
@@ -608,7 +626,10 @@ def _profile_thresholds_dict(strategy_name: str, profile) -> dict:
             "ema_dist_pct_min": profile.ema_dist_pct_min,
         }
     if strategy_name == "Fib_Pullback_Support":
-        return {"lower_wick_min": profile.lower_wick_min, "vol_min": profile.vol_min}
+        return {"lower_wick_min": profile.lower_wick_min, "vol_min": profile.vol_min,
+                "body_max": profile.body_max}
+    if strategy_name == "RSI_Swing_Reversal":
+        return {"vol_min": profile.vol_min, "swing_rsi_min": profile.swing_rsi_min}
     return {}
 
 
@@ -668,6 +689,7 @@ def auto_calibrate(
                                              "bb_pct":         s.bb_pct,
                                              "atr_pct":        s.atr_pct,
                                              "lower_wick_pct": s.lower_wick_pct,
+                                             "body_pct":       s.body_pct,
                                              "ema_spread_pct": s.ema_spread_pct,
                                              "range_atr_ratio":s.range_atr_ratio,
                                              "bb_depth_pct":   s.bb_depth_pct}
@@ -688,7 +710,52 @@ def auto_calibrate(
         filtered_wr      = r_filtered.win_rate_pct
         filtered_trades  = r_filtered.total_trades
         survival_rate    = filtered_trades / baseline_trades if baseline_trades > 0 else 0.0
-        is_improvement   = (filtered_wr >= baseline_wr + 3.0) and (survival_rate >= 0.40)
+
+        # ── Save gate: filters must EARN their place ──────────────────────────────────
+        # A filter is worth saving if it materially improves EITHER win rate OR
+        # profitability (a filter can lift expectancy/return by cutting losers even
+        # when win rate barely moves), AND it keeps enough trades to be meaningful.
+        # All three "improvement" measures are compared on the SAME in-sample data.
+        WR_GAIN_MIN   = 3.0    # percentage points
+        EXP_GAIN_MIN  = 0.05   # +0.05pp expectancy per trade
+        RET_GAIN_MIN  = 2.0    # +2pp total return over the window
+        wr_improved   = (filtered_wr >= baseline_wr + WR_GAIN_MIN)
+        exp_improved  = (r_filtered.expectancy_pct >= result.expectancy_pct + EXP_GAIN_MIN)
+        ret_improved  = (r_filtered.total_return_pct >= result.total_return_pct + RET_GAIN_MIN)
+        has_survival  = (survival_rate >= 0.40)
+        is_improvement = has_survival and (wr_improved or exp_improved or ret_improved)
+
+        def _pf(v):  # profit_factor can be None when there are no losing trades
+            return round(v, 2) if isinstance(v, (int, float)) else None
+
+        # Baseline-vs-filtered comparison, returned in BOTH branches so the UI can
+        # always show what the filter does — even when we decline to save it.
+        comparison = {
+            "baseline": {
+                "trades":        result.total_trades,
+                "win_rate_pct":  round(result.win_rate_pct, 1),
+                "avg_win_pct":   round(result.avg_win_pct, 2),
+                "avg_loss_pct":  round(result.avg_loss_pct, 2),
+                "expectancy_pct": round(result.expectancy_pct, 3),
+                "total_return_pct": round(result.total_return_pct, 2),
+                "profit_factor": _pf(result.profit_factor),
+                "max_drawdown_pct": round(result.max_drawdown_pct, 2),
+            },
+            "filtered": {
+                "trades":        r_filtered.total_trades,
+                "win_rate_pct":  round(filtered_wr, 1),
+                "avg_win_pct":   round(r_filtered.avg_win_pct, 2),
+                "avg_loss_pct":  round(r_filtered.avg_loss_pct, 2),
+                "expectancy_pct": round(r_filtered.expectancy_pct, 3),
+                "total_return_pct": round(r_filtered.total_return_pct, 2),
+                "profit_factor": _pf(r_filtered.profit_factor),
+                "max_drawdown_pct": round(r_filtered.max_drawdown_pct, 2),
+            },
+            "survival_rate_pct": round(survival_rate * 100, 1),
+            "improved_by": [m for m, ok in
+                            (("win_rate", wr_improved), ("expectancy", exp_improved),
+                             ("total_return", ret_improved)) if ok],
+        }
 
         # ── Optional walk-forward verification (informational — does NOT block saving) ──
         if verify_wf and len(df) >= 500:
@@ -726,12 +793,19 @@ def auto_calibrate(
         # WFE is informational — it tells you if the filter also works OOS,
         # but low OOS trade counts make WFE unreliable as a gate.
         if not is_improvement:
-            reason = (
-                f"Filters did not improve win rate enough on this data "
-                f"(filtered WR={filtered_wr:.1f}% vs baseline {baseline_wr:.1f}%, "
-                f"need +3pp; survival={survival_rate:.0%}, need ≥40%). "
-                f"The strategy already performs well on this symbol — no filtering needed."
-            )
+            if not has_survival:
+                reason = (
+                    f"Filters kept only {survival_rate:.0%} of trades (need ≥40%) — too aggressive. "
+                    f"The thresholds would over-prune this symbol's history."
+                )
+            else:
+                reason = (
+                    f"Filters didn't materially improve any metric on this data "
+                    f"(win rate {baseline_wr:.1f}%→{filtered_wr:.1f}%, need +{WR_GAIN_MIN:.0f}pp; "
+                    f"expectancy {result.expectancy_pct:.2f}%→{r_filtered.expectancy_pct:.2f}%; "
+                    f"return {result.total_return_pct:.1f}%→{r_filtered.total_return_pct:.1f}%). "
+                    f"The strategy already performs well on this symbol — no filtering needed."
+                )
             return {
                 "symbol": profile.symbol,
                 "strategy": profile.strategy,
@@ -743,6 +817,7 @@ def auto_calibrate(
                 "filtered_trades": filtered_trades,
                 "survival_rate_pct": round(survival_rate * 100, 1),
                 "thresholds": _profile_thresholds_dict(strategy_name, profile),
+                "comparison": comparison,
                 "verification": {
                     "wfe_before":      profile.wfe_before,
                     "wfe_after":       profile.wfe_after,
@@ -775,6 +850,10 @@ def auto_calibrate(
                 "win_bb_pos_mean":    profile.win_bb_pos_mean,
                 "loss_bb_pos_mean":   profile.loss_bb_pos_mean,
             },
+            "filtered_win_rate_pct": filtered_wr,
+            "filtered_trades": filtered_trades,
+            "survival_rate_pct": round(survival_rate * 100, 1),
+            "comparison": comparison,
             "verification": {
                 "wfe_before":       profile.wfe_before,
                 "wfe_after":        profile.wfe_after,

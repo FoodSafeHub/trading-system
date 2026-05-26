@@ -22,8 +22,9 @@ from _theme import apply_theme  # noqa: E402
 apply_theme("Perplexity Strategies")
 st.title("Perplexity Swing Strategies")
 st.caption(
-    "8 swing trading strategies — EMA mean reversion, MA crossover, consolidation breakout, "
-    "BB mean reversion, Fibonacci pullback, RSI swing reversal, Supertrend, and BB breakout. "
+    "12 swing & momentum strategies — EMA mean reversion, MA crossover, consolidation breakout, "
+    "BB mean reversion, Fibonacci pullback, RSI swing reversal, Supertrend, BB breakout, plus four "
+    "daily-candle momentum setups (engulfing/volume surge, NR7 breakout, 3-bar push, hammer/star). "
     "Daily bars, 3–20 day holds. Scan the full market or analyse a single symbol."
 )
 
@@ -61,6 +62,24 @@ STRATEGY_DESCRIPTIONS = {
                               "with RSI 52–80 (momentum confirmation) and volume ≥ 1.2×. "
                               "Stop: BB midline. Target: upper band + one full band width. Max hold: 12 bars. "
                               "Best on: TSLA, NVDA, AMZN — volatile names with strong breakout momentum.",
+    # ── Daily-candle momentum strategies (gated by the momentum regime: BULL_MOMENTUM / ──
+    #    BULL_CAUTION allow longs, BEAR_MOMENTUM allows shorts). ATR-based stops/targets. ──
+    "Daily_Engulfing_Volume":"Daily bullish/bearish engulfing candle confirmed by a volume surge ≥ 1.5× the "
+                              "20-day average. Long in BULL momentum, short in BEAR momentum. "
+                              "Stop: prior bar low − 0.1×ATR (capped at 1.5×ATR). Target: entry + 3×ATR. "
+                              "Only fires if resulting R:R ≥ 1.8. Best on: liquid names with clean reversal candles.",
+    "Daily_NR_Breakout":     "NR7 (narrowest range in 7 bars) compression on the prior day, then a breakout above "
+                              "that bar's high (or below its low) on volume ≥ 1.3×. Long/short by momentum regime. "
+                              "Stop: prior bar low/high − 0.1×ATR (capped 1.5×ATR). Target: entry + 3.5×ATR. "
+                              "R:R ≥ 2.0 required. Best on: coiled names that compress then expand — TSLA, META.",
+    "Daily_Three_Bar_Push":  "Three consecutive higher-closing (or lower-closing) daily bars — a momentum thrust — "
+                              "on volume ≥ 1.2×. Long in BULL momentum, short in BEAR momentum. "
+                              "Stop: 3-bar swing low/high − 0.1×ATR (capped 2×ATR). Target: entry + 4×ATR. "
+                              "R:R ≥ 1.8 required. Best on: trending names making clean directional runs.",
+    "Daily_Hammer_Star":     "Hammer (long lower tail ≥ 2× body, after a 3-bar decline, RSI < 35) for longs, or "
+                              "shooting star (long upper tail, after a 3-bar advance, RSI > 65) for shorts — a "
+                              "candlestick reversal confirmed by volume ≥ 1.1× and the momentum regime. "
+                              "ATR stop below/above the tail, ATR-multiple target. Best on: liquid names at exhaustion.",
 }
 
 SYMBOLS = ["SPY", "QQQ", "IWM", "AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "META", "GOOGL"]
@@ -167,7 +186,7 @@ tab_signals, tab_scanner, tab_sizer, tab_backtest, tab_compare, tab_portfolio, t
 # ══════════════════════════════════════════════════════════════
 with tab_signals:
     st.subheader("Current Signals")
-    st.caption("Runs all 5 strategies on the latest market data — no trade is placed, just analysis.")
+    st.caption("Runs all 12 strategies on the latest market data — no trade is placed, just analysis.")
 
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -271,7 +290,7 @@ with tab_scanner:
 
     st.info(
         "**How to use:** Paste tickers you want to watch — one per line or comma-separated. "
-        "The scanner runs all 8 strategies and shows only signals that pass your confidence threshold. "
+        "The scanner runs all 12 strategies and shows only signals that pass your confidence threshold. "
         "Signals from this scanner can be auto-executed by assigning them in the **Strategy** page.",
         icon="ℹ️",
     )
@@ -776,11 +795,11 @@ with tab_compare:
     with cmp_btn2:
         run_wf_cmp = st.button("🔀 Compare Walk-Forward (all strategies)", key="px_run_wf_cmp",
                                 use_container_width=True,
-                                help="Runs rolling walk-forward for all 5 strategies on this symbol. "
+                                help="Runs rolling walk-forward for all 12 strategies on this symbol. "
                                      "Shows which strategy has real edge right now vs which is overfit.")
 
     if run_cmp:
-        with st.spinner(f"Running all 5 strategies on {cmp_symbol} over {cmp_period}..."):
+        with st.spinner(f"Running all 12 strategies on {cmp_symbol} over {cmp_period}..."):
             try:
                 results = api.perplexity_backtest_all(cmp_symbol, period=cmp_period,
                                                       initial_capital=cmp_capital,
@@ -790,7 +809,7 @@ with tab_compare:
                 st.error(f"Comparison failed: {e}")
 
     if run_wf_cmp:
-        with st.spinner(f"Running walk-forward for all 5 strategies on {cmp_symbol} (10y, 3y IS / 1y OOS)... this takes ~2 min"):
+        with st.spinner(f"Running walk-forward for all 12 strategies on {cmp_symbol} (10y, 3y IS / 1y OOS)... this takes ~2 min"):
             try:
                 wf_results = api.perplexity_walkforward_all(cmp_symbol, period="10y",
                                                              train_years=3.0, test_years=1.0, step_years=1.0,
@@ -1883,7 +1902,7 @@ with tab_analysis:
     compare_btn = st.button("📊 Compare All Strategies", key="compare_strats")
 
     if compare_btn and an_symbol:
-        with st.spinner(f"Running all 5 strategies on {an_symbol} ({an_period})…"):
+        with st.spinner(f"Running all 12 strategies on {an_symbol} ({an_period})…"):
             compare_rows = []
             for sname in STRATEGY_DESCRIPTIONS.keys():
                 try:
@@ -2087,7 +2106,7 @@ with tab_analysis:
 
         # ── Optimize & save profile ───────────────────────────────
         if run_optimize_btn:
-            with st.spinner(f"Optimizing filters and saving profile for {an_strategy}/{an_symbol}..."):
+            with st.spinner(f"Optimizing filters for {an_strategy}/{an_symbol}..."):
                 try:
                     cal = api.perplexity_calibrate(
                         an_strategy, an_symbol,
@@ -2095,9 +2114,9 @@ with tab_analysis:
                         position_pct=an_pos_pct,
                         verify_wf=True,
                     )
+                    thr = cal.get("thresholds", {})
+                    ver = cal.get("verification", {})
                     if cal.get("saved"):
-                        thr = cal.get("thresholds", {})
-                        ver = cal.get("verification", {})
                         base_wr    = cal.get("win_rate_pct", 0)
                         filt_wr    = cal.get("filtered_win_rate_pct", base_wr)
                         filt_trades= cal.get("filtered_trades", cal.get("n_trades", 0))
@@ -2108,15 +2127,6 @@ with tab_analysis:
                             f"Trades kept: {filt_trades} ({survival:.0f}% survival)  |  "
                             f"OOS verified: {'✅' if ver.get('verified') else '—'}"
                         )
-                        if thr:
-                            st.markdown("**Applied entry filters:**")
-                            st.json(thr)
-                        if ver.get("wfe_before") is not None:
-                            vc1, vc2, vc3 = st.columns(3)
-                            vc1.metric("WFE Before", f"{ver['wfe_before']:.3f}" if ver.get("wfe_before") else "—")
-                            vc2.metric("WFE After",  f"{ver['wfe_after']:.3f}"  if ver.get("wfe_after")  else "—",
-                                       delta="improved" if ver.get("verified") else "informational only")
-                            vc3.metric("OOS CAGR After", f"{ver.get('oos_cagr_after', 0):.1f}%")
                     else:
                         st.warning(
                             cal.get("skip_reason") or
@@ -2124,6 +2134,57 @@ with tab_analysis:
                             "The strategy already performs well on this symbol — no filtering needed. "
                             "Try a longer period (8y/10y) for more historical trades."
                         )
+
+                    # ── With / without filters comparison (always shown) ──────
+                    cmp = cal.get("comparison") or {}
+                    if cmp.get("baseline") and cmp.get("filtered"):
+                        b, f = cmp["baseline"], cmp["filtered"]
+                        improved = set(cmp.get("improved_by") or [])
+                        st.markdown("##### With vs without filters")
+                        if improved:
+                            st.caption("Improved on: " + ", ".join(
+                                {"win_rate": "win rate", "expectancy": "expectancy",
+                                 "total_return": "total return"}.get(m, m) for m in improved))
+
+                        def _d(key, suffix="", pp=False):
+                            bv, fv = b.get(key), f.get(key)
+                            if bv is None or fv is None:
+                                return "—", "—", ""
+                            delta = fv - bv
+                            unit = "pp" if pp else suffix
+                            arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "·")
+                            return f"{bv:g}{suffix}", f"{fv:g}{suffix}", f"{arrow} {delta:+.2f}{unit}"
+
+                        import pandas as _pd
+                        rows = []
+                        for label, key, suf, is_pp in [
+                            ("Trades",        "trades",           "",  False),
+                            ("Win rate",      "win_rate_pct",     "%", True),
+                            ("Avg win",       "avg_win_pct",      "%", True),
+                            ("Avg loss",      "avg_loss_pct",     "%", True),
+                            ("Expectancy",    "expectancy_pct",   "%", True),
+                            ("Total return",  "total_return_pct", "%", True),
+                            ("Profit factor", "profit_factor",    "",  False),
+                            ("Max drawdown",  "max_drawdown_pct", "%", True),
+                        ]:
+                            bs, fs, dl = _d(key, suf, is_pp)
+                            rows.append({"Metric": label, "Without filters": bs,
+                                         "With filters": fs, "Δ": dl})
+                        st.dataframe(_pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                        st.caption(
+                            f"Filter keeps {cmp.get('survival_rate_pct','—')}% of trades. "
+                            "Δ is filtered minus baseline; for max drawdown a lower (more negative-toward-zero) value is better."
+                        )
+
+                    if cal.get("saved") and thr:
+                        with st.expander("Applied entry filters (thresholds)", expanded=False):
+                            st.json(thr)
+                    if ver.get("wfe_before") is not None:
+                        vc1, vc2, vc3 = st.columns(3)
+                        vc1.metric("WFE Before", f"{ver['wfe_before']:.3f}" if ver.get("wfe_before") else "—")
+                        vc2.metric("WFE After",  f"{ver['wfe_after']:.3f}"  if ver.get("wfe_after")  else "—",
+                                   delta="improved" if ver.get("verified") else "informational only")
+                        vc3.metric("OOS CAGR After", f"{ver.get('oos_cagr_after', 0):.1f}%")
                 except Exception as e:
                     st.error(f"Optimization failed: {e}")
 

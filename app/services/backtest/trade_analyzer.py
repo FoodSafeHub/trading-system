@@ -366,18 +366,25 @@ def find_patterns(snapshots: List[TradeSnapshot]) -> List[PatternInsight]:
         # Derive direction and suggested filter
         direction = "higher_is_better" if w_mean > l_mean else "lower_is_better"
 
-        # Suggested filter: use win distribution's middle 60% (20th–80th percentile)
-        w_sorted = sorted(w_vals)
-        n = len(w_sorted)
-        p20 = w_sorted[max(0, int(n * 0.20))]
-        p80 = w_sorted[min(n - 1, int(n * 0.80))]
+        # Suggested filter = the DECISION BOUNDARY between the two distributions,
+        # not a tail of the winners. A bare win-percentile (the old approach) could
+        # land *past* the loser cluster — e.g. ema_dist_pct winners avg -1.06 but
+        # their 20th pct reaches -3.1, below the -2.8 loss avg, so "≥ -3.1" admits
+        # every loser and filters nothing. Instead anchor on the midpoint of the
+        # means, then clamp so the cut never sits on the wrong side of the losers
+        # (a useful "higher→win" filter must exclude the typical loser).
+        midpoint = (w_mean + l_mean) / 2.0
 
         if direction == "higher_is_better":
-            suggestion = f"Require {label} ≥ {p20:.2f} (wins avg {w_mean:.2f} vs losses {l_mean:.2f})"
-            smin, smax = p20, None
+            # cut between the means, but no looser than the loss mean
+            thresh = max(midpoint, l_mean)
+            suggestion = f"Require {label} ≥ {thresh:.2f} (wins avg {w_mean:.2f} vs losses {l_mean:.2f})"
+            smin, smax = thresh, None
         else:
-            suggestion = f"Require {label} ≤ {p80:.2f} (wins avg {w_mean:.2f} vs losses {l_mean:.2f})"
-            smin, smax = None, p80
+            # cut between the means, but no looser than the loss mean
+            thresh = min(midpoint, l_mean)
+            suggestion = f"Require {label} ≤ {thresh:.2f} (wins avg {w_mean:.2f} vs losses {l_mean:.2f})"
+            smin, smax = None, thresh
 
         insights.append(PatternInsight(
             indicator=key,
