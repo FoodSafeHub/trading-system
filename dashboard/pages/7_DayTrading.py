@@ -44,7 +44,7 @@ from _broker_routing import render_broker_routing_toggle  # noqa: E402
 apply_theme("Day Trading")
 st.title("Day Trading")
 st.caption(
-    "7 intraday strategies on 5m and 15m bars. "
+    f"{len(ALL_STRATEGIES)} intraday strategies on 5m and 15m bars. "
     "All signals expire at market close. No overnight holds."
 )
 
@@ -1085,7 +1085,7 @@ with tab_compare:
     ca_capital = ca3.number_input("Capital ($)", value=10_000, step=1_000, key="ca_capital")
 
     if st.button("▶ Compare All Strategies", key="run_compare"):
-        with st.spinner("Running all 5 strategies…"):
+        with st.spinner(f"Running all {len(ALL_STRATEGIES)} strategies…"):
             results = _cached_backtest_all(ca_symbol, ca_period, float(ca_capital))
 
         if results:
@@ -1116,7 +1116,13 @@ with tab_compare:
             df_compare = df_compare.rename(columns=rename)
             st.dataframe(df_compare, use_container_width=True, hide_index=True)
         else:
-            st.info("No results returned.")
+            st.warning(
+                f"No results for **{ca_symbol}** over **{ca_period}**. "
+                "Most often this means no intraday bars were returned for that "
+                "window — Indian (NSE) symbols are served by Upstox, which needs "
+                "a current login (token expires daily ~03:30 IST). Try a shorter "
+                "period or re-login at /upstox/login, then run again."
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

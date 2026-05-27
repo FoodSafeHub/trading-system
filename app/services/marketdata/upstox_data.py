@@ -50,6 +50,16 @@ _INTERVAL_MAP = {
     "1wk": ("weeks", "1"),
 }
 
+# Upstox v3 caps the date span of a SINGLE historical request for intraday
+# intervals — a one-shot 90-day 5m request returns an empty candle list. The
+# deeper history exists; it just has to be pulled in chunks and stitched. Map
+# each interval to the largest span (days) we'll request per call. `None` = no
+# chunking (daily/weekly have effectively unlimited span).
+_MAX_SPAN_DAYS = {
+    "1m": 28, "5m": 28, "15m": 28, "30m": 28, "1h": 90,
+    "1d": None, "1wk": None,
+}
+
 # period string → how many days of history to request.
 # NOTE: every period the app can request must be listed. A missing key falls
 # back to 366 days, which silently truncates long windows — e.g. a "10y"
@@ -208,28 +218,44 @@ def fetch_bars(symbol: str, interval: str = "1d", period: str = "1y") -> pd.Data
     unit, ivl = unit_interval
 
     to_date = datetime.now(tz=IST).date()
-    from_date = to_date - timedelta(days=_PERIOD_DAYS.get(period, 366))
-    # Path order per v3 docs: /{key}/{unit}/{interval}/{to_date}/{from_date}
-    path = (
-        f"/v3/historical-candle/{urllib.parse.quote(key, safe='')}"
-        f"/{unit}/{ivl}/{to_date.isoformat()}/{from_date.isoformat()}"
-    )
-    try:
-        with httpx.Client(timeout=30) as client:
-            resp = client.get(f"{UPSTOX_API_BASE}{path}", headers=_headers())
-            if resp.status_code in (401, 403):
-                logger.warning("[upstox] historical auth rejected (%s) — re-login at /upstox/login", resp.status_code)
-                return pd.DataFrame()
-            resp.raise_for_status()
-            candles = (resp.json().get("data", {}) or {}).get("candles", []) or []
-    except Exception as exc:
-        logger.debug("[upstox] historical fetch failed %s %s: %s", symbol, interval, exc)
-        return pd.DataFrame()
+    start_date = to_date - timedelta(days=_PERIOD_DAYS.get(period, 366))
+
+    # Upstox caps the span of a single intraday request. Walk backwards from
+    # `to_date` in <= max_span chunks and stitch — a one-shot 90d 5m request
+    # otherwise returns an empty list even though the deeper history exists.
+    max_span = _MAX_SPAN_DAYS.get(interval)
+    candles: list = []
+    with httpx.Client(timeout=30) as client:
+        chunk_to = to_date
+        while chunk_to >= start_date:
+            chunk_from = start_date if max_span is None else max(start_date, chunk_to - timedelta(days=max_span))
+            # Path order per v3 docs: /{key}/{unit}/{interval}/{to_date}/{from_date}
+            path = (
+                f"/v3/historical-candle/{urllib.parse.quote(key, safe='')}"
+                f"/{unit}/{ivl}/{chunk_to.isoformat()}/{chunk_from.isoformat()}"
+            )
+            try:
+                resp = client.get(f"{UPSTOX_API_BASE}{path}", headers=_headers())
+                if resp.status_code in (401, 403):
+                    logger.warning("[upstox] historical auth rejected (%s) — re-login at /upstox/login", resp.status_code)
+                    return pd.DataFrame()
+                resp.raise_for_status()
+                chunk = (resp.json().get("data", {}) or {}).get("candles", []) or []
+            except Exception as exc:
+                logger.debug("[upstox] historical fetch failed %s %s %s..%s: %s",
+                             symbol, interval, chunk_from, chunk_to, exc)
+                chunk = []
+            candles.extend(chunk)
+            if max_span is None or chunk_from <= start_date:
+                break
+            # Next chunk ends the day before this chunk started (no overlap).
+            chunk_to = chunk_from - timedelta(days=1)
 
     if not candles:
         return pd.DataFrame()
     # Each candle: [ts, open, high, low, close, volume, open_interest]
     df = pd.DataFrame(candles, columns=["ts", "Open", "High", "Low", "Close", "Volume", "OI"])
+    df = df.drop_duplicates(subset=["ts"])
     df["datetime"] = pd.to_datetime(df["ts"], utc=True).dt.tz_convert(IST)
     df = df.set_index("datetime").sort_index()[["Open", "High", "Low", "Close", "Volume"]]
     for c in df.columns:
