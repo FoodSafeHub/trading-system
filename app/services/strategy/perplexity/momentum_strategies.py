@@ -28,6 +28,7 @@ from app.services.market_regime_advanced import (
     MomentumRegime,
     get_momentum_regime,
 )
+from app.services.markets import is_india_symbol
 from app.services.strategy import candle_patterns as cp
 from app.services.strategy.perplexity.base import (
     PerplexitySignal,
@@ -37,9 +38,16 @@ from app.services.strategy.perplexity.base import (
 
 # ── Regime gating helpers ─────────────────────────────────────────────────────
 
-def _momentum_snapshot():
+def _momentum_snapshot(symbol: str | None = None):
+    """Regime snapshot for the symbol's home market.
+
+    India symbols gate on Nifty 50 / India VIX; everything else on SPY / ^VIX.
+    Picking the wrong benchmark silently corrupts the gate (e.g. an Indian
+    stock being suppressed because the US tape is weak), so route by symbol.
+    """
     try:
-        return get_momentum_regime()
+        market = "india" if (symbol and is_india_symbol(symbol)) else "us"
+        return get_momentum_regime(market=market)
     except Exception:
         return None
 
@@ -88,7 +96,7 @@ class PerpEngulfingVolumeSurge(PerplexityStrategy):
         if len(df) < cfg["min_data_bars"]:
             return self._hold(symbol, "not enough data")
 
-        snap = _momentum_snapshot()
+        snap = _momentum_snapshot(symbol)
         atr = cp.current_atr(df, 14)
         if atr <= 0:
             return self._hold(symbol, "ATR=0")
@@ -157,7 +165,7 @@ class PerpNarrowRangeBreakout(PerplexityStrategy):
         if len(df) < cfg["min_data_bars"]:
             return self._hold(symbol, "not enough data")
 
-        snap = _momentum_snapshot()
+        snap = _momentum_snapshot(symbol)
         is_compressed = (
             cp.is_nr7(df, -2) if cfg["use_nr7"] else (cp.is_nr4(df, -2) or cp.is_inside_bar(df, -2))
         )
@@ -238,7 +246,7 @@ class PerpThreeBarPush(PerplexityStrategy):
         if len(df) < cfg["min_data_bars"]:
             return self._hold(symbol, "not enough data")
 
-        snap = _momentum_snapshot()
+        snap = _momentum_snapshot(symbol)
         atr = cp.current_atr(df, 14)
         if atr <= 0:
             return self._hold(symbol, "ATR=0")
@@ -320,7 +328,7 @@ class PerpHammerShootingStar(PerplexityStrategy):
         if len(df) < cfg["min_data_bars"]:
             return self._hold(symbol, "not enough data")
 
-        snap = _momentum_snapshot()
+        snap = _momentum_snapshot(symbol)
         atr = cp.current_atr(df, 14)
         if atr <= 0:
             return self._hold(symbol, "ATR=0")

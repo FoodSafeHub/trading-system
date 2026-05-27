@@ -49,6 +49,30 @@ async def upstox_login_start():
     }
 
 
+@router.get("/resolve/{symbol}")
+async def upstox_resolve(symbol: str):
+    """Validate a free-typed NSE ticker against the Upstox instrument map.
+
+    Returns {symbol, tradeable, instrument_key}. Used by the dashboard so users
+    can backtest ANY of the ~2,466 NSE equities, not just the curated tiers.
+    """
+    from app.services.marketdata import upstox_instruments as instr
+    sym = (symbol or "").upper().strip()
+    key = instr.resolve(sym)
+    return {"symbol": sym, "tradeable": bool(key), "instrument_key": key}
+
+
+@router.get("/universe/{tier}")
+async def upstox_universe(tier: str):
+    """Return the symbol list for an India tier: nifty50/100/200/500 or nse_all."""
+    from app.services.scanner.universe_service import get_india_universe
+    tier = (tier or "").lower().strip()
+    if tier not in ("nifty50", "nifty100", "nifty200", "nifty500", "nse_all"):
+        raise HTTPException(status_code=400, detail=f"Unknown India tier {tier!r}")
+    syms = get_india_universe(tier)
+    return {"tier": tier, "count": len(syms), "symbols": syms}
+
+
 @router.get("/callback")
 async def upstox_callback(code: str | None = None, state: str | None = None, request: Request = None):
     """Step 2: Upstox redirects here with the auth code. Exchange + store it."""

@@ -32,6 +32,39 @@ market_status_bar()
 
 RUPEE = "₹"
 
+
+# ── India momentum regime banner ──────────────────────────────────────────────
+# Momentum strategies (Supertrend, BB breakout, pattern setups) only have an edge
+# when the Nifty itself is trending. This reads the Nifty-50/India-VIX regime so
+# you know at a glance whether to deploy momentum or stand down.
+def _momentum_banner() -> None:
+    snap = _safe(lambda: api.momentum_regime("india"), None)
+    if not snap:
+        return
+    regime = snap.get("regime", "")
+    idx = snap.get("spy_close")        # ^NSEI close (field name is generic)
+    sma200 = snap.get("spy_sma200")
+    vix = snap.get("vix")
+    breadth = snap.get("breadth_pct")
+    bits = []
+    if idx and sma200:
+        rel = "above" if idx > sma200 else "below"
+        bits.append(f"Nifty {idx:,.0f} {rel} 200-DMA {sma200:,.0f}")
+    if vix is not None:
+        bits.append(f"India VIX {vix:.1f}")
+    if breadth is not None:
+        bits.append(f"breadth {breadth:.0f}%")
+    detail = " · ".join(bits)
+    if regime == "bull_momentum":
+        st.success(f"🟢 **India momentum: ON** (full size) — {detail}")
+    elif regime == "bull_caution":
+        st.warning(f"🟡 **India momentum: CAUTION** (half size) — {detail}")
+    elif regime == "bear_momentum":
+        st.warning(f"🔴 **India momentum: SHORTS ONLY** — {detail}")
+    else:
+        st.info(f"⚪ **India momentum: OFF** (stand down — chop/transitional) — {detail}")
+
+
 # Nifty 50 — kept in sync with app.services.markets.NIFTY_50. UI-only copy so
 # the dashboard doesn't import backend modules.
 NIFTY_50 = [
@@ -55,6 +88,11 @@ def _safe(call, default):
 
 def _inr(v) -> str:
     return money(v, currency=RUPEE) if v is not None else "—"
+
+
+# Render the momentum banner now that _safe is defined (it sits visually at the
+# top of the page, just under the market status bar).
+_momentum_banner()
 
 
 # The 7 scanner strategy types (5 regime-aware + 2 legacy) — same set the US
@@ -232,10 +270,26 @@ tab_scan, tab_bt = st.tabs(["Nifty 50 Scanner", "Backtest (NSE)"])
 
 with tab_scan:
     st.caption(
-        "Scans the Nifty 50 for strategy signals — same engine as the US scanner, "
-        "but the universe is India and orders route to Zerodha. Prices in ₹."
+        "Scans an India universe for strategy signals — same engine as the US scanner, "
+        "but orders route to Zerodha. Data via Upstox. Prices in ₹. "
+        "Wider universes (Nifty 500 / All NSE) take longer and run in the background."
     )
-    sc1, sc2, sc3 = st.columns([1, 1, 1])
+    _UNIVERSE_LABELS = {
+        "nifty50":  "Nifty 50",
+        "nifty100": "Nifty 100",
+        "nifty200": "Nifty 200",
+        "nifty500": "Nifty 500",
+        "nse_all":  "All NSE (~2,466)",
+    }
+    su0, sc1, sc2, sc3 = st.columns([1.4, 1, 1, 1])
+    with su0:
+        scan_universe = st.selectbox(
+            "Universe", list(_UNIVERSE_LABELS),
+            format_func=lambda k: _UNIVERSE_LABELS[k],
+            key="india_scan_universe",
+            help="Curated Nifty tiers are fast and liquid. 'All NSE' sweeps every "
+                 "Upstox-resolvable equity — most thorough but slow and noisier.",
+        )
     with sc1:
         min_price = st.number_input("Min price (₹)", min_value=1.0, value=50.0, step=10.0,
                                     key="india_scan_minprice")
@@ -245,9 +299,10 @@ with tab_scan:
     with sc3:
         top_n = st.slider("Top N", 1, 20, 5, key="india_scan_topn")
 
-    if st.button("🔍 Scan Nifty 50", key="india_scan_btn", type="primary"):
+    _u_label = _UNIVERSE_LABELS[scan_universe]
+    if st.button(f"🔍 Scan {_u_label}", key="india_scan_btn", type="primary"):
         config = {
-            "universe": "nifty50",
+            "universe": scan_universe,
             "custom_symbols": [],
             "min_price": float(min_price),
             "min_avg_volume": 0.0,   # India volumes differ; don't over-filter
@@ -257,18 +312,19 @@ with tab_scan:
             "auto_trade_direction": "ANY",
             "batch_size": 20,
         }
-        with st.spinner("Scanning Nifty 50 (runs in background ~1–3 min)..."):
+        with st.spinner(f"Scanning {_u_label} (runs in background)..."):
             try:
                 api.scanner_run(config)
-                st.info("Nifty 50 scan started in the background. Click 'Refresh results' shortly.")
+                st.info(f"{_u_label} scan started in the background. Click 'Refresh results' shortly.")
             except Exception as e:
                 st.error(f"Scan failed to start: {e}")
 
     if st.button("🔄 Refresh results", key="india_scan_refresh"):
         st.rerun()
 
+    _india_universes = set(_UNIVERSE_LABELS)
     results = _safe(lambda: api.scanner_results(limit=50), []) or []
-    india_results = [r for r in results if (r.get("universe") or "") == "nifty50"]
+    india_results = [r for r in results if (r.get("universe") or "") in _india_universes]
     if india_results:
         rows = [{
             "Symbol":      r.get("symbol"),
@@ -309,15 +365,40 @@ with tab_bt:
 
     is_perplexity = bt_source.startswith("Perplexity")
 
-    # Controls row 2: symbol, period, capital, strategy picker (single mode).
+    # Controls row 2: symbol (free-type any NSE ticker), period, capital.
     bc1, bc2, bc3 = st.columns([2, 1, 1])
     with bc1:
-        bt_symbol = st.selectbox("NSE symbol", NIFTY_50, key="india_bt_sym")
+        bt_symbol = (st.text_input(
+            "NSE symbol", value="RELIANCE", key="india_bt_sym",
+            placeholder="Any NSE ticker — RELIANCE, DMART, IRCTC, POLYCAB …",
+            help="Type any of the ~2,466 NSE equities. Validated against Upstox. "
+                 "Quick-pick a Nifty 50 name below if you'd rather browse.",
+        ) or "").upper().strip()
     with bc2:
         bt_period = st.selectbox("Period", ["6mo", "1y", "2y", "5y"], index=1, key="india_bt_period")
     with bc3:
         bt_capital = st.number_input("Capital (₹)", min_value=1000, value=100000,
                                      step=10000, key="india_bt_capital")
+
+    # Quick-pick row: drop a Nifty 50 name into the box without typing.
+    qp = st.selectbox("…or quick-pick a Nifty 50 name", ["—"] + NIFTY_50,
+                      key="india_bt_quickpick")
+    if qp != "—" and qp != bt_symbol:
+        st.session_state["india_bt_sym"] = qp
+        st.rerun()
+
+    # Validate the ticker against the Upstox instrument map so a typo fails fast
+    # rather than producing an empty/garbage backtest.
+    if bt_symbol:
+        _res = _safe(lambda: api.upstox_resolve(bt_symbol), {}) or {}
+        if _res.get("tradeable"):
+            st.caption(f"✅ **{bt_symbol}** resolves on NSE (Upstox).")
+        else:
+            st.warning(
+                f"⚠️ **{bt_symbol}** didn't resolve in the Upstox NSE map. It may be "
+                "renamed/delisted, or the symbol differs from the NSE tradingsymbol. "
+                "The backtest will fall back to yfinance .NS, which may return no data."
+            )
 
     # Strategy picker only in single mode.
     single_strategy = None

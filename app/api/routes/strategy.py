@@ -18,6 +18,7 @@ from app.services.indicators.macd import compute_macd
 from app.services.indicators.rsi import compute_rsi
 from app.services.indicators.sma import compute_sma
 from app.services.market_data.provider import get_ohlcv, get_price_series
+from app.services.markets import is_india_symbol
 from app.services.strategy.engine import StrategyEngine, load_strategies_from_config
 from app.services.strategy.scheduler import get_scheduler_status, set_scheduler_system_flags
 
@@ -180,8 +181,13 @@ def update_scheduler_config(run_bollinger: bool | None = None, run_perplexity: b
 
 
 @router.get("/chart/{symbol}")
-def chart_data(symbol: str, period: str = "3mo"):
-    """Return OHLCV + indicators + fundamentals for charting."""
+def chart_data(symbol: str, period: str = "3mo", interval: str = "1d"):
+    """Return OHLCV + indicators + fundamentals for charting.
+
+    `interval` accepts 1d / 1wk / 1mo / 1h. yfinance handles all four natively;
+    Upstox (India) supports 1d/1wk/1h but not 1mo, so monthly India data is
+    fetched weekly and resampled to month-end bars here.
+    """
     import math
     import pandas as pd
     import yfinance as yf
@@ -200,7 +206,17 @@ def chart_data(symbol: str, period: str = "3mo"):
 
     try:
         symbol = symbol.upper()
-        df = get_ohlcv(symbol, period=period)
+        # India + monthly: provider's Upstox path has no 1mo unit. Fetch weekly
+        # and resample to calendar month-end OHLCV so the chart still works.
+        if interval == "1mo" and is_india_symbol(symbol):
+            wk = get_ohlcv(symbol, period=period, interval="1wk")
+            df = wk.resample("ME").agg({
+                "Open": "first", "High": "max", "Low": "min",
+                "Close": "last", "Volume": "sum",
+            }).dropna(subset=["Close"])
+            df.attrs["source"] = wk.attrs.get("source", "upstox")
+        else:
+            df = get_ohlcv(symbol, period=period, interval=interval)
         n = len(df)
         closes = df["Close"]
         highs  = df["High"]

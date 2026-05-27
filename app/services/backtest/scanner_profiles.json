@@ -50,5 +50,43 @@
       "expectancy"
     ],
     "notes": "grid-search winner from 14 combos vs 28 baseline round-trips over 10y"
+  },
+  "rsi2_mean_reversion:NVDA": {
+    "symbol": "NVDA",
+    "strategy_type": "rsi2_mean_reversion",
+    "calibrated_at": "2026-05-27",
+    "n_trades": 31,
+    "n_wins": 28,
+    "win_rate_pct": 90.3,
+    "param_overrides": {
+      "rsi_entry_threshold": 8,
+      "atr_skip_threshold": 7.0
+    },
+    "survival_rate_pct": 96.9,
+    "improved_by": [
+      "expectancy",
+      "total_return"
+    ],
+    "notes": "grid-search winner from 19 combos vs 32 baseline round-trips over 5y"
+  },
+  "rsi2_mean_reversion:HERITGFOOD": {
+    "symbol": "HERITGFOOD",
+    "strategy_type": "rsi2_mean_reversion",
+    "calibrated_at": "2026-05-27",
+    "n_trades": 39,
+    "n_wins": 31,
+    "win_rate_pct": 79.5,
+    "param_overrides": {
+      "rsi_entry_threshold": 15,
+      "rsi_exit_threshold": 65,
+      "atr_skip_threshold": 4.0
+    },
+    "survival_rate_pct": 114.7,
+    "improved_by": [
+      "win_rate",
+      "expectancy",
+      "total_return"
+    ],
+    "notes": "grid-search winner from 29 combos vs 34 baseline round-trips over 10y"
   }
 }

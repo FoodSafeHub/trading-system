@@ -101,39 +101,60 @@ def _sma(series: pd.Series, window: int) -> float:
     return float(series.rolling(window).mean().iloc[-1])
 
 
-def _fetch_vix() -> Optional[float]:
+def _fetch_vix(ticker: str = "^VIX") -> Optional[float]:
     try:
-        df = get_ohlcv("^VIX", period="1mo", interval="1d")
+        df = get_ohlcv(ticker, period="1mo", interval="1d")
         if df.empty:
             return None
         return float(df["Close"].iloc[-1])
     except Exception as exc:
-        logger.debug("VIX fetch failed: %s", exc)
+        logger.debug("VIX fetch (%s) failed: %s", ticker, exc)
         return None
+
+
+# ── Market benchmark config ───────────────────────────────────────────────────
+# Each market maps to (benchmark index, VIX ticker, VIX hot threshold, breadth
+# sample). India uses the Nifty 50 index and India VIX rather than SPY/^VIX so
+# India momentum strategies gate on Indian tape, not the US tape.
+_MARKET_CFG = {
+    "us": {
+        "index": "SPY", "vix": "^VIX", "vix_hot": 25.0,
+        "breadth": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "JPM", "XOM", "UNH", "V"],
+    },
+    "india": {
+        "index": "^NSEI", "vix": "^INDIAVIX", "vix_hot": 20.0,
+        "breadth": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS",
+                    "ITC", "LT", "SBIN", "BHARTIARTL", "KOTAKBANK"],
+    },
+}
 
 
 _breadth_cache: tuple[datetime, Optional[float]] | None = None
 
 
-def _fetch_breadth_pct() -> Optional[float]:
-    """% of S&P 500 stocks above their 50-DMA.
+_breadth_cache_by_market: dict[str, tuple[datetime, Optional[float]]] = {}
 
-    Uses a 10-mega-cap sample as a breadth proxy. The official ``^SPXA50R``
-    ticker was previously tried first but yfinance no longer serves it —
-    every cold call wasted ~1s on a 404, then ran the same fallback anyway.
 
-    Result cached for 1 hour at function level. Daily-bar strategies don't
-    need fresher than that, and the surrounding RegimeSnapshot already has
-    its own cache — this second layer keeps backtests fast even when the
-    snapshot cache is bypassed.
+def _fetch_breadth_pct(sample: list[str] | None = None, market: str = "us") -> Optional[float]:
+    """% of a mega-cap sample above their 50-DMA — a breadth proxy.
+
+    The official ``^SPXA50R`` ticker was previously tried first but yfinance no
+    longer serves it — every cold call wasted ~1s on a 404, then ran the same
+    fallback anyway.
+
+    Result cached for 1 hour per market. Daily-bar strategies don't need fresher
+    than that, and the surrounding RegimeSnapshot already has its own cache —
+    this second layer keeps backtests fast even when the snapshot cache is
+    bypassed.
     """
-    global _breadth_cache
-    if _breadth_cache is not None:
-        ts, val = _breadth_cache
+    hit = _breadth_cache_by_market.get(market)
+    if hit is not None:
+        ts, val = hit
         if datetime.utcnow() - ts < timedelta(hours=1):
             return val
 
-    sample = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "JPM", "XOM", "UNH", "V"]
+    if sample is None:
+        sample = _MARKET_CFG["us"]["breadth"]
     above = total = 0
     for sym in sample:
         try:
@@ -148,80 +169,90 @@ def _fetch_breadth_pct() -> Optional[float]:
         except Exception:
             continue
     result = (above / total) * 100.0 if total > 0 else None
-    _breadth_cache = (datetime.utcnow(), result)
+    _breadth_cache_by_market[market] = (datetime.utcnow(), result)
     return result
 
 
-def get_momentum_regime(*, refresh: bool = False) -> RegimeSnapshot:
-    """Return the current momentum regime snapshot.
+def get_momentum_regime(*, refresh: bool = False, market: str = "us") -> RegimeSnapshot:
+    """Return the current momentum regime snapshot for a market.
 
-    Cached for 5 minutes — momentum strategies fire on bar close, not on every
-    indicator evaluation, so a few-minute staleness is fine and keeps yfinance
+    ``market="us"`` gates on SPY / ^VIX; ``market="india"`` gates on the Nifty 50
+    (^NSEI) / India VIX (^INDIAVIX) so Indian momentum strategies read Indian
+    tape, not the US tape.
+
+    Cached per-market for 1 hour — momentum strategies fire on bar close, not on
+    every indicator evaluation, so daily-bar staleness is fine and keeps yfinance
     quiet.
     """
+    market = market if market in _MARKET_CFG else "us"
+    cfg = _MARKET_CFG[market]
+    idx_ticker = cfg["index"]
+    label = idx_ticker
+
     if not refresh:
-        cached = _cached("momentum")
+        cached = _cached(f"momentum:{market}")
         if cached:
             return cached
 
     reasons: list[str] = []
     try:
-        spy = get_ohlcv("SPY", period="1y", interval="1d")
+        idx = get_ohlcv(idx_ticker, period="1y", interval="1d")
     except Exception as exc:
-        logger.warning("SPY regime fetch failed: %s", exc)
+        logger.warning("%s regime fetch failed: %s", label, exc)
         snap = RegimeSnapshot(
             regime=MomentumRegime.NO_TRADE, spy_close=0.0, spy_sma50=0.0, spy_sma200=0.0,
             vix=None, breadth_pct=None,
-            reasons=[f"SPY fetch failed: {exc}"],
+            reasons=[f"{label} fetch failed: {exc}"],
         )
-        _CACHE["momentum"] = (datetime.utcnow(), snap)
+        _CACHE[f"momentum:{market}"] = (datetime.utcnow(), snap)
         return snap
 
-    if spy.empty or len(spy) < 200:
+    if idx.empty or len(idx) < 200:
         snap = RegimeSnapshot(
             regime=MomentumRegime.NO_TRADE, spy_close=0.0, spy_sma50=0.0, spy_sma200=0.0,
             vix=None, breadth_pct=None,
-            reasons=["Not enough SPY history for 200-DMA"],
+            reasons=[f"Not enough {label} history for 200-DMA"],
         )
-        _CACHE["momentum"] = (datetime.utcnow(), snap)
+        _CACHE[f"momentum:{market}"] = (datetime.utcnow(), snap)
         return snap
 
-    close = float(spy["Close"].iloc[-1])
-    sma50 = _sma(spy["Close"], 50)
-    sma200 = _sma(spy["Close"], 200)
-    vix = _fetch_vix()
-    breadth = _fetch_breadth_pct()
+    close = float(idx["Close"].iloc[-1])
+    sma50 = _sma(idx["Close"], 50)
+    sma200 = _sma(idx["Close"], 200)
+    vix = _fetch_vix(cfg["vix"])
+    vix_hot = cfg["vix_hot"]
+    breadth = _fetch_breadth_pct(cfg["breadth"], market=market)
 
     spy_above_200 = close > sma200
     spy_above_50 = close > sma50
-    vix_ok = (vix is None) or (vix < 25.0)     # missing VIX → pass
+    vix_ok = (vix is None) or (vix < vix_hot)     # missing VIX → pass
     breadth_ok = (breadth is None) or (breadth >= 50.0)
 
     # Classify.
     if spy_above_200 and spy_above_50 and vix_ok and breadth_ok:
         regime = MomentumRegime.BULL_MOMENTUM
-        reasons.append(f"SPY {close:.2f} > SMA50 {sma50:.2f} > SMA200 {sma200:.2f}")
+        reasons.append(f"{label} {close:.2f} > SMA50 {sma50:.2f} > SMA200 {sma200:.2f}")
         if vix is not None:
-            reasons.append(f"VIX {vix:.1f} < 25")
+            reasons.append(f"VIX {vix:.1f} < {vix_hot:.0f}")
         if breadth is not None:
             reasons.append(f"Breadth {breadth:.0f}% above 50DMA")
     elif spy_above_200 and (not spy_above_50 or not vix_ok or not breadth_ok):
         regime = MomentumRegime.BULL_CAUTION
-        reasons.append(f"SPY > SMA200 but ")
+        reasons.append(f"{label} > SMA200 but ")
         if not spy_above_50:
-            reasons.append(f"SPY below SMA50 ({sma50:.2f})")
+            reasons.append(f"{label} below SMA50 ({sma50:.2f})")
         if not vix_ok:
             reasons.append(f"VIX hot ({vix:.1f})")
         if not breadth_ok:
             reasons.append(f"Breadth weak ({breadth:.0f}%)")
-    elif (not spy_above_200) and (not spy_above_50) and (vix is not None and vix > 25.0):
+    elif (not spy_above_200) and (not spy_above_50) and (vix is not None and vix > vix_hot):
         regime = MomentumRegime.BEAR_MOMENTUM
-        reasons.append(f"SPY {close:.2f} < SMA200 {sma200:.2f}, VIX {vix:.1f} > 25")
+        reasons.append(f"{label} {close:.2f} < SMA200 {sma200:.2f}, VIX {vix:.1f} > {vix_hot:.0f}")
     else:
         regime = MomentumRegime.NO_TRADE
         reasons.append("Transitional tape — no clean momentum setup")
         if not spy_above_200:
-            reasons.append(f"SPY {close:.2f} < SMA200 {sma200:.2f}")
+            reasons.append(f"{label} {close:.2f} < SMA200 {sma200:.2f}")
 
     snap = RegimeSnapshot(
         regime=regime,
@@ -229,9 +260,10 @@ def get_momentum_regime(*, refresh: bool = False) -> RegimeSnapshot:
         vix=vix, breadth_pct=breadth,
         reasons=reasons,
     )
-    _CACHE["momentum"] = (datetime.utcnow(), snap)
+    _CACHE[f"momentum:{market}"] = (datetime.utcnow(), snap)
     return snap
 
 
 def clear_cache() -> None:
     _CACHE.clear()
+    _breadth_cache_by_market.clear()

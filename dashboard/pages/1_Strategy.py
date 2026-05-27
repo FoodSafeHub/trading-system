@@ -693,43 +693,123 @@ st.divider()
 # SECTION 5 — RECENT SIGNALS
 # ════════════════════════════════════════════════════════════════
 st.subheader("Recent signals")
-st.caption("Most recent strategy outputs. These are observations, not orders.")
+st.caption(
+    "Most recent strategy outputs. **Would fire** = this signal matches a live "
+    "assignment, so the scheduler would actually trade it; everything else is "
+    "just an observation. Defaults to actionable BUY/SELL only — HOLDs are noise."
+)
+
+
+def _signal_reason(direction: str, ind: dict) -> str:
+    """Human one-liner from indicators_json — the *why*, not a raw blob."""
+    if not ind:
+        return "—"
+    bits = []
+    if "rsi2" in ind:
+        bits.append(f"RSI2 {ind['rsi2']:.0f}")
+    elif "rsi" in ind:
+        bits.append(f"RSI {ind['rsi']:.0f}")
+    if "dist_pct" in ind:
+        sign = "+" if ind["dist_pct"] >= 0 else ""
+        bits.append(f"{sign}{ind['dist_pct']:.1f}% vs EMA")
+    if ind.get("squeeze") is True:
+        bits.append("BB squeeze")
+    if "macd" in ind and "macd_signal" in ind:
+        bits.append("MACD>sig" if ind["macd"] > ind["macd_signal"] else "MACD<sig")
+    if ind.get("atr_pct") not in (None, 0, 0.0):
+        bits.append(f"ATR {ind['atr_pct']:.1f}%")
+    return " · ".join(bits) if bits else "—"
+
+
+# Build the set of (symbol, strategy_name) pairs the scheduler would actually act
+# on — an enabled assignment. Drives the "would fire" flag. Source of truth is the
+# live assignments table loaded at the top of the page; no hardcoded symbols.
+_live_pairs = {
+    (str(a.get("symbol", "")).upper(), str(a.get("strategy_name", "")))
+    for a in assignments if a.get("enabled")
+}
 
 try:
     sigs = api.signals()
     if sigs:
         df = pd.DataFrame(sigs)
+
+        # Parse indicators_json once into a readable reason, then drop the blob.
+        if "indicators_json" in df.columns:
+            import json as _json
+
+            def _parse(v):
+                if isinstance(v, dict):
+                    return v
+                try:
+                    return _json.loads(v) if v else {}
+                except Exception:
+                    return {}
+            _ind = df["indicators_json"].apply(_parse)
+            df["why"] = [
+                _signal_reason(str(d).upper(), i)
+                for d, i in zip(df.get("direction", ""), _ind)
+            ]
+
+        # Would-fire flag: matches an enabled assignment AND is actionable.
+        def _would_fire(row) -> str:
+            d = str(row.get("direction", "")).upper()
+            if d not in ("BUY", "SELL"):
+                return "—"
+            key = (str(row.get("symbol", "")).upper(), str(row.get("strategy_name", "")))
+            return "🎯 yes" if key in _live_pairs else "no"
+        df["would_fire"] = df.apply(_would_fire, axis=1)
+
+        # Acted-on / order link, made legible.
+        if "acted_on" in df.columns:
+            df["acted_on"] = df.apply(
+                lambda r: f"✅ #{r['order_id']}" if r.get("acted_on") and r.get("order_id")
+                else ("✅" if r.get("acted_on") else "—"),
+                axis=1,
+            )
+
         if "direction" in df.columns:
             df["direction"] = df["direction"].apply(
                 lambda v: "🟢 BUY" if str(v).upper() == "BUY"
                 else ("🔴 SELL" if str(v).upper() == "SELL" else "⬜ HOLD")
             )
 
-        # Filters
-        fc1, fc2, fc3 = st.columns(3)
+        # Filters — symbol list is built from whatever actually came back.
+        fc1, fc2, fc3, fc4 = st.columns([2, 2, 2, 2])
         with fc1:
             sym_options = ["All"] + sorted(df["symbol"].dropna().unique().tolist()) \
                 if "symbol" in df.columns else ["All"]
             sym_filter = st.selectbox("Symbol", sym_options, key="sig_sym")
         with fc2:
-            dir_options = ["All", "🟢 BUY", "🔴 SELL", "⬜ HOLD"]
+            dir_options = ["Actionable (BUY/SELL)", "All", "🟢 BUY", "🔴 SELL", "⬜ HOLD"]
             dir_filter = st.selectbox("Direction", dir_options, key="sig_dir")
         with fc3:
+            only_fire = st.checkbox("Would-fire only", value=False, key="sig_fire",
+                                    help="Only signals that match a live assignment.")
+        with fc4:
             top_n = st.number_input("Show last N", min_value=10, max_value=500,
                                     value=50, step=10, key="sig_n")
 
         if sym_filter != "All" and "symbol" in df.columns:
             df = df[df["symbol"] == sym_filter]
-        if dir_filter != "All" and "direction" in df.columns:
+        if dir_filter == "Actionable (BUY/SELL)":
+            df = df[df["direction"].isin(["🟢 BUY", "🔴 SELL"])]
+        elif dir_filter != "All" and "direction" in df.columns:
             df = df[df["direction"] == dir_filter]
+        if only_fire:
+            df = df[df["would_fire"] == "🎯 yes"]
         df = df.head(int(top_n))
 
-        # Put the timestamp first so it's never missed.
-        priority = ["created_at", "symbol", "direction", "price", "strategy_name",
-                    "confidence"]
-        show_cols = [c for c in priority if c in df.columns] + \
-                    [c for c in df.columns if c not in priority]
-        st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+        if df.empty:
+            st.info("No signals match this filter. Switch Direction to 'All' to see HOLDs.")
+        else:
+            # Trader-first column order: when, what, would it trade, why, did it.
+            priority = ["created_at", "symbol", "direction", "would_fire",
+                        "strategy_name", "price_at_signal", "why", "acted_on"]
+            drop = {"indicators_json", "strength", "order_id", "id"}
+            show_cols = [c for c in priority if c in df.columns] + \
+                        [c for c in df.columns if c not in priority and c not in drop]
+            st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
     else:
         st.info(
             "No signals yet. Run a cycle above (dry run is fine) or wait for the "

@@ -5,7 +5,6 @@ import streamlit as st
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
 from _theme import apply_theme
-import _charts as charts
 import _lightweight_chart as lwc
 
 # India detection — UI-only copy kept in sync with app.services.markets, so the
@@ -48,63 +47,35 @@ with col1:
 with col2:
     st.write("")
     st.caption(
-        "Two engines: **TradingView** for live streaming candlesticks + drawing tools, and "
-        "**Schwab-style native candles** (Plotly) for our own indicators and recent strategy signals. "
-        "Use the search bar inside the TradingView chart to change symbol without losing studies."
+        "TradingView-style candlesticks powered by **your** market data — Schwab/yfinance for US, "
+        "**Upstox** (→ yfinance .NS fallback) for India — so every chart carries our indicator "
+        "overlays and ▲/▼ strategy-signal markers. India symbols render in ₹."
     )
 
-# ── Build watchlist: assigned symbols first, then defaults ────────
-_EXCHANGE_MAP = {
-    "SPY": "AMEX", "QQQ": "NASDAQ", "IWM": "AMEX",
-}
-_DEFAULT_WATCHLIST = ["AMEX:SPY","NASDAQ:QQQ","NASDAQ:AAPL","NASDAQ:NVDA",
-                      "NASDAQ:MSFT","NASDAQ:TSLA","NASDAQ:AMZN","NASDAQ:META",
-                      "NASDAQ:GOOGL","NYSE:JPM","NASDAQ:AMD","NYSE:NFLX"]
-
-try:
-    _assignments = api.list_assignments()
-    _assigned_syms = [a["symbol"].upper() for a in _assignments if a.get("enabled")]
-except Exception:
-    _assigned_syms = []
-
-def _tv_sym(sym):
-    # India (NSE) symbols must carry the NSE: prefix or TradingView resolves
-    # them to a non-existent US ticker. NSE intraday on TradingView needs a paid
-    # data add-on, but the symbol at least loads (delayed/EOD) with the prefix.
-    if is_india_symbol(sym):
-        return f"NSE:{_normalize_sym(sym)}"
-    if sym in _EXCHANGE_MAP:
-        return f"{_EXCHANGE_MAP[sym]}:{sym}"
-    _nyse = {"JPM","BAC","GS","MS","WFC","XOM","CVX","JNJ","UNH","V","MA"}
-    return f"NYSE:{sym}" if sym in _nyse else f"NASDAQ:{sym}"
-
-_assigned_tv  = [_tv_sym(s) for s in _assigned_syms]
-_extra        = [s for s in _DEFAULT_WATCHLIST if not any(s.endswith(f":{sym}") for sym in _assigned_syms)]
-_watchlist    = _assigned_tv + _extra
-
-tv_tab, native_tab, live_tab = st.tabs(
-    ["TradingView Advanced", "Native Candles + Signals", "Strategy Live (backend overlays)"]
+chart_tab, live_tab = st.tabs(
+    ["Chart (daily + signals)", "Strategy Live (intraday)"]
 )
 
-with tv_tab:
-    tv_symbol = _tv_sym(symbol)
-    if is_india_symbol(symbol):
-        st.info(
-            f"**{tv_symbol}** — TradingView's live NSE feed needs their paid India "
-            "data add-on, so intraday may show *“This symbol is only available on "
-            "TradingView.”* The daily chart still loads. For full India candles + our "
-            "indicators on free data, use the **Native Candles + Signals** tab "
-            "(backend data via Upstox → yfinance .NS)."
-        )
-    charts.tradingview_embed(tv_symbol, interval="D", watchlist=_watchlist, height=820)
+with chart_tab:
+    _india = is_india_symbol(symbol)
+    _cur   = "₹" if _india else "$"
+    _src   = "upstox / yfinance .NS" if _india else "yfinance"
 
-with native_tab:
-    nc1, nc2, nc3 = st.columns([1.5, 1.5, 5])
+    nc0, nc1, nc2 = st.columns([1.3, 1.3, 5])
+    with nc0:
+        _INTERVALS = {"Daily": "1d", "Weekly": "1wk", "Monthly": "1mo", "Hourly (1h)": "1h"}
+        nc_interval_label = st.selectbox("Candles", list(_INTERVALS), index=0)
+        nc_interval = _INTERVALS[nc_interval_label]
     with nc1:
-        nc_period = st.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
+        # Hourly needs a short window; daily/weekly/monthly span wider.
+        if nc_interval == "1h":
+            _periods, _pidx = ["5d", "1mo", "3mo", "6mo"], 1
+        else:
+            _periods, _pidx = ["1mo", "3mo", "6mo", "1y", "2y", "5y"], 3
+        nc_period = st.selectbox("Period", _periods, index=_pidx)
     with nc2:
         overlay_keys = st.multiselect(
-            "Indicator overlays",
+            "Price overlays",
             options=["ema9", "ema21", "ema50", "ema200", "vwap",
                      "bb_upper", "bb_lower", "bb_middle", "supertrend",
                      "sma50", "sma200"],
@@ -117,16 +88,30 @@ with native_tab:
                 "sma50": "SMA 50", "sma200": "SMA 200",
             }[k],
         )
-    with nc3:
+
+    oc1, oc2 = st.columns([5, 3])
+    with oc1:
+        osc_keys = st.multiselect(
+            "Sub-pane indicators (stacked below price)",
+            options=["rsi", "macd", "stoch", "atr", "obv"],
+            default=["rsi", "macd"],
+            format_func=lambda k: {
+                "rsi": "RSI (14)", "macd": "MACD (12,26,9)", "stoch": "Stochastic (14,3)",
+                "atr": "ATR (14)", "obv": "OBV",
+            }[k],
+        )
+    with oc2:
         st.caption(
-            "Loads OHLCV from our backend `/strategy/chart/{symbol}` and renders a multi-pane "
-            "candle stack — Price + Volume + RSI(14) + MACD. Recent strategy signals (if available) "
-            "are overlaid as ▲/▼ markers on the candle at the fill price."
+            f"Backend `/strategy/chart` (**{_src}**), same lightweight-charts engine as the live "
+            "tab. ▲/▼ markers = recent strategy signals."
         )
 
-    with st.spinner(f"Loading {symbol} OHLCV…"):
+    # More panes need more vertical room so price isn't squeezed.
+    _chart_h = 720 + 130 * len(osc_keys)
+
+    with st.spinner(f"Loading {symbol} {nc_interval_label.lower()} OHLCV…"):
         try:
-            payload = api.chart_data(symbol, period=nc_period)
+            payload = api.chart_data(symbol, period=nc_period, interval=nc_interval)
         except Exception as e:
             st.error(f"Could not load chart data: {e}")
             payload = None
@@ -156,14 +141,14 @@ with native_tab:
         except Exception:
             recent_signals = []
 
-        charts.render_price_chart(
+        lwc.render_daily_chart(
             payload,
+            overlays_enabled=overlay_keys,
+            oscillators_enabled=osc_keys,
             trades=recent_signals,
-            overlays=tuple(overlay_keys),
-            include_volume=True,
-            include_rsi=True,
-            include_macd=True,
-            title=f"{symbol} — {nc_period}",
+            data_source=_src,
+            currency=_cur,
+            height=_chart_h,
         )
     else:
         st.caption(f"No OHLC data available for {symbol}.")

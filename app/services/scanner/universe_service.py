@@ -103,6 +103,25 @@ def get_nifty50_symbols() -> List[str]:
     return list(NIFTY_50)
 
 
+# Wider India tiers. Curated supersets live in app.services.markets; nse_all
+# pulls the full ~2,466-symbol Upstox instrument map.
+_INDIA_UNIVERSES = {
+    "nifty50":  "NIFTY_50",
+    "nifty100": "NIFTY_100",
+    "nifty200": "NIFTY_200",
+    "nifty500": "NIFTY_500",
+}
+
+
+def get_india_universe(universe: str) -> List[str]:
+    """Return an India tier's symbol list (nifty50/100/200/500 or nse_all)."""
+    import app.services.markets as mk
+    if universe == "nse_all":
+        return mk.nse_all_symbols()
+    attr = _INDIA_UNIVERSES.get(universe, "NIFTY_50")
+    return list(getattr(mk, attr))
+
+
 def get_universe(universe: str, custom_symbols: list[str] | None = None) -> List[str]:
     """Return the symbol list for the requested universe."""
     if universe == "watchlist":
@@ -111,8 +130,8 @@ def get_universe(universe: str, custom_symbols: list[str] | None = None) -> List
         return get_sp500_symbols()
     elif universe == "nasdaq100":
         return get_nasdaq100_symbols()
-    elif universe == "nifty50":
-        return get_nifty50_symbols()
+    elif universe in ("nifty50", "nifty100", "nifty200", "nifty500", "nse_all"):
+        return get_india_universe(universe)
     elif universe == "custom":
         return [s.upper().strip() for s in (custom_symbols or []) if s.strip()]
     else:

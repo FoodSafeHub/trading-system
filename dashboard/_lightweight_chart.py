@@ -31,6 +31,155 @@ _OVERLAY_STYLES: dict[str, dict[str, Any]] = {
 }
 
 
+# Daily-chart overlay keys we can pull straight from the /strategy/chart payload's
+# `indicators` block. Same styling source as the intraday chart.
+_DAILY_OVERLAY_STYLES: dict[str, dict[str, Any]] = {
+    "ema9":     {"label": "EMA 9",   "color": "#26C6DA", "width": 1, "lineStyle": 0},
+    "ema21":    {"label": "EMA 21",  "color": "#FF9800", "width": 1, "lineStyle": 0},
+    "ema50":    {"label": "EMA 50",  "color": "#AB47BC", "width": 1, "lineStyle": 0},
+    "ema200":   {"label": "EMA 200", "color": "#EF5350", "width": 2, "lineStyle": 0},
+    "sma50":    {"label": "SMA 50",  "color": "#FFD54F", "width": 1, "lineStyle": 0},
+    "sma200":   {"label": "SMA 200", "color": "#90A4AE", "width": 1, "lineStyle": 0},
+    "vwap":     {"label": "VWAP",    "color": "#42A5F5", "width": 2, "lineStyle": 0},
+    "bb_upper": {"label": "BB Upper","color": "rgba(176,190,197,0.55)", "width": 1, "lineStyle": 2},
+    "bb_middle":{"label": "BB Mid",  "color": "rgba(176,190,197,0.35)", "width": 1, "lineStyle": 3},
+    "bb_lower": {"label": "BB Lower","color": "rgba(176,190,197,0.55)", "width": 1, "lineStyle": 2},
+    "supertrend": {"label": "Supertrend", "color": "#FFCA28", "width": 2, "lineStyle": 0},
+}
+
+
+def render_daily_chart(
+    payload: dict[str, Any],
+    *,
+    overlays_enabled: list[str],
+    oscillators_enabled: list[str] | None = None,
+    trades: list[dict[str, Any]] | None = None,
+    data_source: str = "—",
+    currency: str = "$",
+    height: int = 720,
+) -> None:
+    """Render a daily candlestick chart with the SAME lightweight-charts engine
+    the live tab uses, fed by the `/strategy/chart/{symbol}` payload.
+
+    Works for US (Schwab/yfinance) and India (Upstox/yfinance .NS) alike — the
+    backend provider decides the source; this is a pure renderer. `trades` is an
+    optional list of {date, side, price} signal fills drawn as ▲/▼ markers.
+    """
+    dates = payload.get("dates", []) or []
+    o = payload.get("open", []); h = payload.get("high", [])
+    lo = payload.get("low", []); c = payload.get("close", [])
+    vol = payload.get("volume", []) or []
+    n = len(dates)
+
+    # lightweight-charts accepts "YYYY-MM-DD" strings as time for daily series.
+    candles = [
+        {"time": dates[i], "open": o[i], "high": h[i], "low": lo[i], "close": c[i]}
+        for i in range(n)
+        if None not in (o[i] if i < len(o) else None,
+                        h[i] if i < len(h) else None,
+                        lo[i] if i < len(lo) else None,
+                        c[i] if i < len(c) else None)
+    ]
+    volume = [
+        {"time": dates[i],
+         "value": vol[i] if i < len(vol) and vol[i] is not None else 0,
+         "color": "rgba(38,166,154,0.5)" if (i < len(c) and i > 0 and c[i] is not None
+                                              and c[i-1] is not None and c[i] >= c[i-1])
+                  else "rgba(239,83,80,0.5)"}
+        for i in range(n)
+    ]
+
+    indicators = payload.get("indicators", {}) or {}
+    overlay_series: list[dict[str, Any]] = []
+    for key in overlays_enabled:
+        vals = indicators.get(key)
+        style = _DAILY_OVERLAY_STYLES.get(key)
+        if not vals or not style:
+            continue
+        data = [{"time": dates[i], "value": vals[i]}
+                for i in range(min(n, len(vals))) if vals[i] is not None]
+        if data:
+            overlay_series.append({"key": key, "data": data, **style})
+
+    # Oscillator sub-panes — each entry becomes a stacked pane below price.
+    # Built from the same `indicators` block; line/histogram series per pane.
+    def _line(key, color, width=1, style=0):
+        vals = indicators.get(key)
+        if not vals:
+            return None
+        data = [{"time": dates[i], "value": vals[i]}
+                for i in range(min(n, len(vals))) if vals[i] is not None]
+        return {"type": "line", "color": color, "width": width,
+                "lineStyle": style, "data": data} if data else None
+
+    def _hist(key, color):
+        vals = indicators.get(key)
+        if not vals:
+            return None
+        data = [{"time": dates[i], "value": vals[i],
+                 "color": ("rgba(38,166,154,0.6)" if vals[i] >= 0 else "rgba(239,83,80,0.6)")}
+                for i in range(min(n, len(vals))) if vals[i] is not None]
+        return {"type": "histogram", "color": color, "base": 0, "data": data} if data else None
+
+    _OSC_BUILDERS: dict[str, tuple[str, Any]] = {
+        "rsi":   ("RSI 14",       lambda: [s for s in [_line("rsi14", "#AB47BC", 2)] if s]),
+        "macd":  ("MACD",         lambda: [s for s in [
+                        _hist("macd_hist", "#90A4AE"),
+                        _line("macd", "#42A5F5", 2),
+                        _line("macd_signal", "#FF9800", 1)] if s]),
+        "stoch": ("Stochastic",   lambda: [s for s in [
+                        _line("stoch_k", "#26C6DA", 2),
+                        _line("stoch_d", "#FF9800", 1)] if s]),
+        "atr":   ("ATR 14",       lambda: [s for s in [_line("atr14", "#FFCA28", 2)] if s]),
+        "obv":   ("OBV",          lambda: [s for s in [_line("obv", "#66BB6A", 2)] if s]),
+    }
+    osc_panes: list[dict[str, Any]] = []
+    for key in (oscillators_enabled or []):
+        spec = _OSC_BUILDERS.get(key)
+        if not spec:
+            continue
+        label, builder = spec
+        series = builder()
+        if series:
+            osc_panes.append({"id": f"osc_{key}", "label": label, "series": series})
+
+    # Adapt {date, side, price} fills into the marker shape the template draws.
+    markers_all = []
+    for t in (trades or []):
+        d = t.get("date") or t.get("time")
+        if not d:
+            continue
+        markers_all.append({
+            "time": str(d)[:10],
+            "side": str(t.get("side") or t.get("direction") or "").upper(),
+            "strategy": t.get("strategy") or t.get("strategy_name") or "",
+            "entry_price": t.get("price") or t.get("entry_price"),
+            "reason": t.get("reason") or "",
+            "_accepted": True,
+        })
+
+    config = {
+        "library_url": _LIBRARY_URL,
+        "candles": candles,
+        "volume": volume,
+        "overlays": overlay_series,
+        "oscillators": osc_panes,
+        "markers": markers_all,
+        "show_levels": False,
+        "symbol": payload.get("symbol", ""),
+        "timeframe": "1D",
+        "regime": "",
+        "warning": "" if candles else "No candles to display.",
+        "data_source": data_source,
+        "fallback_anchored": 0,
+        "price_precision": 2,
+        "currency": currency,
+    }
+    cfg_json = json.dumps(config)
+    components.html(_TEMPLATE.replace("__CFG__", cfg_json).replace("__HEIGHT__", str(height)),
+                    height=height + 220, scrolling=False)
+
+
 def render_strategy_chart(
     payload: dict[str, Any],
     *,
@@ -191,6 +340,37 @@ async function main() {
     scaleMargins: { top: 0.82, bottom: 0 },
     visible: false,
   });
+
+  // Oscillator sub-panes (RSI / MACD / Stochastic / ATR / OBV). Each gets its
+  // own stacked price scale below price+volume. Only present on the daily chart;
+  // the live tab sends no `oscillators`, so this block is a no-op there.
+  const oscPanes = CFG.oscillators || [];
+  if (oscPanes.length) {
+    // Squeeze price into the top region so the panes have room below.
+    const priceBottom = Math.min(0.55, 0.10 + oscPanes.length * 0.14);
+    chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.05, bottom: priceBottom } });
+    const slot = (1 - priceBottom) / oscPanes.length;  // vertical fraction per pane
+    oscPanes.forEach((pane, pi) => {
+      const top = priceBottom + slot * pi + 0.01;
+      const bottom = 1 - (priceBottom + slot * (pi + 1)) + 0.02;
+      (pane.series || []).forEach(ser => {
+        const common = { priceScaleId: pane.id, priceLineVisible: false,
+                         lastValueVisible: false, crosshairMarkerVisible: false };
+        let s;
+        if (ser.type === "histogram") {
+          s = chart.addHistogramSeries({ ...common, color: ser.color, base: ser.base || 0 });
+        } else {
+          s = chart.addLineSeries({ ...common, color: ser.color,
+                                    lineWidth: ser.width || 1, lineStyle: ser.lineStyle || 0 });
+        }
+        s.setData(ser.data || []);
+      });
+      chart.priceScale(pane.id).applyOptions({
+        scaleMargins: { top: top, bottom: Math.max(0.0, bottom) },
+        borderColor: "#2a2e39",
+      });
+    });
+  }
 
   // Overlay line series — all backend-computed; we just draw what's sent.
   const legendEl = document.getElementById("legend");
