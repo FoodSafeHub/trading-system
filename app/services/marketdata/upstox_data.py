@@ -58,6 +58,8 @@ _PERIOD_DAYS = {
     "1d": 1, "2d": 2, "5d": 5, "1mo": 31, "3mo": 93,
     "6mo": 186, "1y": 366, "2y": 731, "5y": 1827,
     "10y": 3653, "max": 3653,
+    # Day-trading page period strings (intraday windows).
+    "30d": 30, "60d": 60, "90d": 90, "180d": 180, "730d": 730,
 }
 
 

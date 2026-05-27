@@ -31,7 +31,6 @@ include it natively.
 """
 from __future__ import annotations
 
-from datetime import time
 from typing import Any
 
 import numpy as np
@@ -40,10 +39,13 @@ import ta.momentum as tam
 import ta.trend as tat
 import ta.volatility as tav
 
-from app.services.strategy.daytrading.market_open import ET, compute_vwap
+from app.services.strategy.daytrading.market_open import (
+    compute_vwap, localize_for_symbol, market_session,
+)
 from app.services.strategy.daytrading.models import DayTradeSignal
 
-ST_LAST_ENTRY = time(15, 0)
+# No new entries in the last ~45 min before the close (US 15:00 ET, NSE 14:45 IST).
+ST_LAST_ENTRY_BEFORE_CLOSE_MIN = 45
 
 
 class SupertrendTrend:
@@ -78,12 +80,14 @@ class SupertrendTrend:
 
         # needs st_length bars for ATR seed + ema_pullback for EMA warmup + a small buffer
         min_bars = cfg["st_length"] + cfg["ema_pullback"] + 5
-        today_5m = _today_bars(df_5m)
+        today_5m = _today_bars(df_5m, symbol)
         if today_5m.empty or len(today_5m) < min_bars:
             return signals
 
+        st_last_entry = market_session(symbol).before_close(ST_LAST_ENTRY_BEFORE_CLOSE_MIN)
+
         # ── 15m context: compute Supertrend and determine macro bias ────────────
-        today_15m = _today_bars(df_15m) if df_15m is not None and not df_15m.empty else pd.DataFrame()
+        today_15m = _today_bars(df_15m, symbol) if df_15m is not None and not df_15m.empty else pd.DataFrame()
         if today_15m.empty or len(today_15m) < cfg["st_length"] + 2:
             # Fall back to 5m if 15m unavailable
             macro_bullish = regime in ("BULL_OPEN",)
@@ -120,7 +124,7 @@ class SupertrendTrend:
 
             bar = df.iloc[i]
             bar_time = bar.name.time() if hasattr(bar.name, "time") else None
-            if bar_time and bar_time >= ST_LAST_ENTRY:
+            if bar_time and bar_time >= st_last_entry:
                 break
 
             if any(pd.isna(bar[c]) for c in ["st_line", "st_dir", "ema_pb", "rsi", "atr"]):
@@ -331,16 +335,11 @@ def _compute_supertrend(df: pd.DataFrame, length: int = 10, multiplier: float = 
         return None
 
 
-def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
+def _today_bars(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
     if df.empty:
         return df
-    idx = pd.to_datetime(df.index)
-    if idx.tzinfo is None:
-        idx = idx.tz_localize(ET)
-    else:
-        idx = idx.tz_convert(ET)
-    df = df.copy()
-    df.index = idx
+    df = localize_for_symbol(df, symbol)
+    idx = df.index
     today = idx[-1].date()
     return df[idx.date == today]
 

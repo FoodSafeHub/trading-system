@@ -313,7 +313,7 @@ def perplexity_backtest(strategy_name: str, symbol: str, period: str = "5y",
                 timeout=timeout)
 
 def perplexity_backtest_all(symbol: str, period: str = "5y", initial_capital: float = 10000,
-                            position_pct: float = 0.0, timeout: int = 300):
+                            position_pct: float = 0.0, timeout: int = 600):
     return _get(f"/perplexity/backtest-all/{symbol}",
                 params={"period": period, "initial_capital": initial_capital, "position_pct": position_pct},
                 timeout=timeout)

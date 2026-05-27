@@ -29,31 +29,32 @@ import pandas as pd
 import ta.momentum as tam
 
 from app.services.strategy import candle_patterns as cp
-from app.services.strategy.daytrading.market_open import ET, LAST_ENTRY_TIME
+from app.services.strategy.daytrading.market_open import (
+    localize_for_symbol, market_session,
+)
 from app.services.strategy.daytrading.models import DayTradeSignal
 
 
-# Patterns are unreliable in the first 30m noise window; gate accordingly.
-MIN_ENTRY_TIME = time(10, 0)
+# Patterns are unreliable in the first 30m noise window; gate from open+30m.
+MIN_ENTRY_OFFSET_MIN = 30
+# No new entries in the last 30 min before the close.
+LAST_ENTRY_BEFORE_CLOSE_MIN = 30
 
 
-def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
+def _today_bars(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
     if df.empty:
         return df
-    idx = pd.to_datetime(df.index)
-    if idx.tzinfo is None:
-        idx = idx.tz_localize(ET)
-    else:
-        idx = idx.tz_convert(ET)
-    out = df.copy()
-    out.index = idx
+    out = localize_for_symbol(df, symbol)
+    idx = out.index
     return out[idx.date == idx[-1].date()]
 
 
-def _bar_ok(bar_time: time | None) -> bool:
+def _bar_ok(bar_time: time | None, symbol: str = "") -> bool:
     if bar_time is None:
         return True
-    return MIN_ENTRY_TIME <= bar_time < LAST_ENTRY_TIME
+    sess = market_session(symbol)
+    return (sess.after_open(MIN_ENTRY_OFFSET_MIN) <= bar_time
+            < sess.before_close(LAST_ENTRY_BEFORE_CLOSE_MIN))
 
 
 def _regime_allows_long(regime: str) -> bool:
@@ -93,12 +94,12 @@ class EngulfingVolumeSurge:
         cfg = {**self.default_config, **(config or {})}
         signals: list[DayTradeSignal] = []
 
-        bars = _today_bars(df_5m)
+        bars = _today_bars(df_5m, symbol)
         if len(bars) < 25:
             return signals
 
         bar_time = bars.index[-1].time() if hasattr(bars.index[-1], "time") else None
-        if not _bar_ok(bar_time):
+        if not _bar_ok(bar_time, symbol):
             return signals
 
         rsi = tam.RSIIndicator(bars["Close"], window=cfg["rsi_period"]).rsi()
@@ -182,11 +183,11 @@ class NarrowRangeBreakout:
         cfg = {**self.default_config, **(config or {})}
         signals: list[DayTradeSignal] = []
 
-        bars = _today_bars(df_5m)
+        bars = _today_bars(df_5m, symbol)
         if len(bars) < 25:
             return signals
         bar_time = bars.index[-1].time() if hasattr(bars.index[-1], "time") else None
-        if not _bar_ok(bar_time):
+        if not _bar_ok(bar_time, symbol):
             return signals
 
         # Compression bar = the bar *before* the current breakout bar.
@@ -266,11 +267,11 @@ class ThreeBarPush:
         cfg = {**self.default_config, **(config or {})}
         signals: list[DayTradeSignal] = []
 
-        bars = _today_bars(df_5m)
+        bars = _today_bars(df_5m, symbol)
         if len(bars) < 25:
             return signals
         bar_time = bars.index[-1].time() if hasattr(bars.index[-1], "time") else None
-        if not _bar_ok(bar_time):
+        if not _bar_ok(bar_time, symbol):
             return signals
 
         rsi = tam.RSIIndicator(bars["Close"], window=cfg["rsi_period"]).rsi()
@@ -352,11 +353,11 @@ class HammerShootingStar:
         cfg = {**self.default_config, **(config or {})}
         signals: list[DayTradeSignal] = []
 
-        bars = _today_bars(df_5m)
+        bars = _today_bars(df_5m, symbol)
         if len(bars) < 25:
             return signals
         bar_time = bars.index[-1].time() if hasattr(bars.index[-1], "time") else None
-        if not _bar_ok(bar_time):
+        if not _bar_ok(bar_time, symbol):
             return signals
 
         rsi = tam.RSIIndicator(bars["Close"], window=cfg["rsi_period"]).rsi()

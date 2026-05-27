@@ -126,17 +126,32 @@ def run_perplexity_backtest(
     risk_pct_per_trade: float = 0.01,
     max_position_pct: float = 0.20,        # never put more than 20% of capital in one trade
     position_pct: float = 0.0,             # >0 = fixed % of capital per trade (overrides risk sizing)
+    df_full: Optional[pd.DataFrame] = None,   # inject pre-fetched OHLCV to skip the download
+    spy_close: Optional[pd.Series] = None,    # inject pre-fetched SPY Close for regime detection
 ) -> PerplexityBacktestResult:
-    df_full = get_ohlcv(symbol, period=period)
+    # Callers that compare many strategies on one symbol can fetch the bars once
+    # and pass them in (df_full/spy_close), avoiding a redundant Yahoo download per
+    # strategy. When omitted, behave exactly as before.
+    if df_full is None:
+        df_full = get_ohlcv(symbol, period=period)
     if df_full.empty or len(df_full) < 60:
-        raise ValueError(f"Not enough data for {symbol} (need at least 60 bars)")
+        if df_full.empty:
+            raise ValueError(f"No data returned for {symbol} over period {period}")
+        listed = str(df_full.index[0])[:10]
+        raise ValueError(
+            f"{symbol} has only {len(df_full)} trading days of history (listed ~{listed}); "
+            f"this strategy needs at least 60 bars. Pick a longer-established stock."
+        )
 
     # Fetch SPY for regime detection — always 10y so historical backtests work.
     # If the symbol IS SPY, reuse its own data to avoid a redundant download.
-    try:
-        spy_raw = df_full["Close"] if symbol.upper() == "SPY" else get_ohlcv("SPY", period="10y")["Close"]
-    except Exception:
-        spy_raw = df_full["Close"]   # fallback: use symbol itself as regime proxy
+    if spy_close is not None:
+        spy_raw = spy_close
+    else:
+        try:
+            spy_raw = df_full["Close"] if symbol.upper() == "SPY" else get_ohlcv("SPY", period="10y")["Close"]
+        except Exception:
+            spy_raw = df_full["Close"]   # fallback: use symbol itself as regime proxy
 
     # Warm up 210 bars so SMA(200) is valid from the first active bar.
     # For very short datasets (< 350 bars), cap at 60% so some trading still occurs.

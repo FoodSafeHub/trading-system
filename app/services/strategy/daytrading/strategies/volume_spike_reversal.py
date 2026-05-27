@@ -23,19 +23,22 @@ Reality calibration:
 """
 from __future__ import annotations
 
-from datetime import time
 from typing import Any
 
 import pandas as pd
 import ta.momentum as tam
 import ta.volatility as tav
 
-from app.services.strategy.daytrading.market_open import ET
+from app.services.strategy.daytrading.market_open import (
+    localize_for_symbol, market_session,
+)
 from app.services.strategy.daytrading.models import DayTradeSignal
 
 # Exclude the last 45 min — close volume spikes are not reversals
-VSR_LAST_ENTRY = time(15, 0)
-VSR_MIN_START = time(9, 45)   # need enough bars for volume average
+# Entry window as offsets from the session (works on both US and NSE):
+# need ~15 min for the volume average; no new entries in the last 45 min.
+VSR_START_OFFSET_MIN = 15
+VSR_LAST_ENTRY_BEFORE_CLOSE_MIN = 45
 
 
 class VolumeSpikeReversal:
@@ -67,9 +70,13 @@ class VolumeSpikeReversal:
         cfg = {**self.default_config, **(config or {})}
         signals: list[DayTradeSignal] = []
 
-        today = _today_bars(df_5m)
+        today = _today_bars(df_5m, symbol)
         if today.empty or len(today) < 15:  # 10-bar peak window + RSI warmup; was 22 (blocked until 11 AM)
             return signals
+
+        _sess = market_session(symbol)
+        vsr_min_start = _sess.after_open(VSR_START_OFFSET_MIN)
+        vsr_last_entry = _sess.before_close(VSR_LAST_ENTRY_BEFORE_CLOSE_MIN)
 
         today = today.copy()
         today["rsi"] = tam.RSIIndicator(today["Close"], window=cfg["rsi_period"]).rsi()
@@ -79,7 +86,7 @@ class VolumeSpikeReversal:
         vol_avg = today["Volume"].rolling(20).mean()
 
         # 15m RSI for multi-timeframe confirmation
-        today_15m = _today_bars(df_15m)
+        today_15m = _today_bars(df_15m, symbol)
         rsi15_curr: float | None = None
         rsi15_prev: float | None = None
         if not today_15m.empty and len(today_15m) >= 5:
@@ -98,7 +105,7 @@ class VolumeSpikeReversal:
             bar_time = bar.name.time() if hasattr(bar.name, "time") else None
 
             # Exclude close-volume spikes and pre-market noise
-            if bar_time and (bar_time < VSR_MIN_START or bar_time >= VSR_LAST_ENTRY):
+            if bar_time and (bar_time < vsr_min_start or bar_time >= vsr_last_entry):
                 continue
 
             if pd.isna(bar["rsi"]) or pd.isna(bar["atr"]) or pd.isna(vol_avg.iloc[i]):
@@ -240,16 +247,11 @@ class VolumeSpikeReversal:
         return signals
 
 
-def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
+def _today_bars(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
     if df.empty:
         return df
-    idx = pd.to_datetime(df.index)
-    if idx.tzinfo is None:
-        idx = idx.tz_localize(ET)
-    else:
-        idx = idx.tz_convert(ET)
-    df = df.copy()
-    df.index = idx
+    df = localize_for_symbol(df, symbol)
+    idx = df.index
     today = idx[-1].date()
     return df[idx.date == today]
 

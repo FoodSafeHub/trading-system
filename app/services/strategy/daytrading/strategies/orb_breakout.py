@@ -31,11 +31,17 @@ import pandas as pd
 import ta.momentum as tam
 import ta.volatility as tav
 
-from app.services.strategy.daytrading.market_open import ET, LAST_ENTRY_TIME
+from app.services.strategy.daytrading.market_open import (
+    localize_for_symbol, market_session,
+)
 from app.services.strategy.daytrading.models import DayTradeSignal
 
-# No new ORB entries after 11:30 AM — late breakouts have poor follow-through
-ORB_LAST_ENTRY = time(11, 30)
+# No new ORB entries after 2 hours past the open — late breakouts have poor
+# follow-through. Expressed as a per-market clock time (open + 2h) so it lines
+# up with the actual session on both US (11:30 ET) and NSE (11:15 IST).
+def _orb_last_entry(symbol: str) -> time:
+    open_t = market_session(symbol).open_time
+    return time((open_t.hour + 2) % 24, open_t.minute)
 
 
 class ORBBreakout:
@@ -68,9 +74,13 @@ class ORBBreakout:
         if regime == "BEAR_OPEN":
             return signals
 
-        today_bars = _today_bars(df_5m)
-        if today_bars.empty or len(today_bars) < 6:
+        today_bars = _today_bars(df_5m, symbol)
+        # Need at least one full ATR/RSI window (14) of bars — the `ta` library
+        # raises IndexError if asked to seed a 14-window on fewer rows. Partial
+        # days (early-listed first bar, holiday half-sessions) are skipped here.
+        if today_bars.empty or len(today_bars) < 15:
             return signals
+        orb_last_entry = _orb_last_entry(symbol)
 
         orb_bars = max(1, cfg["orb_minutes"] // 5)
         orb_df = today_bars.iloc[:orb_bars]
@@ -97,7 +107,7 @@ class ORBBreakout:
             bar_time = bar.name.time() if hasattr(bar.name, "time") else None
 
             # ORB entries only work in the first 2 hours
-            if bar_time and bar_time >= ORB_LAST_ENTRY:
+            if bar_time and bar_time >= orb_last_entry:
                 break
 
             if pd.isna(bar["rsi"]) or pd.isna(bar["atr"]) or pd.isna(vol_avg.iloc[i]):
@@ -190,16 +200,11 @@ class ORBBreakout:
         return signals
 
 
-def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
+def _today_bars(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
     if df.empty:
         return df
-    idx = pd.to_datetime(df.index)
-    if idx.tzinfo is None:
-        idx = idx.tz_localize(ET)
-    else:
-        idx = idx.tz_convert(ET)
-    df = df.copy()
-    df.index = idx
+    df = localize_for_symbol(df, symbol)
+    idx = df.index
     today = idx[-1].date()
     return df[idx.date == today]
 

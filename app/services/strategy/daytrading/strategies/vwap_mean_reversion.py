@@ -28,11 +28,15 @@ import pandas as pd
 import ta.momentum as tam
 import ta.volatility as tav
 
-from app.services.strategy.daytrading.market_open import ET, compute_vwap
+from app.services.strategy.daytrading.market_open import (
+    compute_vwap, localize_for_symbol, market_session,
+)
 from app.services.strategy.daytrading.models import DayTradeSignal
 
-VWAP_MR_LAST_ENTRY = time(14, 30)
-VWAP_MR_MIN_START = time(9, 45)   # skip first 15 min
+# Entry window as offsets from the session open so it tracks the right market:
+# skip the first 15 min of noise; no new entries after open+5h.
+VWAP_MR_START_OFFSET_MIN = 15
+VWAP_MR_LAST_ENTRY_OFFSET_MIN = 300
 
 
 class VWAPMeanReversion:
@@ -68,9 +72,15 @@ class VWAPMeanReversion:
         if regime != "BULL_OPEN":
             return signals
 
-        today = _today_bars(df_5m)
-        if today.empty or len(today) < 6:  # NaN guard in loop handles rolling-20 warmup; was 20 (blocked until 10:10 AM)
+        today = _today_bars(df_5m, symbol)
+        # Need a full ATR/RSI window (14) — the `ta` library raises on fewer rows.
+        # NaN guard in the loop still handles the rolling-20 warmup beyond that.
+        if today.empty or len(today) < 15:
             return signals
+
+        sess = market_session(symbol)
+        mr_min_start = sess.after_open(VWAP_MR_START_OFFSET_MIN)
+        mr_last_entry = sess.after_open(VWAP_MR_LAST_ENTRY_OFFSET_MIN)
 
         today = today.copy()
         today["vwap"] = compute_vwap(today)
@@ -88,7 +98,7 @@ class VWAPMeanReversion:
             bar = today.iloc[i]
             bar_time = bar.name.time() if hasattr(bar.name, "time") else None
 
-            if bar_time and (bar_time < VWAP_MR_MIN_START or bar_time >= VWAP_MR_LAST_ENTRY):
+            if bar_time and (bar_time < mr_min_start or bar_time >= mr_last_entry):
                 continue
 
             if any(pd.isna(bar[c]) for c in ["rsi", "vwap", "atr"]):
@@ -189,16 +199,11 @@ class VWAPMeanReversion:
         return signals
 
 
-def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
+def _today_bars(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
     if df.empty:
         return df
-    idx = pd.to_datetime(df.index)
-    if idx.tzinfo is None:
-        idx = idx.tz_localize(ET)
-    else:
-        idx = idx.tz_convert(ET)
-    df = df.copy()
-    df.index = idx
+    df = localize_for_symbol(df, symbol)
+    idx = df.index
     today = idx[-1].date()
     return df[idx.date == today]
 

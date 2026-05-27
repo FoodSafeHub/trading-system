@@ -22,6 +22,7 @@ from app.services.strategy.daytrading.market_open import (
     compute_vwap,
     get_spy_regime,
     is_market_open,
+    market_session,
     market_status,
     regime_allows_strategy,
 )
@@ -45,6 +46,7 @@ _PROVIDER_COUNTERS: dict[str, int] = {
     "twelvedata": 0,
     "webull": 0,
     "yfinance": 0,
+    "upstox": 0,
     "empty": 0,
 }
 
@@ -170,9 +172,36 @@ def fetch_intraday(
     period: str = "5d",
     diag: PipelineDiagnostics | None = None,
 ) -> pd.DataFrame:
-    """Download intraday bars. Provider chain: Twelve Data -> Webull -> yfinance."""
+    """Download intraday bars.
+
+    India (NSE) symbols route to Upstox intraday, which is the only provider here
+    that serves NSE bars (Twelve Data/Webull/yfinance are US-oriented and return
+    empty for NSE intraday). US symbols use the chain: Twelve Data -> Webull ->
+    yfinance. India bars stay in IST; US bars are normalised to ET.
+    """
     df = pd.DataFrame()
     source = "yfinance"
+
+    # 0) India (NSE) — Upstox intraday. Short-circuits the US provider chain.
+    from app.services.markets import is_india_symbol
+    if is_india_symbol(symbol):
+        from app.services.marketdata import upstox_data
+        ind = upstox_data.fetch_bars(symbol, interval=interval, period=period)
+        if not ind.empty:
+            ind.attrs["source"] = "upstox"
+            _PROVIDER_COUNTERS["upstox"] = _PROVIDER_COUNTERS.get("upstox", 0) + 1
+            logger.info("[upstox-intraday] %s %s %s -> %d bars",
+                        symbol, interval, period, len(ind))
+            return ind
+        if diag is not None:
+            diag.data_warning = (
+                f"No Upstox intraday data for {symbol} {interval} {period}. "
+                f"Check Upstox login (token expires daily ~03:30 IST) and that "
+                f"the NSE symbol resolves."
+            )
+        logger.warning("fetch_intraday: 0 Upstox bars for %s %s %s", symbol, interval, period)
+        _PROVIDER_COUNTERS["empty"] += 1
+        return ind  # empty — do NOT fall through to US providers for an NSE name
 
     # 1) Twelve Data — primary for intraday intervals
     if interval in _TD_INTERVAL_MAP and interval != "1d":
@@ -484,6 +513,8 @@ def run_backtest(
     if strategy is None:
         return {"error": f"Unknown strategy: {strategy_name}"}
 
+    _mkt_tz = market_session(symbol).tz   # IST for India, ET for US — for trade-time display
+
     diag = PipelineDiagnostics(symbol=symbol, period=period)
 
     df_5m  = fetch_intraday(symbol, interval="5m",  period=period,  diag=diag)
@@ -693,8 +724,8 @@ def run_backtest(
                 "exit_price": round(exit_fill.fill_price, 4),
                 "stop_price": round(stop, 4),
                 "target_price": round(target, 4),
-                "entry_time": _ts_str(sig_time),
-                "exit_time": _ts_str(exit_time),
+                "entry_time": _ts_str(sig_time, _mkt_tz),
+                "exit_time": _ts_str(exit_time, _mkt_tz),
                 "hold_bars": hold_bars,
                 "pnl": round(pnl, 2),
                 "gross_pnl": round(gross_pnl, 2),
@@ -762,11 +793,15 @@ def run_backtest(
     return result
 
 
-def _ts_str(ts) -> str:
-    """Return a plain tz-naive ISO string (no offset) for consistent parsing."""
+def _ts_str(ts, tz=ET) -> str:
+    """Return a plain tz-naive ISO string (no offset) in the given market tz.
+
+    Defaults to US ET; callers pass the symbol's session tz (IST for India) so
+    recorded trade times match the market the symbol trades on.
+    """
     t = pd.Timestamp(ts)
     if t.tzinfo is not None:
-        t = t.tz_convert(ET).tz_localize(None)
+        t = t.tz_convert(tz).tz_localize(None)
     return t.strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -1080,6 +1115,8 @@ def run_backtest_with_brain(
     if strategy is None:
         return raw
 
+    _mkt_tz = market_session(symbol).tz   # IST for India, ET for US — for trade-time display
+
     df_5m = fetch_intraday(symbol, interval="5m", period=period)
     df_15m = fetch_intraday(symbol, interval="15m", period="730d")
     spy_df = fetch_intraday("SPY", interval="5m", period=period) if symbol != "SPY" else df_5m
@@ -1276,8 +1313,8 @@ def run_backtest_with_brain(
                 "exit_price": round(exit_fill.fill_price, 4),
                 "stop_price": round(stop, 4),
                 "target_price": round(target, 4),
-                "entry_time": _ts_str(sig_time),
-                "exit_time": _ts_str(exit_time),
+                "entry_time": _ts_str(sig_time, _mkt_tz),
+                "exit_time": _ts_str(exit_time, _mkt_tz),
                 "hold_bars": hold_bars,
                 "pnl": round(pnl, 2),
                 "gross_pnl": round(gross_pnl, 2),

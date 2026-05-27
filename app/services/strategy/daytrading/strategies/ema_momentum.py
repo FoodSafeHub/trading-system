@@ -22,7 +22,6 @@ Reality calibration:
 """
 from __future__ import annotations
 
-from datetime import time
 from typing import Any
 
 import pandas as pd
@@ -30,11 +29,15 @@ import ta.momentum as tam
 import ta.trend as tat
 import ta.volatility as tav
 
-from app.services.strategy.daytrading.market_open import ET, compute_vwap
+from app.services.strategy.daytrading.market_open import (
+    compute_vwap, localize_for_symbol, market_session,
+)
 from app.services.strategy.daytrading.models import DayTradeSignal
 
-EMA_LAST_ENTRY = time(14, 0)
-EMA_MIN_START = time(10, 0)
+# Entry window as offsets from the session open (works on both US and NSE):
+# skip first 30 min; no new entries after open+4.5h.
+EMA_START_OFFSET_MIN = 30
+EMA_LAST_ENTRY_OFFSET_MIN = 270
 
 
 class EMAMomentum:
@@ -71,9 +74,13 @@ class EMAMomentum:
         # warmed up even during the first hour of today's session.
         # BUG FIX: using today-only bars meant ema_slow=21 required 24 today-bars
         # = 6 hours into the session before any signal was possible.
-        all_15m = _localize(df_15m)
+        all_15m = _localize(df_15m, symbol)
         if all_15m.empty or len(all_15m) < cfg["ema_slow"] + 3:
             return signals
+
+        _sess = market_session(symbol)
+        ema_min_start = _sess.after_open(EMA_START_OFFSET_MIN)
+        ema_last_entry = _sess.after_open(EMA_LAST_ENTRY_OFFSET_MIN)
 
         today_date = all_15m.index[-1].date()
 
@@ -115,7 +122,7 @@ class EMAMomentum:
             bar = today.iloc[i]
             prev = today.iloc[i - 1]
             bar_time = bar.name.time() if hasattr(bar.name, "time") else None
-            if bar_time and (bar_time < EMA_MIN_START or bar_time >= EMA_LAST_ENTRY):
+            if bar_time and (bar_time < ema_min_start or bar_time >= ema_last_entry):
                 continue
 
             cols = ["ema_fast", "ema_slow", "rsi", "macd_hist", "vwap", "atr"]
@@ -247,21 +254,12 @@ class EMAMomentum:
         return signals
 
 
-def _localize(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    idx = pd.to_datetime(df.index)
-    if idx.tzinfo is None:
-        idx = idx.tz_localize(ET)
-    else:
-        idx = idx.tz_convert(ET)
-    df = df.copy()
-    df.index = idx
-    return df
+def _localize(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
+    return localize_for_symbol(df, symbol)
 
 
-def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
-    df = _localize(df)
+def _today_bars(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
+    df = _localize(df, symbol)
     if df.empty:
         return df
     today = df.index[-1].date()

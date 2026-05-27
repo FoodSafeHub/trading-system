@@ -28,17 +28,20 @@ Key improvements:
 """
 from __future__ import annotations
 
-from datetime import time
 from typing import Any
 
 import pandas as pd
 import ta.momentum as tam
 
-from app.services.strategy.daytrading.market_open import ET
+from app.services.strategy.daytrading.market_open import (
+    localize_for_symbol, market_session,
+)
 from app.services.strategy.daytrading.models import DayTradeSignal
 
-GAP_FADE_CUTOFF = time(10, 30)   # tightened from 11:00 — fade or don't
-CONFIRM_WINDOW_START = time(9, 45)  # require 5m confirmation after first 15 min
+# Session-relative gap-fade window so it tracks the right market.
+# Fade only in the first hour; require 5m confirmation after the first 15 min.
+GAP_FADE_CUTOFF_OFFSET_MIN = 60
+CONFIRM_WINDOW_START_OFFSET_MIN = 15
 
 
 class OpeningGapFade:
@@ -67,12 +70,15 @@ class OpeningGapFade:
         cfg = {**self.default_config, **(config or {})}
         signals: list[DayTradeSignal] = []
 
-        today_15m = _today_bars(df_15m)
-        all_15m = _localize(df_15m)
-        today_5m = _today_bars(df_5m)
+        today_15m = _today_bars(df_15m, symbol)
+        all_15m = _localize(df_15m, symbol)
+        today_5m = _today_bars(df_5m, symbol)
 
         if today_15m.empty or len(today_15m) < 2:
             return signals
+
+        _sess = market_session(symbol)
+        gap_fade_cutoff = _sess.after_open(GAP_FADE_CUTOFF_OFFSET_MIN)
 
         today_date = today_15m.index[-1].date()
         prev_bars = all_15m[all_15m.index.date < today_date]
@@ -94,7 +100,7 @@ class OpeningGapFade:
             return signals
 
         bar_time = today_15m.index[0].time()
-        if bar_time >= GAP_FADE_CUTOFF:
+        if bar_time >= gap_fade_cutoff:
             return signals
 
         # Use second bar's RSI (first bar has no prior context for RSI calc)
@@ -127,7 +133,7 @@ class OpeningGapFade:
             return signals  # doji / indecision bar — skip
 
         # Look for 5m confirmation: a reversal bar in the 9:45–10:30 window
-        confirm_bar = _find_5m_confirmation(today_5m, gap_pct)
+        confirm_bar = _find_5m_confirmation(today_5m, gap_pct, symbol)
 
         # Gap UP fade → SELL SHORT
         if (
@@ -236,16 +242,20 @@ class OpeningGapFade:
         return signals
 
 
-def _find_5m_confirmation(today_5m: pd.DataFrame, gap_pct: float) -> dict | None:
+def _find_5m_confirmation(today_5m: pd.DataFrame, gap_pct: float, symbol: str = "") -> dict | None:
     """
-    Look for a 5m reversal candle in the 9:45–10:30 window.
+    Look for a 5m reversal candle in the post-open confirmation window
+    (open+15m to open+60m, in the symbol's market session).
     Returns a dict with close/is_bearish/time if found, else None.
     """
     if today_5m.empty:
         return None
+    sess = market_session(symbol)
+    window_start = sess.after_open(CONFIRM_WINDOW_START_OFFSET_MIN)
+    window_end = sess.after_open(GAP_FADE_CUTOFF_OFFSET_MIN)
     window = today_5m[
-        (today_5m.index.time >= CONFIRM_WINDOW_START)
-        & (today_5m.index.time < GAP_FADE_CUTOFF)
+        (today_5m.index.time >= window_start)
+        & (today_5m.index.time < window_end)
     ]
     if window.empty:
         return None
@@ -268,21 +278,12 @@ def _find_5m_confirmation(today_5m: pd.DataFrame, gap_pct: float) -> dict | None
     return None
 
 
-def _localize(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    idx = pd.to_datetime(df.index)
-    if idx.tzinfo is None:
-        idx = idx.tz_localize(ET)
-    else:
-        idx = idx.tz_convert(ET)
-    df = df.copy()
-    df.index = idx
-    return df
+def _localize(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
+    return localize_for_symbol(df, symbol)
 
 
-def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
-    df = _localize(df)
+def _today_bars(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
+    df = _localize(df, symbol)
     if df.empty:
         return df
     today = df.index[-1].date()

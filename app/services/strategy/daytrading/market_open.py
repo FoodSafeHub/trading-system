@@ -10,7 +10,7 @@ Regime is evaluated at 9:45 AM ET (after first 15 minutes complete).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Tuple
 
 _log = logging.getLogger(__name__)
@@ -133,6 +133,82 @@ MARKET_CLOSE_TIME = time(15, 45)
 REGIME_EVAL_TIME = time(9, 45)
 GAP_FADE_CUTOFF = time(11, 0)
 LAST_ENTRY_TIME = time(15, 15)
+
+# ── Market-aware sessions ────────────────────────────────────────────────────
+# Day-trading strategies anchor on the cash session (opening range, last-entry
+# cutoff, EOD flat). Those clock times differ by market, so strategies must use
+# the session for the symbol they're evaluating instead of hardcoding US ET.
+IST = ZoneInfo("Asia/Kolkata")
+
+
+class MarketSession:
+    """Session clock for one market. All times are naive local times in `tz`."""
+    __slots__ = ("tz", "open_time", "close_time", "regime_eval_time",
+                 "gap_cutoff", "last_entry_time")
+
+    def __init__(self, tz, open_time, close_time, regime_eval_time,
+                 gap_cutoff, last_entry_time):
+        self.tz = tz
+        self.open_time = open_time
+        self.close_time = close_time
+        self.regime_eval_time = regime_eval_time
+        self.gap_cutoff = gap_cutoff
+        self.last_entry_time = last_entry_time
+
+    def after_open(self, minutes: int) -> time:
+        """Clock time `minutes` after the session open (session-local, no date)."""
+        base = datetime(2000, 1, 1, self.open_time.hour, self.open_time.minute)
+        return (base + timedelta(minutes=minutes)).time()
+
+    def before_close(self, minutes: int) -> time:
+        """Clock time `minutes` before the session close."""
+        base = datetime(2000, 1, 1, self.close_time.hour, self.close_time.minute)
+        return (base - timedelta(minutes=minutes)).time()
+
+
+# US equities (NYSE/Nasdaq), times in America/New_York.
+_SESSION_US = MarketSession(
+    tz=ET, open_time=MARKET_OPEN_TIME, close_time=MARKET_CLOSE_TIME,
+    regime_eval_time=REGIME_EVAL_TIME, gap_cutoff=GAP_FADE_CUTOFF,
+    last_entry_time=LAST_ENTRY_TIME,
+)
+# India (NSE) cash session 09:15–15:30 IST. Mirror the US offsets from the open:
+# regime eval +15m, gap cutoff +75m, last entry 15m before close, flatten 15:30.
+_SESSION_IN = MarketSession(
+    tz=IST, open_time=time(9, 15), close_time=time(15, 30),
+    regime_eval_time=time(9, 30), gap_cutoff=time(10, 30),
+    last_entry_time=time(15, 15),
+)
+
+
+def market_session(symbol: str) -> MarketSession:
+    """Return the cash-session clock for `symbol`'s market (NSE for India, else US)."""
+    try:
+        from app.services.markets import is_india_symbol
+        if is_india_symbol(symbol):
+            return _SESSION_IN
+    except Exception:
+        pass
+    return _SESSION_US
+
+
+def localize_for_symbol(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Index → the symbol's market timezone (IST for India, ET for US).
+
+    Replaces the per-strategy `tz_localize(ET)` helpers so session-relative logic
+    (opening range, entry cutoffs) lines up with the correct market.
+    """
+    if df.empty:
+        return df
+    sess = market_session(symbol)
+    idx = pd.to_datetime(df.index)
+    if idx.tzinfo is None:
+        idx = idx.tz_localize(sess.tz)
+    else:
+        idx = idx.tz_convert(sess.tz)
+    df = df.copy()
+    df.index = idx
+    return df
 
 
 def now_et() -> datetime:

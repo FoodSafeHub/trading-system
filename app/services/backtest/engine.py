@@ -57,14 +57,29 @@ def run_backtest(
     period: str = "1y",
     initial_capital: float = 100_000.0,
     quantity: float = 1.0,
+    df: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """
     Simulate a strategy over historical data.
     Uses next-bar open as the fill price to avoid lookahead bias.
+
+    df: optional pre-fetched OHLCV. When provided, skips the get_ohlcv call —
+    used by grid-search calibration to reuse one fetch across many param combos.
     """
-    df = get_ohlcv(symbol, period=period)
+    if df is None:
+        df = get_ohlcv(symbol, period=period)
     if df.empty or len(df) < 30:
-        raise ValueError(f"Not enough data for {symbol} over period {period}")
+        # Distinguish "no data anywhere" from "stock too newly listed". A short
+        # series means the fetch worked but the stock simply hasn't traded long
+        # enough to backtest — common for recent IPOs/relistings on NSE.
+        if df.empty:
+            raise ValueError(f"No data returned for {symbol} over period {period}")
+        listed = str(df.index[0])[:10]
+        raise ValueError(
+            f"{symbol} has only {len(df)} trading days of history (listed ~{listed}); "
+            f"backtests need at least 30 bars. Pick a longer-established stock or "
+            f"a shorter period."
+        )
 
     closes = df["Close"].dropna()
     opens  = df["Open"].dropna()

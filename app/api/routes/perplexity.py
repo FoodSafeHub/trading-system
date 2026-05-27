@@ -403,13 +403,31 @@ def backtest_all(
     initial_capital: float = 100_000.0,
     position_pct: float = 0.0,
 ):
-    """Run all 5 Perplexity strategies on one symbol and return a comparison table."""
-    results = []
-    for strategy in PERPLEXITY_STRATEGIES:
+    """Run all Perplexity strategies on one symbol and return a comparison table.
+
+    Fetches the symbol's bars (and SPY for regime) ONCE and injects them into every
+    strategy run — previously each of the 12 strategies re-downloaded the same
+    symbol+SPY history, which on a 10y span blew past the client's read timeout.
+    The runs are independent and read-only over shared data, so they execute in
+    parallel.
+    """
+    sym = symbol.upper()
+    df_full = get_ohlcv(sym, period=period)
+    if df_full.empty or len(df_full) < 60:
+        raise HTTPException(400, f"Not enough data for {sym} (need at least 60 bars)")
+    try:
+        spy_close = df_full["Close"] if sym == "SPY" else get_ohlcv("SPY", period="10y")["Close"]
+    except Exception:
+        spy_close = df_full["Close"]
+
+    def _run_one(strategy):
         try:
-            r = run_perplexity_backtest(strategy, symbol.upper(), period, initial_capital,
-                                        position_pct=position_pct)
-            results.append({
+            r = run_perplexity_backtest(
+                strategy, sym, period, initial_capital,
+                position_pct=position_pct,
+                df_full=df_full, spy_close=spy_close,
+            )
+            return {
                 "strategy_name": r.strategy_name,
                 "total_trades": r.total_trades,
                 "win_rate_pct": r.win_rate_pct,
@@ -426,9 +444,13 @@ def backtest_all(
                 "capital_employed": r.capital_employed,
                 "max_drawdown_pct": r.max_drawdown_pct,
                 "sharpe_ratio": r.sharpe_ratio,
-            })
+            }
         except Exception as exc:
-            results.append({"strategy_name": strategy.name, "error": str(exc)})
+            return {"strategy_name": strategy.name, "error": str(exc)}
+
+    # Run the independent strategy backtests in parallel over the shared data.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(PERPLEXITY_STRATEGIES))) as ex:
+        results = list(ex.map(_run_one, PERPLEXITY_STRATEGIES))
     return results
 
 

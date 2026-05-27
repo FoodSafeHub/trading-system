@@ -49,7 +49,6 @@ Known weaknesses: Whipsaws on news spikes; fake expansions that re-enter band wi
 """
 from __future__ import annotations
 
-from datetime import time
 from typing import Any
 
 import pandas as pd
@@ -57,10 +56,13 @@ import ta.momentum as tam
 import ta.trend as tat
 import ta.volatility as tav
 
-from app.services.strategy.daytrading.market_open import ET, compute_vwap, LAST_ENTRY_TIME
+from app.services.strategy.daytrading.market_open import (
+    compute_vwap, localize_for_symbol, market_session,
+)
 from app.services.strategy.daytrading.models import DayTradeSignal
 
-BB_LAST_ENTRY = time(14, 30)
+# No new entries after open+5h (US 14:30 ET, NSE 14:15 IST).
+BB_LAST_ENTRY_OFFSET_MIN = 300
 
 
 class BollingerMomentum:
@@ -124,10 +126,12 @@ class BollingerMomentum:
         # RSI, EMA, and ATR are warmed up from prior-day bars.  This allows
         # signals in the first hour without needing 20+ today-only bars.
         # No lookahead: the runner passes only history up to the current date.
-        all_5m = _localize(df_5m)
+        all_5m = localize_for_symbol(df_5m, symbol)
         min_bars = cfg["bb_length"] + cfg["contraction_lookback"] + 4
         if all_5m.empty or len(all_5m) < min_bars:
             return signals
+
+        bb_last_entry = market_session(symbol).after_open(BB_LAST_ENTRY_OFFSET_MIN)
 
         today_date = all_5m.index[-1].date()
 
@@ -165,7 +169,7 @@ class BollingerMomentum:
 
             bar = df.iloc[i]
             bar_time = bar.name.time() if hasattr(bar.name, "time") else None
-            if bar_time and bar_time >= BB_LAST_ENTRY:
+            if bar_time and bar_time >= bb_last_entry:
                 break
 
             req_cols = ["bb_upper", "bb_lower", "bb_width", "ema_fast", "rsi", "atr", "bar_range", "range_avg", "vol_avg"]
@@ -446,22 +450,8 @@ class BollingerMomentum:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _localize(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure the DataFrame index is timezone-aware ET."""
-    if df.empty:
-        return df
-    idx = pd.to_datetime(df.index)
-    if idx.tzinfo is None:
-        idx = idx.tz_localize(ET)
-    else:
-        idx = idx.tz_convert(ET)
-    df = df.copy()
-    df.index = idx
-    return df
-
-
-def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
-    df = _localize(df)
+def _today_bars(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
+    df = localize_for_symbol(df, symbol)
     if df.empty:
         return df
     today = df.index[-1].date()
