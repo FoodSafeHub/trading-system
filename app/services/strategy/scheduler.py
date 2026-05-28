@@ -85,6 +85,48 @@ def _quantize_for_broker(shares: float) -> float:
     return float(whole) if whole >= 1 else 0.0
 
 
+def _live_position_state(symbol: str, df, held_qty: float):
+    """Build the PositionState the trailing-stop overlay needs for a LIVE bar.
+
+    Unlike the backtest (which tracks entry/peak in-loop), the live path sees one
+    cycle at a time, so we reconstruct from order history: entry_price = the most
+    recent filled BUY's fill price; highest_close = max close from that fill date
+    forward in the fetched df. Returns None when flat or when we can't establish
+    an entry, so the overlay no-ops and the rule's fixed-band exit stands.
+    """
+    if held_qty <= 0 or df is None or df.empty:
+        return None
+    from app.models.orders import Order
+    from app.services.strategy.rules import PositionState
+    try:
+        with SessionLocal() as db:
+            last_buy = (
+                db.query(Order)
+                .filter(Order.symbol == symbol.upper(), Order.side == "BUY",
+                        Order.status == "filled")
+                .order_by(Order.created_at.desc())
+                .first()
+            )
+        if last_buy is None or not last_buy.fill_price:
+            return None
+        entry_price = float(last_buy.fill_price)
+        # Peak close since entry: slice df from the fill date forward.
+        peak = entry_price
+        fill_dt = last_buy.filled_at or last_buy.created_at
+        try:
+            since = df.loc[str(fill_dt)[:10]:]
+            if not since.empty:
+                peak = max(entry_price, float(since["Close"].max()))
+            else:
+                peak = max(entry_price, float(df["Close"].iloc[-1]))
+        except Exception:
+            peak = max(entry_price, float(df["Close"].iloc[-1]))
+        return PositionState(entry_price=entry_price, highest_close=peak)
+    except Exception as exc:
+        logger.warning("[scheduler] could not build position state for %s: %s", symbol, exc)
+        return None
+
+
 def _compute_quantity(
     symbol: str,
     entry: float,
@@ -259,6 +301,28 @@ def _run_cycle() -> None:
             except Exception as exc:
                 logger.warning("[scheduler] Could not fetch positions: %s", exc)
 
+            # ── Regime-aware open-position cap ──────────────────────────
+            # Resolve the max number of distinct holdings the current market
+            # regime allows (bull 10 / bear 3 / deep-bear 1, from settings).
+            # Computed once per cycle: get_current_regime does a benchmark
+            # fetch, so we don't want it per-order. A BUY that would open a
+            # NEW symbol is blocked once we're at the cap; top-ups to symbols
+            # we already hold don't count (they don't add a position). Fails
+            # open — if regime detection errors, no cap is imposed.
+            max_open_positions: int | None = None
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+                from app.services.market_regime import get_current_regime, get_regime_risk_caps
+                _regime = get_current_regime(_dt.now(_tz.utc))
+                max_open_positions = int(get_regime_risk_caps(_regime)["max_positions"])
+                logger.info(
+                    "[scheduler] Regime %s → max open positions %d (currently holding %d)",
+                    getattr(_regime, "value", _regime), max_open_positions,
+                    sum(1 for q in current_positions.values() if q > 0),
+                )
+            except Exception as exc:
+                logger.warning("[scheduler] Regime cap unavailable, no position cap this cycle: %s", exc)
+
             # signals_to_act: list of (symbol, direction, label, entry_price, stop_price)
             signals_to_act: list[tuple[str, str, str, float, float | None]] = []
 
@@ -343,7 +407,16 @@ def _run_cycle() -> None:
                                     df = df.copy()
                                     df.iloc[-1, df.columns.get_loc("Close")] = live
                                 prices = df["Close"].dropna()
-                                sig = evaluate_strategy(match.type, symbol, prices, match.params, ohlcv=df)
+                                # Trailing-stop overlay needs open-position context
+                                # (entry + peak-since-entry). No-op if flat or if the
+                                # strategy's params don't enable the trail.
+                                pos_state = _live_position_state(
+                                    symbol, df, current_positions.get(symbol.upper(), 0.0)
+                                )
+                                sig = evaluate_strategy(
+                                    match.type, symbol, prices, match.params,
+                                    ohlcv=df, position=pos_state,
+                                )
                                 if sig.direction != "HOLD":
                                     entry = live or sig.price_at_signal or float(prices.iloc[-1])
                                     signals_to_act.append((
@@ -420,6 +493,31 @@ def _run_cycle() -> None:
                     if qty <= 0:
                         logger.info("[scheduler] BUY %s skipped — sizing produced 0 shares (cap=%s, shares=%s, entry=%.2f)", symbol, asgn_cap, asgn_shares, entry)
                         continue
+                    # Idempotent re-entry: an assigned BUY signal stays active for
+                    # several hourly cycles. Once we already hold at least the
+                    # target size, don't keep stacking — that would pyramid the
+                    # position far past the user's cap. Re-buy only tops up toward
+                    # the target if a partial fill left us short.
+                    held = current_positions.get(symbol, 0.0)
+                    if held >= qty:
+                        logger.info(
+                            "[scheduler] BUY %s skipped — already hold %.4f >= target %.4f",
+                            symbol, held, qty,
+                        )
+                        continue
+                    # Regime open-position cap: only blocks BUYs that would open
+                    # a NEW symbol. A top-up to a symbol we already hold (held>0)
+                    # is exempt — it doesn't increase the count of distinct
+                    # positions. None = regime lookup failed, so no cap.
+                    if max_open_positions is not None and held <= 0:
+                        open_count = sum(1 for q in current_positions.values() if q > 0)
+                        if open_count >= max_open_positions:
+                            logger.info(
+                                "[scheduler] BUY %s skipped — at regime position cap "
+                                "(%d/%d open). New entries blocked until a slot frees.",
+                                symbol, open_count, max_open_positions,
+                            )
+                            continue
                 else:
                     # SELL: only close positions we actually hold. Be strict —
                     # require a meaningful position (>= 1 share) to avoid the
@@ -491,6 +589,18 @@ def _run_cycle() -> None:
                     if qty <= 0:
                         logger.info("[scheduler] Consensus BUY %s skipped — sizing produced 0 shares", symbol)
                         continue
+                    # Same regime open-position cap as the assigned path. Only
+                    # blocks a BUY that opens a new symbol; existing holdings exempt.
+                    held = current_positions.get(symbol, 0.0)
+                    if max_open_positions is not None and held <= 0:
+                        open_count = sum(1 for q in current_positions.values() if q > 0)
+                        if open_count >= max_open_positions:
+                            logger.info(
+                                "[scheduler] Consensus BUY %s skipped — at regime position cap "
+                                "(%d/%d open).",
+                                symbol, open_count, max_open_positions,
+                            )
+                            continue
                 order_req = OrderRequest(
                     symbol=symbol,
                     side=direction,  # type: ignore[arg-type]
@@ -555,6 +665,25 @@ def _run_scanner_job() -> None:
     _run_scanner_job_universe("watchlist", top_n=5)
 
 
+_POSITION_SYNC_INTERVAL_SECONDS = 900   # 15 min — cheap broker read
+
+
+def _run_position_sync_job() -> None:
+    """Scheduled reconciliation — snapshot broker positions during market hours.
+
+    Skips outside US market hours so it doesn't poll the broker overnight.
+    Read-only against the broker; append-only to position_snapshots.
+    """
+    settings = get_settings()
+    if not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
+        return
+    try:
+        from app.services.reconciliation.position_sync import sync_positions_once
+        sync_positions_once()
+    except Exception as exc:
+        logger.error("[scheduler] Position sync job failed: %s", exc)
+
+
 def start_scheduler() -> None:
     global _scheduler
     settings = get_settings()
@@ -573,6 +702,12 @@ def start_scheduler() -> None:
         name="Strategy Evaluation Cycle",
         replace_existing=True,
         max_instances=1,
+        # A tick that fires late (server busy, prior cycle ran long) must still
+        # run instead of being silently dropped — that's how an assigned BUY
+        # window (e.g. FANG_Pullback_EMA50) got skipped for a whole hour.
+        # coalesce collapses a backlog of missed ticks into one run.
+        misfire_grace_time=settings.scheduler_interval_seconds,
+        coalesce=True,
     )
     _scheduler.add_job(
         _run_scanner_job_universe,
@@ -611,11 +746,23 @@ def start_scheduler() -> None:
         replace_existing=True,
         max_instances=1,
     )
+    _scheduler.add_job(
+        _run_position_sync_job,
+        trigger=IntervalTrigger(
+            seconds=_POSITION_SYNC_INTERVAL_SECONDS,
+            start_date=now + timedelta(minutes=1),
+        ),
+        id="position_sync",
+        name="Broker Position Reconciliation",
+        replace_existing=True,
+        max_instances=1,
+    )
     _scheduler.start()
     logger.info(
         f"[scheduler] Started — strategy_cycle={settings.scheduler_interval_seconds}s, "
         f"scanner watchlist={_SCANNER_WATCHLIST_INTERVAL_SECONDS}s, "
-        f"scanner sp500/nasdaq100={_SCANNER_LARGE_INTERVAL_SECONDS}s"
+        f"scanner sp500/nasdaq100={_SCANNER_LARGE_INTERVAL_SECONDS}s, "
+        f"position_sync={_POSITION_SYNC_INTERVAL_SECONDS}s"
     )
 
 

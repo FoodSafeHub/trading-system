@@ -9,7 +9,8 @@ issue BUY signals when the broader trend is up.
 """
 
 import logging
-from typing import Any, Dict
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
 import pandas as pd
 
@@ -22,6 +23,76 @@ from app.services.indicators.supertrend import compute_supertrend
 from app.services.strategy.models import StrategySignal
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PositionState:
+    """Open-position context the caller threads in so a stateless rule can run
+    a trailing-stop overlay. entry_price = our fill; highest_close = the highest
+    close seen since entry (caller maintains it bar-by-bar)."""
+    entry_price: float
+    highest_close: float
+    bars_held: int = 0
+
+
+def _apply_chandelier_overlay(
+    signal: StrategySignal,
+    prices: pd.Series,
+    ohlcv: Optional[pd.DataFrame],
+    params: Dict[str, Any],
+    position: Optional[PositionState],
+) -> StrategySignal:
+    """ATR-Chandelier trailing-stop overlay on the exit decision.
+
+    Opt-in via params['trail_enabled']. Default OFF -> returns signal unchanged,
+    so any symbol without the param keeps its current fixed-band exit exactly.
+
+    Once an open position is up >= trail_trigger_pct, we stop honouring the
+    rule's fixed-band SELL and instead ride the trend until the close breaks
+    below the Chandelier line (highest_close_since_entry - atr_mult*ATR). Below
+    the trigger (failed bounce / loser), the rule's SELL is honoured as-is, so
+    hard stops and quick mean-reversion exits are untouched. Entries are never
+    affected — overlay only runs when a position is open.
+    """
+    if not params.get("trail_enabled") or position is None:
+        return signal
+
+    trigger_pct = float(params.get("trail_trigger_pct", 3.0))
+    atr_mult    = float(params.get("atr_trail_mult", 3.0))
+    atr_period  = int(params.get("atr_trail_period", 22))
+
+    if ohlcv is None or "High" not in ohlcv.columns or len(ohlcv) < atr_period + 1:
+        return signal  # can't compute ATR -> leave the rule's decision alone
+
+    c_now = float(prices.iloc[-1])
+    if position.entry_price <= 0:
+        return signal
+    unreal_pct = (c_now - position.entry_price) / position.entry_price * 100.0
+    if unreal_pct < trigger_pct:
+        return signal  # not yet in profit-runway zone — honour the rule's exit
+
+    atr_v = float(_atr_raw(ohlcv, atr_period).iloc[-1])
+    if pd.isna(atr_v) or atr_v <= 0:
+        return signal
+    chandelier = position.highest_close - atr_mult * atr_v
+
+    if c_now <= chandelier:
+        # Trend broke -> force the exit even if the rule said HOLD.
+        return StrategySignal(
+            symbol=signal.symbol, direction="SELL", strength=signal.strength,
+            price_at_signal=c_now, indicators={**signal.indicators, "trail_exit": True,
+                                               "chandelier": round(chandelier, 2)},
+            strategy_name=signal.strategy_name,
+        )
+    if signal.direction == "SELL":
+        # Still above the trail -> suppress the fixed-band SELL, ride the winner.
+        return StrategySignal(
+            symbol=signal.symbol, direction="HOLD", strength=signal.strength,
+            price_at_signal=c_now, indicators={**signal.indicators, "trail_hold": True,
+                                               "chandelier": round(chandelier, 2)},
+            strategy_name=signal.strategy_name,
+        )
+    return signal
 
 
 def _above_sma200(prices: pd.Series) -> bool:
@@ -885,10 +956,14 @@ def evaluate_strategy(
     prices: pd.Series,
     params: Dict[str, Any],
     ohlcv: pd.DataFrame | None = None,
+    position: Optional[PositionState] = None,
 ) -> StrategySignal:
     rule_fn = _RULE_REGISTRY.get(strategy_type)
     if rule_fn is None:
         raise ValueError(f"Unknown strategy type: {strategy_type!r}. Available: {list(_RULE_REGISTRY)}")
     if ohlcv is not None:
-        return rule_fn(symbol, prices, params, ohlcv=ohlcv)
-    return rule_fn(symbol, prices, params)
+        signal = rule_fn(symbol, prices, params, ohlcv=ohlcv)
+    else:
+        signal = rule_fn(symbol, prices, params)
+    # Trailing-stop overlay (opt-in via params['trail_enabled']; no-op otherwise).
+    return _apply_chandelier_overlay(signal, prices, ohlcv, params, position)

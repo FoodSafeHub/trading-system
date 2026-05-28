@@ -14,7 +14,7 @@ from typing import List, Optional
 import pandas as pd
 
 from app.services.market_data.provider import get_ohlcv
-from app.services.strategy.rules import evaluate_strategy
+from app.services.strategy.rules import evaluate_strategy, PositionState
 
 
 @dataclass
@@ -88,6 +88,8 @@ def run_backtest(
     capital = initial_capital
     position = 0.0          # shares held
     position_cost = 0.0     # total cost basis
+    entry_price = 0.0       # fill price of the open position (for trailing-stop overlay)
+    highest_close = 0.0     # highest close seen since entry (Chandelier trail)
     trades: List[BacktestTrade] = []
     equity_curve: List[dict] = []
     peak_equity = initial_capital
@@ -106,7 +108,19 @@ def run_backtest(
         today = dates[i]
 
         df_slice = df.iloc[:i]
-        signal = evaluate_strategy(strategy_type, symbol, price_series, params, ohlcv=df_slice)
+        # The rule decides on data through bar i-1 (price_series/df_slice end at
+        # i-1) and we fill at bar i's open — no lookahead. The trailing overlay
+        # must see the SAME frame, so trail against the peak close through i-1,
+        # not current_close (= close[i], which the rule cannot see yet).
+        if position > 0:
+            highest_close = max(highest_close, float(closes.iloc[i - 1]))
+        pos_state = (
+            PositionState(entry_price=entry_price, highest_close=highest_close)
+            if position > 0 else None
+        )
+        signal = evaluate_strategy(
+            strategy_type, symbol, price_series, params, ohlcv=df_slice, position=pos_state
+        )
 
         direction = signal.direction
 
@@ -122,6 +136,8 @@ def run_backtest(
                 capital -= cost
                 position = actual_qty
                 position_cost = cost
+                entry_price = fill_price
+                highest_close = current_close
                 trades.append(BacktestTrade(
                     date=today, symbol=symbol, side="BUY",
                     price=fill_price, quantity=actual_qty, value=cost,
@@ -139,6 +155,8 @@ def run_backtest(
             ))
             position = 0.0
             position_cost = 0.0
+            entry_price = 0.0
+            highest_close = 0.0
 
         # Mark-to-market equity
         equity = capital + position * current_close

@@ -8,6 +8,7 @@ from collections import defaultdict
 
 from app.config import get_settings
 from app.db import SessionLocal
+from app.models.assignments import SymbolStrategyAssignment
 from app.models.signals import Signal
 from app.schemas.orders import OrderRequest
 from app.services.brokers.factory import get_broker
@@ -42,13 +43,25 @@ async def run_strategy_cycle():
     account_id = accounts[0].account_id if accounts else ""
     svc = ExecutionService(broker)
 
+    # Symbols with an enabled per-symbol assignment trade ONLY on their assigned
+    # strategy — they are immune to this consensus pool. Without this guard, the
+    # manual cycle re-evaluated all of strategies.json and could sell a symbol
+    # the scheduler is managing (e.g. an NVDA assigned to RSI2 got SELL-voted by
+    # NVDA_BB_Squeeze_Breakout + NVDA_Pullback_EMA50). Mirrors scheduler.py.
+    with SessionLocal() as db:
+        assigned_symbols = {
+            sym for (sym,) in db.query(SymbolStrategyAssignment.symbol)
+            .filter_by(enabled=True)
+            .all()
+        }
+
     # ── Step 1: collect all signals ──────────────────────────
     raw_results = []
     # votes[symbol][direction] = list of strategy names
     votes: dict = defaultdict(lambda: defaultdict(list))
 
     for config in configs:
-        if not config.enabled:
+        if not config.enabled or config.symbol in assigned_symbols:
             continue
         try:
             prices = get_price_series(config.symbol, period="1y", use_cache=False)

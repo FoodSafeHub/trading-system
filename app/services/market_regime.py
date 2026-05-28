@@ -98,6 +98,15 @@ def get_current_regime(
     if df.empty:
         raise ValueError(f"No benchmark data available for {symbol}")
     ts = pd.Timestamp(date)
+    # Align tz-awareness with the benchmark index, else the comparison raises
+    # "Cannot compare tz-naive and tz-aware". Callers that pass df.index[-1]
+    # are already aware; a plain datetime (e.g. the scheduler's utcnow()) is
+    # naive and gets localized/converted to the index tz here.
+    idx_tz = getattr(df.index, "tz", None)
+    if idx_tz is not None and ts.tzinfo is None:
+        ts = ts.tz_localize("UTC").tz_convert(idx_tz)
+    elif idx_tz is None and ts.tzinfo is not None:
+        ts = ts.tz_localize(None)
     history = df.loc[df.index <= ts]
     if history.empty:
         raise ValueError(f"Benchmark data for {symbol} does not include {ts.date()}")

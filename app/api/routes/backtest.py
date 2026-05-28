@@ -281,6 +281,71 @@ def backtest_run_generic(
     }
 
 
+@router.get("/walkforward/{symbol}/{strategy_type}")
+def backtest_walkforward(
+    symbol: str,
+    strategy_type: str,
+    mode: str = "simple",
+    period: str = "5y",
+    train_pct: float = 0.70,
+    train_years: float = 3.0,
+    test_years: float = 1.0,
+    step_years: float = 1.0,
+    initial_capital: float = 100000.0,
+):
+    """Walk-forward out-of-sample validation for a single v2 strategy.
+
+    Drives the canonical run_backtest engine (same no-lookahead path as the
+    Backtest page and scheduler, including the Chandelier overlay) on time
+    slices, so the OOS numbers are directly comparable to a normal backtest.
+
+    mode="simple"  : one IS (train_pct) / OOS (rest) split.
+    mode="rolling" : sliding IS/OOS windows, OOS curves stitched into a
+                     composite; reports a global Walk-Forward Efficiency.
+
+    Resolves params via _make_generic_configs_full (factory defaults + any
+    saved calibration profile), so what's validated matches what trades.
+    """
+    from app.services.scanner.scanner_service import _make_generic_configs_full
+    from app.services.backtest.walkforward_v2 import (
+        run_simple_split_v2, run_rolling_v2, to_dict,
+    )
+
+    sym = symbol.upper().strip()
+    stype = (strategy_type or "").strip().lower()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    cfg = next((c for c in _make_generic_configs_full(sym) if c.type == stype), None)
+    if cfg is None:
+        valid = sorted({c.type for c in _make_generic_configs_full(sym)})
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown strategy_type '{strategy_type}'. Valid: {valid}",
+        )
+
+    try:
+        if mode == "rolling":
+            result = run_rolling_v2(
+                strategy_type=stype, symbol=sym, params=cfg.params,
+                period=period, train_years=train_years, test_years=test_years,
+                step_years=step_years, initial_capital=initial_capital,
+            )
+        else:
+            result = run_simple_split_v2(
+                strategy_type=stype, symbol=sym, params=cfg.params,
+                period=period, train_pct=train_pct, initial_capital=initial_capital,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    out = to_dict(result)
+    out["strategy_name"] = cfg.name
+    return out
+
+
 @router.get("/custom-consensus/{symbol}")
 def backtest_custom_consensus(
     symbol: str,

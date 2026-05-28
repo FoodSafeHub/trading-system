@@ -145,8 +145,93 @@ class ExecutionService:
         # ── Step 6: Handle immediate fill ────────────────────────────────────
         if final_status in ("filled", "partial"):
             self._handle_fill(db_order.id, confirmed or status_resp)
+            # ── Step 6b: Protective stop on a filled BUY ─────────────────────
+            # Place a resting SELL STOP at the broker so the position survives a
+            # software outage. Default OFF; skipped for paper (the paper broker
+            # fills a STOP at market immediately, which would self-close the
+            # position we just opened). Best-effort — a stop failure must not
+            # unwind the (already-filled) entry.
+            if order_req.side == "BUY":
+                try:
+                    await self._submit_protective_stop(
+                        order_req, account_id, confirmed or status_resp
+                    )
+                except Exception as exc:
+                    logger.error("[exec] Protective stop submission failed (non-fatal): %s", exc)
 
         return db_order
+
+    async def _submit_protective_stop(
+        self,
+        buy_req: OrderRequest,
+        account_id: str,
+        fill: OrderStatusResponse,
+    ) -> None:
+        """Place a resting SELL STOP to protect a freshly-filled BUY.
+
+        No-op unless settings.auto_protective_stop_enabled. Skipped for the
+        paper broker (its STOP fills at market on submit). Stop price is the
+        BUY's own stop_price when the scheduler supplied one, else
+        fill_price * (1 - protective_stop_pct/100).
+        """
+        settings = get_settings()
+        if not settings.auto_protective_stop_enabled:
+            return
+        # Skip paper: its STOP fills at market on submit, self-closing the
+        # position. A multi-broker that is paper-only is likewise skipped.
+        broker_name = getattr(self.broker, "name", "") or ""
+        if "paper" in broker_name and "schwab" not in broker_name \
+                and "webull" not in broker_name and "zerodha" not in broker_name:
+            logger.debug("[exec] Protective stop skipped — paper broker (%s)", broker_name)
+            return
+
+        filled_qty = fill.filled_quantity or buy_req.quantity
+        if not filled_qty or filled_qty <= 0:
+            return
+        fill_price = fill.fill_price or 0.0
+        stop_price = buy_req.stop_price
+        if not stop_price or stop_price <= 0:
+            if fill_price <= 0:
+                logger.warning("[exec] Protective stop skipped — no stop_price and no fill_price")
+                return
+            stop_price = round(fill_price * (1 - settings.protective_stop_pct / 100.0), 2)
+        if fill_price > 0 and stop_price >= fill_price:
+            logger.warning(
+                "[exec] Protective stop %.2f not below fill %.2f — skipping", stop_price, fill_price
+            )
+            return
+
+        stop_req = OrderRequest(
+            symbol=buy_req.symbol,
+            side="SELL",
+            order_type="STOP",
+            quantity=filled_qty,
+            stop_price=stop_price,
+            time_in_force="GTC",
+            source=buy_req.source,
+            idempotency_key=f"protstop-{buy_req.idempotency_key}",
+        )
+        status_resp = await self.broker.place_order(stop_req, account_id)
+        stop_order = self._persist_order(stop_req, None, status="submitted")
+        self._update_order_status(
+            stop_order.id,
+            status="submitted",
+            broker_order_id=status_resp.broker_order_id,
+            submitted_at=datetime.now(tz=timezone.utc),
+        )
+        _audit.log(
+            event_type="PROTECTIVE_STOP_PLACED",
+            entity_type="order",
+            entity_id=stop_order.id,
+            description=(
+                f"SELL STOP {buy_req.symbol} x{filled_qty} @ {stop_price} "
+                f"(protects BUY {buy_req.idempotency_key})"
+            ),
+        )
+        logger.info(
+            "[exec] Protective stop placed: SELL STOP %s x%.4f @ %.2f broker_id=%s",
+            buy_req.symbol, filled_qty, stop_price, status_resp.broker_order_id,
+        )
 
     async def _buying_power_preflight(
         self,

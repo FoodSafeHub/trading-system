@@ -77,9 +77,36 @@ class RiskEngine:
             )
 
     def _daily_realized_loss(self) -> float:
-        """Sum of negative P&L from filled orders today (simplified: fill price difference not tracked here)."""
-        # TODO: Wire to actual fill records for accurate P&L once executions are recorded
-        return 0.0
+        """Loss magnitude (positive number) realized so far today, in USD.
+
+        Reads FIFO-matched round-trips from `realized_trades` whose SELL closed
+        today (broker tz), nets their P&L, and returns the loss as a positive
+        figure (0.0 if flat or net-positive). The caller compares this against
+        max_daily_loss_usd, so only a net-loss day can trip the breaker — a
+        winning round-trip cancelling a losing one will not.
+        """
+        tz = self._settings.tz
+        start_of_day = now_in_tz(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_utc = start_of_day.astimezone(timezone.utc)
+        try:
+            from app.models.realized_trades import RealizedTrade
+            from app.services.pnl.store import sync_realized_trades
+
+            with SessionLocal() as db:
+                # Materialize any new round-trips first so an exit that just
+                # filled today is counted, not missed until the next /pnl call.
+                sync_realized_trades(db)
+                net = (
+                    db.query(RealizedTrade.realized_pnl)
+                    .filter(RealizedTrade.sell_at >= start_utc)
+                    .all()
+                )
+            total = sum(p for (p,) in net)
+            return -total if total < 0 else 0.0
+        except Exception as exc:
+            # Never let a P&L read failure block trading; log and fail open.
+            logger.warning("[risk] daily-loss read failed, treating as 0: %s", exc)
+            return 0.0
 
     def _last_order_time(self, symbol: str) -> Optional[datetime]:
         with SessionLocal() as db:
@@ -187,8 +214,13 @@ class RiskEngine:
 
         # 3. Market hours — per-broker. India (Zerodha) trades on the NSE/BSE
         #    session (09:15–15:30 IST), not the US session.
+        #    LIMIT orders are allowed outside regular hours: the Schwab adapter
+        #    routes them session=SEAMLESS into the extended-hours session, where
+        #    a resting limit can fill or wait for the next open. MARKET orders
+        #    are NOT eligible for extended hours and would queue blindly into an
+        #    unknown open price, so they stay blocked outside RTH.
         open_str, close_str, tz, tz_name = self._market_hours_for(order.symbol)
-        if not is_market_hours(open_str, close_str, tz):
+        if not is_market_hours(open_str, close_str, tz) and order.order_type == "MARKET":
             return RiskCheckResult(
                 passed=False,
                 blocked_reason=f"Outside market hours ({open_str}–{close_str} {tz_name})",

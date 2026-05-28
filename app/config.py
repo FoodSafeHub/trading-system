@@ -93,6 +93,17 @@ class Settings(BaseSettings):
     buying_power_check_enabled: bool = True
     buying_power_min_buffer_usd: float = 0.0
 
+    # ── Protective stops ─────────────────────────────────────
+    # When enabled, a filled BUY automatically gets a resting SELL STOP
+    # placed at the broker so the position is protected even if the
+    # software is down. OFF by default — the engine's own exit logic and
+    # the Chandelier trail already manage exits while the scheduler runs;
+    # this is belt-and-suspenders for live trading and should be turned on
+    # deliberately. The stop price is the BUY signal's own stop_price when
+    # the scheduler supplied one, else fill_price * (1 - protective_stop_pct/100).
+    auto_protective_stop_enabled: bool = False
+    protective_stop_pct: float = 8.0
+
     # ── Scheduler ────────────────────────────────────────────
     # Interval for the daily-candle strategy cycle (Bollinger + Perplexity).
     # Day-trading has its own intraday loop (autotrader/manager.py) and is

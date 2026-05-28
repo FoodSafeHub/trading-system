@@ -716,12 +716,14 @@ if bt_market.startswith("🇮🇳"):
 _render_recommendation_overview()
 mode = st.radio(
     "Backtest Mode",
-    ["Single Strategy", "Consensus Mode", "Custom Symbol"],
+    ["Single Strategy", "Consensus Mode", "Custom Symbol", "Walk-Forward OOS"],
     horizontal=True,
     help="Single: test one strategy alone.\n"
          "Consensus: test a symbol using its configured strategies with agreement filtering.\n"
          "Custom Symbol: test ANY ticker (e.g. BRK-B) using the 5 scanner strategies — "
-         "useful for reproducing scanner candidates.",
+         "useful for reproducing scanner candidates.\n"
+         "Walk-Forward OOS: split history into in-sample/out-of-sample windows and "
+         "measure how much of the in-sample edge survives out-of-sample (overfit check).",
 )
 
 st.divider()
@@ -997,7 +999,7 @@ elif mode == "Consensus Mode":
 # ══════════════════════════════════════════════════════════════
 # CUSTOM SYMBOL MODE — any ticker, 5 scanner strategies consensus
 # ══════════════════════════════════════════════════════════════
-else:  # mode == "Custom Symbol"
+elif mode == "Custom Symbol":
     st.info(
         "Type any ticker (e.g. **BRK-B**, **NVDA**, **TQQQ**) and the backtester will "
         "run each of the 7 strategies INDEPENDENTLY — RSI2 Mean Reversion, "
@@ -1277,3 +1279,149 @@ else:  # mode == "Custom Symbol"
                 )
             except Exception as exc:
                 st.error(f"Promote failed: {exc}")
+
+# ══════════════════════════════════════════════════════════════
+# WALK-FORWARD OOS MODE
+# ══════════════════════════════════════════════════════════════
+elif mode == "Walk-Forward OOS":
+    st.info(
+        "**Walk-forward out-of-sample validation.** History is split into an "
+        "in-sample (IS) window the strategy is 'fit' to and an out-of-sample "
+        "(OOS) window it never saw. The key number is **Walk-Forward Efficiency "
+        "(WFE) = OOS CAGR ÷ IS CAGR** — how much of the in-sample edge survives "
+        "out of sample. ~1.0 is excellent; below ~0.5 suggests overfitting or a "
+        "regime change. Drives the same no-lookahead engine as a normal backtest, "
+        "so the numbers are directly comparable."
+    )
+
+    WF_CHOICES: list[tuple[str, str]] = [
+        ("rsi2_mean_reversion",  "RSI-2 Mean Reversion"),
+        ("ema_macd_crossover",   "EMA + MACD Crossover"),
+        ("bb_squeeze_breakout",  "Bollinger Squeeze Breakout"),
+        ("pullback_ema50",       "Pullback to EMA(50)"),
+        ("vix_spike_reversal",   "VIX Spike Reversal"),
+        ("bollinger",            "Legacy: Bollinger Mean Reversion"),
+        ("fib_pullback",         "Legacy: Fibonacci Pullback"),
+    ]
+    _wf_label_by_type = {t: lbl for t, lbl in WF_CHOICES}
+    _wf_india = bt_market.startswith("🇮🇳")
+
+    wc1, wc2, wc3 = st.columns([2, 2.5, 2])
+    with wc1:
+        wf_sym = st.text_input(
+            "Symbol", value="RELIANCE" if _wf_india else "NVDA",
+            key="wf_symbol",
+            help="Any ticker. US: NVDA, AAPL. India: RELIANCE, TCS (NSE).",
+        ).strip().upper()
+    with wc2:
+        wf_type = st.selectbox(
+            "Strategy", [t for t, _ in WF_CHOICES],
+            format_func=lambda t: _wf_label_by_type[t],
+            index=0, key="wf_type",
+        )
+    with wc3:
+        wf_mode = st.radio(
+            "Method", ["Simple split", "Rolling windows"],
+            horizontal=True, key="wf_mode",
+            help="Simple: one IS/OOS split. Rolling: many sliding windows "
+                 "stitched into a composite OOS curve (needs long history).",
+        )
+
+    if wf_mode == "Simple split":
+        sc1, sc2, sc3 = st.columns([2, 2, 2])
+        with sc1:
+            wf_period = st.selectbox("Period", ["2y", "5y", "10y"], index=1, key="wf_period_s")
+        with sc2:
+            wf_train_pct = st.slider("In-sample %", 50, 85, 70, 5, key="wf_train_pct") / 100.0
+        with sc3:
+            wf_cap = st.number_input("Capital ($)", value=100000, min_value=1000,
+                                     step=10000, key="wf_cap_s")
+        wf_kwargs = dict(mode="simple", period=wf_period, train_pct=wf_train_pct,
+                         initial_capital=wf_cap)
+    else:
+        rc1, rc2, rc3, rc4 = st.columns([1.5, 1.5, 1.5, 2])
+        with rc1:
+            wf_period = st.selectbox("Period", ["5y", "10y"], index=1, key="wf_period_r")
+        with rc2:
+            wf_train_y = st.number_input("Train yrs", value=3.0, min_value=1.0,
+                                         max_value=6.0, step=0.5, key="wf_train_y")
+        with rc3:
+            wf_test_y = st.number_input("Test yrs", value=1.0, min_value=0.5,
+                                        max_value=3.0, step=0.5, key="wf_test_y")
+        with rc4:
+            wf_cap = st.number_input("Capital ($)", value=100000, min_value=1000,
+                                     step=10000, key="wf_cap_r")
+        wf_kwargs = dict(mode="rolling", period=wf_period, train_years=wf_train_y,
+                         test_years=wf_test_y, step_years=wf_test_y, initial_capital=wf_cap)
+
+    if st.button("▶ Run Walk-Forward", type="primary", key="wf_run"):
+        if not wf_sym:
+            st.warning("Enter a symbol.")
+            st.stop()
+        with st.spinner(f"Walk-forward {wf_sym} / {_wf_label_by_type[wf_type]}…"):
+            try:
+                wf = api.backtest_walkforward(wf_sym, wf_type, **wf_kwargs)
+            except Exception as exc:
+                st.error(f"Walk-forward failed: {exc}")
+                st.stop()
+        st.session_state["wf_result"] = wf
+
+    wf = st.session_state.get("wf_result")
+    if wf:
+        if wf.get("mode") == "simple":
+            iss, oos = wf["is_segment"], wf["oos_segment"]
+            wfe = wf.get("wfe")
+            st.subheader(f"{wf.get('strategy_name', wf_type)} — {wf['symbol']}")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("WFE (OOS/IS)", f"{wfe:.2f}" if wfe is not None else "N/A",
+                      help="OOS CAGR ÷ IS CAGR. ~1.0 excellent, <0.5 likely overfit.")
+            m2.metric("IS CAGR", f"{iss['cagr']:.1f}%")
+            m3.metric("OOS CAGR", f"{oos['cagr']:.1f}%")
+            st.caption(f"Verdict: **{wf.get('wfe_label', '')}**")
+
+            st.dataframe(pd.DataFrame([
+                {"Window": "In-Sample", "Start": iss["start"], "End": iss["end"],
+                 "Bars": iss["bars"], "Return %": iss["total_return_pct"],
+                 "CAGR %": iss["cagr"], "Win %": iss["win_rate_pct"],
+                 "Trades": iss["trades"], "Max DD %": iss["max_drawdown_pct"]},
+                {"Window": "Out-of-Sample", "Start": oos["start"], "End": oos["end"],
+                 "Bars": oos["bars"], "Return %": oos["total_return_pct"],
+                 "CAGR %": oos["cagr"], "Win %": oos["win_rate_pct"],
+                 "Trades": oos["trades"], "Max DD %": oos["max_drawdown_pct"]},
+            ]), use_container_width=True, hide_index=True)
+
+            if oos.get("equity_curve"):
+                st.subheader("Out-of-Sample Equity Curve")
+                charts.render_equity_chart(
+                    oos["equity_curve"], trades=[],
+                    initial_capital=wf_cap,
+                    title=f"OOS Equity — {wf['symbol']}", bucket="W", height=420,
+                )
+        else:  # rolling
+            gwfe = wf.get("global_wfe")
+            st.subheader(f"{wf.get('strategy_name', wf_type)} — {wf['symbol']} (rolling)")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Global WFE", f"{gwfe:.2f}" if gwfe is not None else "N/A")
+            m2.metric("OOS CAGR (composite)", f"{wf['global_oos_cagr']:.1f}%")
+            m3.metric("Avg IS CAGR", f"{wf['avg_is_cagr']:.1f}%")
+            m4.metric("Windows", len(wf.get("segments", [])))
+            st.caption(f"Verdict: **{wf.get('global_wfe_label', '')}** · "
+                       f"composite OOS return {wf['global_oos_total_return_pct']:.1f}%")
+
+            segs = wf.get("segments", [])
+            if segs:
+                st.dataframe(pd.DataFrame([
+                    {"#": s["window"], "IS end": s["is_end"], "OOS end": s["oos_end"],
+                     "IS CAGR %": s["is_cagr"], "OOS CAGR %": s["oos_cagr"],
+                     "OOS Win %": s["oos_win_rate_pct"], "OOS Trades": s["oos_trades"],
+                     "WFE": s["wfe"], "Verdict": s["wfe_label"]}
+                    for s in segs
+                ]), use_container_width=True, hide_index=True)
+
+            if wf.get("oos_composite_curve"):
+                st.subheader("Composite Out-of-Sample Equity Curve")
+                charts.render_equity_chart(
+                    wf["oos_composite_curve"], trades=[],
+                    initial_capital=wf_cap,
+                    title=f"Composite OOS — {wf['symbol']}", bucket="W", height=420,
+                )

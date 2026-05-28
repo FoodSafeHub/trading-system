@@ -607,6 +607,21 @@ def backtest_live_signals(symbol: str, period: str = "1y", timeout: int = 60):
     )
 
 
+def backtest_walkforward(symbol: str, strategy_type: str, mode: str = "simple",
+                         period: str = "5y", train_pct: float = 0.70,
+                         train_years: float = 3.0, test_years: float = 1.0,
+                         step_years: float = 1.0, initial_capital: float = 100_000.0,
+                         timeout: int = 300):
+    """Walk-forward OOS validation for one v2 strategy (simple split or rolling)."""
+    return _get(
+        f"/backtest/walkforward/{symbol}/{strategy_type}",
+        params={"mode": mode, "period": period, "train_pct": train_pct,
+                "train_years": train_years, "test_years": test_years,
+                "step_years": step_years, "initial_capital": initial_capital},
+        timeout=timeout,
+    )
+
+
 def scanner_calibrate(symbol: str, strategy_type: str, period: str = "5y",
                       initial_capital: float = 10_000.0, timeout: int = 600):
     """Optimize-Filters-and-save for a scanner strategy (tightens per-symbol params)."""
