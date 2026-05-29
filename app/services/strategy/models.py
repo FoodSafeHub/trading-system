@@ -12,6 +12,13 @@ class StrategySignal:
     price_at_signal: Optional[float] = None
     indicators: Dict[str, Any] = field(default_factory=dict)
     strategy_name: str = ""
+    # ── Phase 0 scaffolding (optional, default-inert) ──
+    # Carried so a rule can advertise an initial stop / target / confidence to
+    # sizing and the exit-policy layer. No Phase 0 rule sets these; they default
+    # to None/None/1.0 so existing signals and their serialization are unchanged.
+    stop_price: Optional[float] = None
+    target_price: Optional[float] = None
+    confidence: float = 1.0
 
 
 @dataclass

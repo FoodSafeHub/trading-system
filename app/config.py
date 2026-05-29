@@ -104,6 +104,15 @@ class Settings(BaseSettings):
     auto_protective_stop_enabled: bool = False
     protective_stop_pct: float = 8.0
 
+    # ── Phase 0 strategy-refactor scaffolding (inert until later phases) ──────
+    # Declared default-OFF now so the Phase 1/2 wiring has switches ready. NOTHING
+    # reads these in Phase 0 — the backtest engine takes a cost_model OBJECT (not
+    # settings) and the Perplexity runner still builds its bespoke strategy list.
+    # When True (a later phase): route Perplexity through the unified rules.py
+    # adapter, and let the Backtest/ranking path apply the cost model respectively.
+    use_unified_perplexity: bool = False
+    backtest_costs_enabled: bool = False
+
     # ── Scheduler ────────────────────────────────────────────
     # Interval for the daily-candle strategy cycle (Bollinger + Perplexity).
     # Day-trading has its own intraday loop (autotrader/manager.py) and is

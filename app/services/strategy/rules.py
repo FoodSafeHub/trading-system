@@ -20,6 +20,7 @@ from app.services.indicators.macd import compute_macd
 from app.services.indicators.rsi import compute_rsi
 from app.services.indicators.sma import compute_sma, sma_crossover_signal
 from app.services.indicators.supertrend import compute_supertrend
+from app.services.strategy.exits import apply_exit_overlay, _legacy_chandelier
 from app.services.strategy.models import StrategySignal
 
 logger = logging.getLogger(__name__)
@@ -42,57 +43,13 @@ def _apply_chandelier_overlay(
     params: Dict[str, Any],
     position: Optional[PositionState],
 ) -> StrategySignal:
-    """ATR-Chandelier trailing-stop overlay on the exit decision.
+    """Deprecated shim — the Chandelier overlay now lives in exits.py.
 
-    Opt-in via params['trail_enabled']. Default OFF -> returns signal unchanged,
-    so any symbol without the param keeps its current fixed-band exit exactly.
-
-    Once an open position is up >= trail_trigger_pct, we stop honouring the
-    rule's fixed-band SELL and instead ride the trend until the close breaks
-    below the Chandelier line (highest_close_since_entry - atr_mult*ATR). Below
-    the trigger (failed bounce / loser), the rule's SELL is honoured as-is, so
-    hard stops and quick mean-reversion exits are untouched. Entries are never
-    affected — overlay only runs when a position is open.
+    Kept so existing imports of this name still resolve. Delegates to the
+    verbatim copy in ``exits._legacy_chandelier`` (identical behaviour). New
+    code should call ``exits.apply_exit_overlay``.
     """
-    if not params.get("trail_enabled") or position is None:
-        return signal
-
-    trigger_pct = float(params.get("trail_trigger_pct", 3.0))
-    atr_mult    = float(params.get("atr_trail_mult", 3.0))
-    atr_period  = int(params.get("atr_trail_period", 22))
-
-    if ohlcv is None or "High" not in ohlcv.columns or len(ohlcv) < atr_period + 1:
-        return signal  # can't compute ATR -> leave the rule's decision alone
-
-    c_now = float(prices.iloc[-1])
-    if position.entry_price <= 0:
-        return signal
-    unreal_pct = (c_now - position.entry_price) / position.entry_price * 100.0
-    if unreal_pct < trigger_pct:
-        return signal  # not yet in profit-runway zone — honour the rule's exit
-
-    atr_v = float(_atr_raw(ohlcv, atr_period).iloc[-1])
-    if pd.isna(atr_v) or atr_v <= 0:
-        return signal
-    chandelier = position.highest_close - atr_mult * atr_v
-
-    if c_now <= chandelier:
-        # Trend broke -> force the exit even if the rule said HOLD.
-        return StrategySignal(
-            symbol=signal.symbol, direction="SELL", strength=signal.strength,
-            price_at_signal=c_now, indicators={**signal.indicators, "trail_exit": True,
-                                               "chandelier": round(chandelier, 2)},
-            strategy_name=signal.strategy_name,
-        )
-    if signal.direction == "SELL":
-        # Still above the trail -> suppress the fixed-band SELL, ride the winner.
-        return StrategySignal(
-            symbol=signal.symbol, direction="HOLD", strength=signal.strength,
-            price_at_signal=c_now, indicators={**signal.indicators, "trail_hold": True,
-                                               "chandelier": round(chandelier, 2)},
-            strategy_name=signal.strategy_name,
-        )
-    return signal
+    return _legacy_chandelier(signal, prices, ohlcv, params, position)
 
 
 def _above_sma200(prices: pd.Series) -> bool:
@@ -931,6 +888,351 @@ def rule_vix_spike_reversal(
     )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# UNIFIED DAILY STRATEGIES (Phase 1) — registered IN PARALLEL with the old types.
+# These are the consolidated set the architecture plan calls for. They emit an
+# explicit stop_price/confidence and are designed to be paired with a default
+# exit_policy (supplied by scanner_service._make_unified_configs) so the
+# exit-overlay layer manages trail/time/trend-fail/regime exits. Old types stay
+# registered and unchanged; nothing here alters default scanner/scheduler output.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _adx(ohlcv: pd.DataFrame, period: int = 14) -> float:
+    """Wilder ADX from an OHLCV frame (0.0 if not computable)."""
+    high, low = ohlcv["High"], ohlcv["Low"]
+    plus_dm = high.diff().clip(lower=0)
+    minus_dm = (-low.diff()).clip(lower=0)
+    plus_dm = plus_dm.where(plus_dm > minus_dm, 0.0)
+    minus_dm = minus_dm.where(minus_dm > plus_dm, 0.0)
+    atr_s = _atr_raw(ohlcv, period)
+    plus_di = 100 * plus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr_s.replace(0, 1e-9)
+    minus_di = 100 * minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr_s.replace(0, 1e-9)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-9)
+    v = float(dx.ewm(alpha=1 / period, adjust=False).mean().iloc[-1])
+    return v if not pd.isna(v) else 0.0
+
+
+def _last_wick_ratio(ohlcv: pd.DataFrame | None, c_now: float) -> float:
+    """Lower-wick fraction of the last bar's range; 1.0 if unavailable (allow)."""
+    if ohlcv is None or "High" not in ohlcv.columns:
+        return 1.0
+    h = float(ohlcv["High"].iloc[-1]); lo = float(ohlcv["Low"].iloc[-1])
+    rng = h - lo
+    return (c_now - lo) / rng if rng > 0 else 0.0
+
+
+def rule_rsi2_reversion(
+    symbol: str, prices: pd.Series, params: dict, ohlcv: pd.DataFrame | None = None, **_
+) -> StrategySignal:
+    """Fast mean reversion (consolidates rsi2_mean_reversion).
+    BUY  RSI(2) < entry, price > SMA200, SPY BULL, ATR% <= skip.
+    SELL RSI(2) > exit OR close > SMA(exit_sma). Pair with an ATR-trail+time-stop
+    exit_policy so a recovered dip isn't given straight back."""
+    rsi_period = params.get("rsi_period", 2)
+    rsi_entry  = params.get("rsi_entry_threshold", 10)
+    rsi_exit   = params.get("rsi_exit_threshold", 65)
+    sma_trend  = params.get("sma_trend", 200)
+    exit_sma   = params.get("exit_sma", 5)
+    atr_skip   = params.get("atr_skip_threshold", 5.0)
+    stop_pct   = params.get("hard_stop_pct", 2.5)
+
+    if len(prices) < max(sma_trend + 5, 250):
+        return StrategySignal(symbol=symbol, direction="HOLD",
+                              price_at_signal=float(prices.iloc[-1]), indicators={},
+                              strategy_name="rsi2_reversion")
+    c_now = float(prices.iloc[-1])
+    rsi2 = _rsi_series(prices, rsi_period)
+    rsi_now = float(rsi2.iloc[-1]) if not pd.isna(rsi2.iloc[-1]) else 50.0
+    sma200v = float(prices.rolling(sma_trend).mean().iloc[-1])
+    sma5v = float(prices.rolling(exit_sma).mean().iloc[-1])
+    atr_pct = 0.0
+    if ohlcv is not None and "High" in ohlcv.columns and len(ohlcv) >= 14:
+        atr_pct = float(_atr_raw(ohlcv, 14).iloc[-1]) / c_now * 100 if c_now > 0 else 0.0
+    is_bull = _spy_is_bull(ohlcv, prices)
+    above = c_now > sma200v
+
+    direction = "HOLD"; stop = None; conf = 1.0
+    if rsi_now > rsi_exit or c_now > sma5v:
+        direction = "SELL"
+    elif is_bull and above and rsi_now < rsi_entry and atr_pct <= atr_skip:
+        direction = "BUY"
+        stop = round(c_now * (1 - stop_pct / 100.0), 4)
+        conf = round(max(0.5, min(0.95, 1.0 - rsi_now / max(rsi_entry, 1e-9))), 2)
+    return StrategySignal(
+        symbol=symbol, direction=direction, price_at_signal=c_now,
+        stop_price=stop, confidence=conf,
+        indicators={"rsi2": round(rsi_now, 1), "sma200": round(sma200v, 2),
+                    "sma5": round(sma5v, 2), "atr_pct": round(atr_pct, 2), "spy_bull": is_bull},
+        strategy_name="rsi2_reversion",
+    )
+
+
+def rule_trend_pullback(
+    symbol: str, prices: pd.Series, params: dict, ohlcv: pd.DataFrame | None = None, **_
+) -> StrategySignal:
+    """Buy-the-dip in an uptrend (consolidates pullback_ema50 + fib_pullback +
+    RSI_Swing_Reversal + BB_Mean_Reversion).
+    BUY  EMA(50) rising, price within atr_prox_mult*ATR of EMA50, RSI in band,
+         bullish reclaim wick, not deep bear.
+    SELL RSI > exit OR price > ext_pct above EMA50."""
+    ema_period = params.get("ema_trend", 50)
+    slope_bars = params.get("ema_slope_bars", 5)
+    atr_prox   = params.get("atr_proximity_mult", 1.2)
+    rsi_period = params.get("rsi_period", 14)
+    rsi_min    = params.get("rsi_min", 35)
+    rsi_max    = params.get("rsi_max", 55)
+    wick_min   = params.get("wick_ratio_min", 0.4)
+    exit_rsi   = params.get("exit_rsi", 65)
+    ext_pct    = params.get("exit_extension_pct", 3.0)
+    bear_skip  = params.get("bear_skip_threshold_pct", 10.0)
+    stop_mult  = params.get("stop_atr_mult", 1.5)
+
+    if len(prices) < ema_period + slope_bars + 10:
+        return StrategySignal(symbol=symbol, direction="HOLD",
+                              price_at_signal=float(prices.iloc[-1]), indicators={},
+                              strategy_name="trend_pullback")
+    c_now = float(prices.iloc[-1])
+    ema50 = _ema_series(prices, ema_period)
+    e_now = float(ema50.iloc[-1]); e_old = float(ema50.iloc[-slope_bars - 1])
+    rsi_v = float(_rsi_series(prices, rsi_period).iloc[-1])
+    atr_v = float(_atr_raw(ohlcv, 14).iloc[-1]) if (ohlcv is not None and "High" in ohlcv.columns and len(ohlcv) >= 14) else c_now * 0.02
+    ext_now = (c_now / e_now - 1) * 100 if e_now > 0 else 0.0
+    dist = abs(c_now - e_now)
+    wick = _last_wick_ratio(ohlcv, c_now)
+    ema_rising = e_now > e_old
+
+    spy_pct_below = 0.0
+    if ohlcv is not None and "spy_close" in ohlcv.columns:
+        spy_c = ohlcv["spy_close"].dropna()
+        if len(spy_c) >= 200:
+            s200 = float(spy_c.rolling(200).mean().iloc[-1]); snow = float(spy_c.iloc[-1])
+            if s200 > 0:
+                spy_pct_below = max(0.0, (s200 - snow) / s200 * 100)
+
+    direction = "HOLD"; stop = None; conf = 1.0
+    if rsi_v > exit_rsi or ext_now > ext_pct:
+        direction = "SELL"
+    elif (spy_pct_below <= bear_skip and ema_rising and atr_v > 0
+          and dist <= atr_prox * atr_v and rsi_min <= rsi_v <= rsi_max and wick >= wick_min):
+        direction = "BUY"
+        stop = round(c_now - stop_mult * atr_v, 4)
+        conf = 0.7
+    return StrategySignal(
+        symbol=symbol, direction=direction, price_at_signal=c_now,
+        stop_price=stop, confidence=conf,
+        indicators={"ema50": round(e_now, 2), "ema_rising": ema_rising,
+                    "dist_atr": round(dist / atr_v, 2) if atr_v > 0 else None,
+                    "rsi": round(rsi_v, 1), "wick": round(wick, 2)},
+        strategy_name="trend_pullback",
+    )
+
+
+def rule_squeeze_breakout(
+    symbol: str, prices: pd.Series, params: dict, ohlcv: pd.DataFrame | None = None, **_
+) -> StrategySignal:
+    """Volatility-contraction breakout (consolidates bb_squeeze_breakout).
+    BUY  BB bandwidth in lowest squeeze_pct percentile of lookback, close breaks
+         the upper band by >= break_atr_frac*ATR, RSI > min, volume expansion, BULL.
+    SELL close < EMA(exit_ema). No mid-BB give-back exit."""
+    bb_period   = params.get("bb_period", 20)
+    bb_std      = params.get("bb_std", 2.0)
+    lookback    = params.get("squeeze_lookback", 20)
+    squeeze_pct = params.get("squeeze_percentile", 0.40)
+    rsi_min     = params.get("rsi_entry_min", 50)
+    vol_min     = params.get("vol_ratio_min", 1.3)
+    break_frac  = params.get("break_atr_frac", 0.10)
+    exit_ema    = params.get("exit_ema", 20)
+    stop_mult   = params.get("stop_atr_mult", 2.0)
+
+    if len(prices) < bb_period + lookback + 5:
+        return StrategySignal(symbol=symbol, direction="HOLD",
+                              price_at_signal=float(prices.iloc[-1]), indicators={},
+                              strategy_name="squeeze_breakout")
+    c_now = float(prices.iloc[-1])
+    sma_bb = prices.rolling(bb_period).mean()
+    std_bb = prices.rolling(bb_period).std()
+    upper = sma_bb + bb_std * std_bb
+    lower = sma_bb - bb_std * std_bb
+    bw = (upper - lower) / sma_bb.replace(0, 1e-9)
+    u_now = float(upper.iloc[-1]); l_now = float(lower.iloc[-1])
+    bw_now = float(bw.iloc[-1])
+    bw_window = bw.iloc[-lookback - 1:-1].dropna()
+    squeeze_thr = float(bw_window.quantile(squeeze_pct)) if len(bw_window) >= 10 else bw_now
+    in_squeeze = bw_now <= squeeze_thr
+    rsi_v = float(_rsi_series(prices, 14).iloc[-1])
+    atr_v = float(_atr_raw(ohlcv, 14).iloc[-1]) if (ohlcv is not None and "High" in ohlcv.columns and len(ohlcv) >= 14) else c_now * 0.02
+    ema_exit_now = float(_ema_series(prices, exit_ema).iloc[-1])
+    vol_ok = True
+    if ohlcv is not None and "Volume" in ohlcv.columns and len(ohlcv) > 21:
+        avg = float(ohlcv["Volume"].iloc[-21:-1].mean()); cur = float(ohlcv["Volume"].iloc[-1])
+        vol_ok = (cur / avg >= vol_min) if avg > 0 else True
+    is_bull = _spy_is_bull(ohlcv, prices)
+
+    direction = "HOLD"; stop = None; conf = 1.0
+    if c_now < ema_exit_now:
+        direction = "SELL"
+    elif (is_bull and in_squeeze and c_now > u_now
+          and (c_now - u_now) >= break_frac * atr_v and rsi_v > rsi_min and vol_ok):
+        direction = "BUY"
+        stop = round(min(l_now, c_now - stop_mult * atr_v), 4)
+        conf = 0.72
+    return StrategySignal(
+        symbol=symbol, direction=direction, price_at_signal=c_now,
+        stop_price=stop, confidence=conf,
+        indicators={"bb_upper": round(u_now, 2), "bb_lower": round(l_now, 2),
+                    "squeeze": in_squeeze, "rsi": round(rsi_v, 1), "spy_bull": is_bull},
+        strategy_name="squeeze_breakout",
+    )
+
+
+def rule_momentum_breakout(
+    symbol: str, prices: pd.Series, params: dict, ohlcv: pd.DataFrame | None = None, **_
+) -> StrategySignal:
+    """Trend-momentum / channel breakout (consolidates BB_Breakout + breakout +
+    ema_macd_crossover).
+    BUY  close > Donchian(N) high AND MACD>signal AND EMA9>EMA21 AND price>SMA200
+         AND volume expansion.
+    SELL EMA9 crosses below EMA21."""
+    donch      = params.get("donchian", 20)
+    ema_fast   = params.get("ema_fast", 9)
+    ema_slow   = params.get("ema_slow", 21)
+    macd_fast  = params.get("macd_fast", 12)
+    macd_slow  = params.get("macd_slow", 26)
+    macd_sig   = params.get("macd_signal", 9)
+    vol_min    = params.get("vol_ratio_min", 1.2)
+    sma_trend  = params.get("sma_trend", 200)
+    donch_exit = params.get("donchian_exit", 10)
+    stop_mult  = params.get("stop_atr_mult", 2.5)
+
+    if len(prices) < max(sma_trend + 5, donch + 30):
+        return StrategySignal(symbol=symbol, direction="HOLD",
+                              price_at_signal=float(prices.iloc[-1]), indicators={},
+                              strategy_name="momentum_breakout")
+    c_now = float(prices.iloc[-1])
+    ef = _ema_series(prices, ema_fast); es = _ema_series(prices, ema_slow)
+    ef_now = float(ef.iloc[-1]); es_now = float(es.iloc[-1])
+    ml = prices.ewm(span=macd_fast, adjust=False).mean() - prices.ewm(span=macd_slow, adjust=False).mean()
+    sig = ml.ewm(span=macd_sig, adjust=False).mean()
+    ml_now = float(ml.iloc[-1]); sig_now = float(sig.iloc[-1])
+    sma200v = float(prices.rolling(sma_trend).mean().iloc[-1])
+    donch_high = float(prices.iloc[-(donch + 1):-1].max())
+    donch_low = float(prices.iloc[-(donch_exit + 1):-1].min())
+    atr_v = float(_atr_raw(ohlcv, 14).iloc[-1]) if (ohlcv is not None and "High" in ohlcv.columns and len(ohlcv) >= 14) else c_now * 0.02
+    vol_ok = True
+    if ohlcv is not None and "Volume" in ohlcv.columns and len(ohlcv) > 21:
+        avg = float(ohlcv["Volume"].iloc[-21:-1].mean()); cur = float(ohlcv["Volume"].iloc[-1])
+        vol_ok = (cur / avg >= vol_min) if avg > 0 else True
+
+    direction = "HOLD"; stop = None; conf = 1.0
+    if ef_now < es_now:
+        direction = "SELL"
+    elif (c_now > donch_high and ml_now > sig_now and ef_now > es_now
+          and c_now > sma200v and vol_ok):
+        direction = "BUY"
+        stop = round(min(donch_low, c_now - stop_mult * atr_v), 4)
+        conf = 0.7
+    return StrategySignal(
+        symbol=symbol, direction=direction, price_at_signal=c_now,
+        stop_price=stop, confidence=conf,
+        indicators={"donchian_high": round(donch_high, 2), "ema_fast": round(ef_now, 2),
+                    "ema_slow": round(es_now, 2), "macd": round(ml_now, 4),
+                    "above_sma200": c_now > sma200v},
+        strategy_name="momentum_breakout",
+    )
+
+
+def rule_panic_reversal(
+    symbol: str, prices: pd.Series, params: dict, ohlcv: pd.DataFrame | None = None, **_
+) -> StrategySignal:
+    """Capitulation / fear-spike reversal (consolidates vix_spike_reversal +
+    Fib_Pullback_Support). No regime gate — must work in bear.
+    BUY  ATR% spike + RSI very low + near lower band + long lower wick + 3-bar decline.
+    SELL ATR% normalizes OR RSI recovers."""
+    atr_period   = params.get("atr_period", 14)
+    atr_spike    = params.get("atr_spike_threshold", 3.0)
+    atr_exit     = params.get("atr_exit_threshold", 2.0)
+    rsi_period   = params.get("rsi_period", 14)
+    rsi_entry    = params.get("rsi_entry_max", 30)
+    rsi_exit_thr = params.get("rsi_exit", 55)
+    bb_pos_max   = params.get("bb_pos_max", 0.20)
+    wick_min     = params.get("wick_ratio_min", 0.5)
+    decline_pct  = params.get("prior_decline_pct", 2.0)
+    decline_bars = params.get("prior_decline_bars", 3)
+    stop_pct     = params.get("hard_stop_pct", 4.0)
+
+    if len(prices) < 50 or ohlcv is None or len(ohlcv) < 50:
+        return StrategySignal(symbol=symbol, direction="HOLD",
+                              price_at_signal=float(prices.iloc[-1]), indicators={},
+                              strategy_name="panic_reversal")
+    c_now = float(prices.iloc[-1])
+    rsi_v = float(_rsi_series(prices, rsi_period).iloc[-1])
+    atr_pct = float(_atr_raw(ohlcv, atr_period).iloc[-1]) / c_now * 100 if c_now > 0 else 0.0
+    sma20 = prices.rolling(20).mean(); std20 = prices.rolling(20).std()
+    bb_l = sma20 - 2 * std20; bb_u = sma20 + 2 * std20
+    rng = float((bb_u - bb_l).iloc[-1])
+    bb_pos = float((c_now - float(bb_l.iloc[-1])) / rng) if rng > 0 else 0.5
+    wick = _last_wick_ratio(ohlcv, c_now)
+    c_ago = float(prices.iloc[-decline_bars - 1]) if len(prices) > decline_bars + 1 else c_now
+    dec_pct = (c_ago - c_now) / c_ago * 100 if c_ago > 0 else 0.0
+
+    direction = "HOLD"; stop = None; conf = 1.0
+    if atr_pct < atr_exit or rsi_v > rsi_exit_thr:
+        direction = "SELL"
+    elif (atr_pct >= atr_spike and rsi_v < rsi_entry and bb_pos < bb_pos_max
+          and wick >= wick_min and dec_pct >= decline_pct):
+        direction = "BUY"
+        stop = round(c_now * (1 - stop_pct / 100.0), 4)
+        conf = 0.8
+    return StrategySignal(
+        symbol=symbol, direction=direction, price_at_signal=c_now,
+        stop_price=stop, confidence=conf,
+        indicators={"atr_pct": round(atr_pct, 2), "rsi": round(rsi_v, 1),
+                    "bb_pos": round(bb_pos, 3), "wick": round(wick, 2),
+                    "prior_decline_pct": round(dec_pct, 2)},
+        strategy_name="panic_reversal",
+    )
+
+
+def rule_trend_follow(
+    symbol: str, prices: pd.Series, params: dict, ohlcv: pd.DataFrame | None = None, **_
+) -> StrategySignal:
+    """Longer-hold trend following (consolidates supertrend + ema_ribbon +
+    Supertrend_Swing). Pair with a WIDE Chandelier exit_policy for multi-week holds.
+    BUY  Supertrend flips bullish AND price>SMA200 AND ADX>min.
+    SELL Supertrend flips bearish."""
+    st_period = params.get("st_period", 10)
+    st_mult   = params.get("st_multiplier", 3.0)
+    sma_trend = params.get("sma_trend", 200)
+    adx_min   = params.get("adx_min", 20.0)
+
+    if ohlcv is None or "High" not in ohlcv.columns or len(prices) < max(sma_trend + 5, st_period + 40):
+        return StrategySignal(symbol=symbol, direction="HOLD",
+                              price_at_signal=float(prices.iloc[-1]), indicators={},
+                              strategy_name="trend_follow")
+    c_now = float(prices.iloc[-1])
+    st = compute_supertrend(ohlcv["High"], ohlcv["Low"], ohlcv["Close"], period=st_period, multiplier=st_mult)
+    dir_now = int(st.direction.iloc[-1]) if not pd.isna(st.direction.iloc[-1]) else 0
+    dir_prev = int(st.direction.iloc[-2]) if len(st.direction) >= 2 and not pd.isna(st.direction.iloc[-2]) else dir_now
+    st_line = float(st.values.iloc[-1]) if not pd.isna(st.values.iloc[-1]) else c_now
+    sma200v = float(prices.rolling(sma_trend).mean().iloc[-1])
+    adx = _adx(ohlcv, 14)
+
+    direction = "HOLD"; stop = None; conf = 1.0
+    if dir_now == -1 and dir_prev == 1:
+        direction = "SELL"
+    elif dir_now == 1 and dir_prev == -1 and c_now > sma200v and adx >= adx_min:
+        direction = "BUY"
+        stop = round(st_line, 4)
+        conf = round(min(0.9, 0.6 + (adx - adx_min) / 60 * 0.3), 2)
+    return StrategySignal(
+        symbol=symbol, direction=direction, price_at_signal=c_now,
+        stop_price=stop, confidence=conf,
+        indicators={"st_line": round(st_line, 2), "st_dir": dir_now,
+                    "adx": round(adx, 1), "above_sma200": c_now > sma200v},
+        strategy_name="trend_follow",
+    )
+
+
 _RULE_REGISTRY = {
     "sma_rsi": rule_sma_rsi,
     "ema_crossover": rule_ema_crossover,
@@ -947,6 +1249,13 @@ _RULE_REGISTRY = {
     "bb_squeeze_breakout":  rule_bb_squeeze_breakout,
     "pullback_ema50":       rule_pullback_ema50,
     "vix_spike_reversal":   rule_vix_spike_reversal,
+    # ── Unified daily strategies (Phase 1) — parallel, do not replace the above ──
+    "rsi2_reversion":       rule_rsi2_reversion,
+    "trend_pullback":       rule_trend_pullback,
+    "squeeze_breakout":     rule_squeeze_breakout,
+    "momentum_breakout":    rule_momentum_breakout,
+    "panic_reversal":       rule_panic_reversal,
+    "trend_follow":         rule_trend_follow,
 }
 
 
@@ -965,5 +1274,6 @@ def evaluate_strategy(
         signal = rule_fn(symbol, prices, params, ohlcv=ohlcv)
     else:
         signal = rule_fn(symbol, prices, params)
-    # Trailing-stop overlay (opt-in via params['trail_enabled']; no-op otherwise).
-    return _apply_chandelier_overlay(signal, prices, ohlcv, params, position)
+    # Exit-policy overlay (params['exit_policy'] wins; else legacy trail_enabled;
+    # else no-op). See app/services/strategy/exits.py for the precedence contract.
+    return apply_exit_overlay(signal, prices, ohlcv, params, position)

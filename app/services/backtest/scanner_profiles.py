@@ -101,10 +101,101 @@ def delete_profile(strategy_type: str, symbol: str) -> bool:
     return False
 
 
+# Param keys that are LIVE trail scaffolding, not calibration data. A profile
+# whose only overrides are these (and which found no calibration trades) is a
+# trail-enabler (e.g. the live COP/TOST/ARLO/AVPT Chandelier configs), not a
+# genuine grid-search calibration — migration must skip these so it never copies
+# live trail scaffolding under the new strategy names.
+_TRAIL_SCAFFOLD_KEYS = {"trail_enabled", "trail_trigger_pct", "atr_trail_mult", "atr_trail_period"}
+
+
+def _is_genuine_calibration(raw: dict) -> bool:
+    """True when a saved profile represents real calibration data.
+
+    Genuine = it produced calibration round-trips (n_trades > 0) OR it carries at
+    least one entry-param override beyond the trail-scaffolding keys. A 0-trade,
+    trail-only profile returns False (it is live trail config, not calibration).
+    """
+    overrides = raw.get("param_overrides") or {}
+    entry_overrides = [k for k in overrides if k not in _TRAIL_SCAFFOLD_KEYS]
+    return int(raw.get("n_trades") or 0) > 0 or bool(entry_overrides)
+
+
+def migrate_aliased_profiles(dry_run: bool = True, overwrite: bool = False) -> List[dict]:
+    """Materialize NEW-name profiles from their predecessors' GENUINE calibration.
+
+    NON-DESTRUCTIVE: old profiles are never deleted or modified — this only adds
+    a copy under ``<new_type>:SYMBOL`` (taking the PRIMARY predecessor that has a
+    genuine calibration profile). Rollback = delete the new-name copy; the old one
+    still drives the legacy strategy and the alias fallback. ``dry_run=True``
+    (default) just reports what WOULD be copied. ``overwrite=False`` never
+    clobbers an existing new-name profile.
+
+    Trail-only / 0-trade profiles (live Chandelier scaffolding, e.g. COP/TOST/
+    ARLO/AVPT) are SKIPPED and reported as such — they are live config, not
+    calibration, and migrating them would copy inert trail params under the new
+    names. They remain untouched in place.
+
+    Strictly optional: ``get_param_overrides`` already inherits old calibration
+    for new names via the alias map, so the new strategies work WITHOUT migrating.
+    """
+    from app.services.strategy.strategy_aliases import STRATEGY_ALIASES
+
+    data = _load_all()
+    report: List[dict] = []
+    changed = False
+    for new_type, olds in STRATEGY_ALIASES.items():
+        if not olds:
+            continue
+        syms = {key.partition(":")[2] for key in data
+                if key.partition(":")[0] in olds and key.partition(":")[2]}
+        for sym in sorted(syms):
+            new_key = _key(new_type, sym)
+            if new_key in data and not overwrite:
+                report.append({"new_type": new_type, "symbol": sym,
+                               "source": None, "action": "skip (exists)"})
+                continue
+            # Only consider predecessors that are GENUINE calibration profiles.
+            src = next((o for o in olds
+                        if _key(o, sym) in data and _is_genuine_calibration(data[_key(o, sym)])),
+                       None)
+            if src is None:
+                # A predecessor exists but it is trail-only/empty -> skip (and
+                # surface it for transparency). Live trail config stays in place.
+                trail_src = next((o for o in olds if _key(o, sym) in data), None)
+                if trail_src is not None:
+                    report.append({"new_type": new_type, "symbol": sym,
+                                   "source": trail_src, "action": "skip (trail-only/no calibration)"})
+                continue
+            report.append({"new_type": new_type, "symbol": sym,
+                           "source": src, "action": "copy"})
+            if not dry_run:
+                src_raw = dict(data[_key(src, sym)])
+                src_raw["strategy_type"] = new_type
+                src_raw["notes"] = f"migrated from {src} (alias); " + str(src_raw.get("notes", ""))
+                data[new_key] = src_raw
+                changed = True
+    if not dry_run and changed:
+        _save_all(data)
+    return report
+
+
 def get_param_overrides(strategy_type: str, symbol: str) -> Dict[str, Any]:
-    """Runtime lookup used by _make_generic_configs. Empty dict = no calibration."""
-    p = load_profile(strategy_type, symbol)
-    return dict(p.param_overrides) if p and p.param_overrides else {}
+    """Runtime lookup used by _make_generic_configs. Empty dict = no calibration.
+
+    The self key is tried FIRST, so every existing (live) strategy type returns
+    exactly what it always has. Only when nothing is saved under the queried
+    type do we fall back to predecessor types via the alias map — that path is
+    dormant in Phase 0 (no new types are queried yet) and lets Phase 1's renamed
+    strategies inherit calibration saved under their old names.
+    """
+    from app.services.strategy.strategy_aliases import resolve_alias
+
+    for st in resolve_alias(strategy_type):
+        p = load_profile(st, symbol)
+        if p and p.param_overrides:
+            return dict(p.param_overrides)
+    return {}
 
 
 # ── Calibration: grid-search the params each rule ACTUALLY gates on ────────────
@@ -175,6 +266,47 @@ _PARAM_GRIDS: Dict[str, Dict[str, list]] = {
         "bb_pos_max":          [0.10, 0.15, 0.20, 0.25],
         "prior_decline_pct":   [1.0, 2.0, 3.0, 4.0],
     },
+    # ── Unified strategies (Phase 1/2) — grids over the params each NEW rule in
+    #    rules.py actually reads. Kept parallel to the legacy grids above; old
+    #    names are unchanged. Calibrating a new name saves under "<new>:SYMBOL".
+    "rsi2_reversion": {
+        "rsi_entry_threshold": [5, 8, 10, 12, 15],
+        "atr_skip_threshold":  [3.0, 4.0, 5.0, 7.0],
+        "rsi_exit_threshold":  [55, 60, 65, 70, 75],
+        "hard_stop_pct":       [2.0, 2.5, 3.0, 4.0],
+    },
+    "trend_pullback": {
+        "atr_proximity_mult": [0.8, 1.0, 1.2, 1.6],
+        "rsi_min":            [30, 35, 40],
+        "rsi_max":            [50, 55, 60],
+        "wick_ratio_min":     [0.3, 0.4, 0.5, 0.6],
+        "exit_extension_pct": [2.0, 3.0, 4.0, 5.0],
+    },
+    "squeeze_breakout": {
+        "rsi_entry_min":      [45, 50, 55, 60],
+        "vol_ratio_min":      [1.1, 1.3, 1.5, 2.0],
+        "squeeze_percentile": [0.30, 0.40, 0.50],
+        "break_atr_frac":     [0.05, 0.10, 0.20],
+        "bb_std":             [1.8, 2.0, 2.2, 2.5],
+    },
+    "momentum_breakout": {
+        "donchian":      [15, 20, 30, 40],
+        "donchian_exit": [5, 10, 15],
+        "vol_ratio_min": [1.0, 1.2, 1.5],
+        "stop_atr_mult": [2.0, 2.5, 3.0],
+    },
+    "panic_reversal": {
+        "atr_spike_threshold": [2.5, 3.0, 3.5, 4.0],
+        "rsi_entry_max":       [25, 30, 35],
+        "wick_ratio_min":      [0.4, 0.5, 0.6],
+        "bb_pos_max":          [0.10, 0.15, 0.20, 0.25],
+        "prior_decline_pct":   [1.0, 2.0, 3.0, 4.0],
+    },
+    "trend_follow": {
+        "st_multiplier": [2.0, 2.5, 3.0, 3.5],
+        "adx_min":       [15.0, 20.0, 25.0, 30.0],
+        "st_period":     [7, 10, 14],
+    },
 }
 
 
@@ -203,10 +335,17 @@ def coordinate_descent_search(
     if not grid:
         return {}, None, None, 0
 
+    def _ck(p: Dict[str, Any]) -> tuple:
+        # Cache key over SCALAR params only. Non-scalar params (e.g. a unified
+        # strategy's exit_policy dict) are constant across a run and would be
+        # unhashable; the grid only varies scalars, so they fully identify a trial.
+        return tuple(sorted((k, v) for k, v in p.items()
+                            if isinstance(v, (int, float, str, bool)) or v is None))
+
     cur = dict(base_params)
     best_score, best_metrics = evaluate(cur)
     n_evals = 1
-    cache: Dict[tuple, Any] = {tuple(sorted(cur.items())): (best_score, best_metrics)}
+    cache: Dict[tuple, Any] = {_ck(cur): (best_score, best_metrics)}
 
     for _ in range(max(1, rounds)):
         improved_this_round = False
@@ -219,7 +358,7 @@ def coordinate_descent_search(
                 lo = trial.get("rsi_min"); hi = trial.get("rsi_max")
                 if lo is not None and hi is not None and lo >= hi - 4:
                     continue
-                ck = tuple(sorted(trial.items()))
+                ck = _ck(trial)
                 if ck in cache:
                     score, metrics = cache[ck]
                 else:

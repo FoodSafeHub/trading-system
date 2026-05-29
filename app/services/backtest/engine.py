@@ -13,6 +13,7 @@ from typing import List, Optional
 
 import pandas as pd
 
+from app.services.backtest.costs import CostModel
 from app.services.market_data.provider import get_ohlcv
 from app.services.strategy.rules import evaluate_strategy, PositionState
 
@@ -58,6 +59,7 @@ def run_backtest(
     initial_capital: float = 100_000.0,
     quantity: float = 1.0,
     df: pd.DataFrame | None = None,
+    cost_model: CostModel | None = None,
 ) -> BacktestResult:
     """
     Simulate a strategy over historical data.
@@ -65,6 +67,12 @@ def run_backtest(
 
     df: optional pre-fetched OHLCV. When provided, skips the get_ohlcv call —
     used by grid-search calibration to reuse one fetch across many param combos.
+
+    cost_model: optional slippage/commission model. DEFAULT None == zero cost,
+    in which case every fill price, quantity, and equity point is identical to
+    the pre-cost engine (Phase 0 behaviour-neutral contract). When supplied,
+    buys fill worse, sells fill worse, and commissions/taxes are deducted from
+    cash — so reported returns become net of trading frictions.
     """
     if df is None:
         df = get_ohlcv(symbol, period=period)
@@ -90,6 +98,7 @@ def run_backtest(
     position_cost = 0.0     # total cost basis
     entry_price = 0.0       # fill price of the open position (for trailing-stop overlay)
     highest_close = 0.0     # highest close seen since entry (Chandelier trail)
+    bars_held = 0           # bars elapsed since entry (for time-stop exit policies)
     trades: List[BacktestTrade] = []
     equity_curve: List[dict] = []
     peak_equity = initial_capital
@@ -114,8 +123,10 @@ def run_backtest(
         # not current_close (= close[i], which the rule cannot see yet).
         if position > 0:
             highest_close = max(highest_close, float(closes.iloc[i - 1]))
+            bars_held += 1
         pos_state = (
-            PositionState(entry_price=entry_price, highest_close=highest_close)
+            PositionState(entry_price=entry_price, highest_close=highest_close,
+                          bars_held=bars_held)
             if position > 0 else None
         )
         signal = evaluate_strategy(
@@ -126,37 +137,45 @@ def run_backtest(
 
         # Execute simulated trade
         if direction == "BUY" and position == 0:
+            # Cost-adjusted fill: buys fill WORSE (higher). cost_model None => buy_px == fill_price.
+            buy_px = fill_price if cost_model is None else cost_model.apply_buy(fill_price)
             # Use up to 95% of available capital
-            affordable_qty = (capital * 0.95) / fill_price if fill_price > 0 else 0
+            affordable_qty = (capital * 0.95) / buy_px if buy_px > 0 else 0
             # quantity<=0 means "use all capital"; quantity>0 is a fixed share count cap
             actual_qty = affordable_qty if quantity <= 0 else min(quantity, affordable_qty)
             actual_qty = actual_qty if affordable_qty >= 0.01 else 0
             if actual_qty > 0:
-                cost = fill_price * actual_qty
-                capital -= cost
+                cost = buy_px * actual_qty
+                commission = 0.0 if cost_model is None else cost_model.entry_commission(actual_qty, cost)
+                capital -= cost + commission
                 position = actual_qty
                 position_cost = cost
-                entry_price = fill_price
+                entry_price = buy_px
                 highest_close = current_close
+                bars_held = 0
                 trades.append(BacktestTrade(
                     date=today, symbol=symbol, side="BUY",
-                    price=fill_price, quantity=actual_qty, value=cost,
+                    price=buy_px, quantity=actual_qty, value=cost,
                     signal_from=strategy_name,
                 ))
 
         elif direction == "SELL" and position > 0:
-            proceeds = fill_price * position
+            # Cost-adjusted fill: sells fill WORSE (lower). cost_model None => sell_px == fill_price.
+            sell_px = fill_price if cost_model is None else cost_model.apply_sell(fill_price)
+            proceeds = sell_px * position
+            commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
             pnl = proceeds - position_cost
-            capital += proceeds
+            capital += proceeds - commission
             trades.append(BacktestTrade(
                 date=today, symbol=symbol, side="SELL",
-                price=fill_price, quantity=position, value=proceeds,
+                price=sell_px, quantity=position, value=proceeds,
                 signal_from=strategy_name,
             ))
             position = 0.0
             position_cost = 0.0
             entry_price = 0.0
             highest_close = 0.0
+            bars_held = 0
 
         # Mark-to-market equity
         equity = capital + position * current_close
@@ -177,13 +196,16 @@ def run_backtest(
     # Close any open position at last price
     final_close = float(closes.iloc[-1])
     if position > 0:
-        proceeds = final_close * position
+        # cost_model None => sell_px == final_close, commission 0 (identical close).
+        sell_px = final_close if cost_model is None else cost_model.apply_sell(final_close)
+        proceeds = sell_px * position
+        commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
         trades.append(BacktestTrade(
             date=dates[-1], symbol=symbol, side="SELL (close)",
-            price=final_close, quantity=position, value=proceeds,
+            price=sell_px, quantity=position, value=proceeds,
             signal_from=strategy_name,
         ))
-        capital += proceeds
+        capital += proceeds - commission
         position = 0.0
 
     final_capital = capital

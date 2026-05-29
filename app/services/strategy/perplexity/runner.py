@@ -46,6 +46,24 @@ PERPLEXITY_STRATEGIES: List[PerplexityStrategy] = [
 ]
 
 
+def get_perplexity_strategies() -> List[PerplexityStrategy]:
+    """Active strategy list. DEFAULT = the bespoke classes above (unchanged).
+
+    Only when ``use_unified_perplexity`` is explicitly enabled do we swap in the
+    rule-backed adapters (Engine B as a display layer over rules.py). The flag
+    defaults to False, so scanner / Perplexity-page / recommendations output is
+    byte-identical to today until someone opts in.
+    """
+    try:
+        from app.config import get_settings
+        if getattr(get_settings(), "use_unified_perplexity", False):
+            from app.services.strategy.perplexity.adapter import build_unified_adapters
+            return build_unified_adapters()
+    except Exception:
+        pass
+    return PERPLEXITY_STRATEGIES
+
+
 def _atr_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high, low, close = df["High"], df["Low"], df["Close"]
     prev_close = close.shift(1)
@@ -82,7 +100,7 @@ def run_perplexity_signal(
 
     volatility_bucket = bucket_atr_pct(_current_atr(df)) if not df.empty else "unknown"
 
-    for strategy in PERPLEXITY_STRATEGIES:
+    for strategy in get_perplexity_strategies():
         if not strategy.enabled:
             continue
         try:

@@ -398,24 +398,31 @@ def backtest_custom_compare_all(
     symbol: str,
     period: str = "1y",
     initial_capital: float = 100000.0,
+    strategy_set: str = "legacy",
 ):
-    """Run each of the 5 scanner strategies INDEPENDENTLY on an arbitrary symbol.
+    """Run each scanner strategy INDEPENDENTLY on an arbitrary symbol.
 
     Mirrors the Perplexity Compare All UX: one row per strategy with win-rate,
     profit factor, expectancy, return, drawdown, sharpe — so the user can see
     which strategy works best for the ticker before promoting it to auto-trade.
 
-    Uses the FULL 7-strategy set (5 regime-aware + 2 legacy Bollinger/Fib) so
-    the user gets the same coverage they see for predefined symbols in
-    Single Strategy mode.
+    strategy_set:
+      * "legacy"  (DEFAULT) — the FULL 7-strategy set (5 regime-aware + 2 legacy
+        Bollinger/Fib). Output is byte-unchanged from before Phase 1.
+      * "unified" — OPT-IN: the 6 consolidated Phase 1 strategies, each with its
+        default exit_policy. Lets you preview the new suite without changing the
+        default page behaviour.
     """
-    from app.services.scanner.scanner_service import _make_generic_configs_full
+    from app.services.scanner.scanner_service import (
+        _make_generic_configs_full, _make_unified_configs,
+    )
 
     sym = symbol.upper().strip()
     if not sym:
         raise HTTPException(status_code=400, detail="symbol is required")
 
-    configs = _make_generic_configs_full(sym)
+    configs = (_make_unified_configs(sym) if strategy_set == "unified"
+               else _make_generic_configs_full(sym))
     results: list[dict] = []
     for cfg in configs:
         try:
@@ -512,8 +519,13 @@ def backtest_custom_compare_all(
 # ── Scanner calibration (Optimize Filters for the Backtest page) ───────────────
 
 _SCANNER_CALIBRATABLE = {
+    # Legacy types (unchanged — calibrate exactly as before).
     "rsi2_mean_reversion", "ema_macd_crossover", "bb_squeeze_breakout",
     "pullback_ema50", "vix_spike_reversal",
+    # Unified Phase 1/2 types (parallel; saved under their own "<new>:SYMBOL" key,
+    # and they inherit predecessor calibration via the alias map until re-tuned).
+    "rsi2_reversion", "trend_pullback", "squeeze_breakout",
+    "momentum_breakout", "panic_reversal", "trend_follow",
 }
 
 
@@ -568,7 +580,7 @@ def scanner_calibrate(
     generic indicators the scanner rules don't use and failed on high-win-rate
     strategies that have too few losers to learn from.
     """
-    from app.services.scanner.scanner_service import _make_generic_configs
+    from app.services.scanner.scanner_service import _make_generic_configs, _make_unified_configs
     from app.services.backtest.scanner_profiles import (
         ScannerParamProfile, coordinate_descent_search, grid_for, save_profile,
     )
@@ -582,10 +594,15 @@ def scanner_calibrate(
                                  f"Valid: {sorted(_SCANNER_CALIBRATABLE)}")
 
     # cfg.params already reflects current LIVE behaviour (factory defaults plus any
-    # previously-saved override) — the right baseline for "can we do better?".
-    cfg = next((c for c in _make_generic_configs(sym) if c.type == stype), None)
+    # previously-saved override, incl. predecessor calibration inherited via the
+    # alias map for new types) — the right baseline for "can we do better?".
+    # Legacy types come from the generic factory; the 6 unified types from the
+    # parallel unified factory. Searching both keeps old behaviour intact while
+    # making the new names calibratable.
+    all_cfgs = list(_make_generic_configs(sym)) + list(_make_unified_configs(sym))
+    cfg = next((c for c in all_cfgs if c.type == stype), None)
     if cfg is None:
-        raise HTTPException(404, f"strategy_type '{stype}' not in generic set")
+        raise HTTPException(404, f"strategy_type '{stype}' not in generic or unified set")
     if not grid_for(stype):
         raise HTTPException(400, f"No tunable param grid defined for '{stype}'")
 
@@ -709,6 +726,20 @@ def list_scanner_profiles(strategy_type: Optional[str] = None):
     from app.services.backtest.scanner_profiles import list_profiles
     from dataclasses import asdict
     return [asdict(p) for p in list_profiles(strategy_type)]
+
+
+@router.get("/migrate-profiles")
+def migrate_profiles(dry_run: bool = True, overwrite: bool = False):
+    """Opt-in, NON-DESTRUCTIVE migration: copy predecessor calibration profiles
+    to the new unified strategy names. dry_run=true (DEFAULT) only reports what
+    WOULD be copied — call with dry_run=false to write. Old profiles are never
+    deleted (rollback = delete the new-name copy). Note: new strategies already
+    inherit old calibration via the alias map, so this is optional convenience.
+    """
+    from app.services.backtest.scanner_profiles import migrate_aliased_profiles
+    actions = migrate_aliased_profiles(dry_run=dry_run, overwrite=overwrite)
+    return {"dry_run": dry_run, "overwrite": overwrite, "actions": actions,
+            "would_copy": sum(1 for a in actions if a["action"] == "copy")}
 
 
 @router.get("/scanner-profiles/{symbol}/{strategy_type}")

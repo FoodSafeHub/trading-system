@@ -1,0 +1,41 @@
+{
+  "below_trigger": {
+    "direction": "HOLD",
+    "strategy_name": "golden",
+    "indicators": {
+      "src": "test"
+    }
+  },
+  "ride_winner": {
+    "direction": "HOLD",
+    "strategy_name": "golden",
+    "indicators": {
+      "src": "test",
+      "trail_hold": true,
+      "chandelier": 104.0
+    }
+  },
+  "forced_sell": {
+    "direction": "SELL",
+    "strategy_name": "golden",
+    "indicators": {
+      "src": "test",
+      "trail_exit": true,
+      "chandelier": 106.0
+    }
+  },
+  "trail_disabled": {
+    "direction": "SELL",
+    "strategy_name": "golden",
+    "indicators": {
+      "src": "test"
+    }
+  },
+  "no_position": {
+    "direction": "SELL",
+    "strategy_name": "golden",
+    "indicators": {
+      "src": "test"
+    }
+  }
+}

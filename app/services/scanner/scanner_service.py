@@ -467,6 +467,67 @@ def _make_generic_configs_full(symbol: str):
     return base + legacy
 
 
+def _make_unified_configs(symbol: str):
+    """Phase 1 PARALLEL config set — the 6 consolidated daily strategies, each
+    paired with a default exit_policy so the exit-overlay layer manages
+    trail/time/trend-fail/regime exits. Used ONLY by opt-in callers (e.g. the
+    Backtest Compare-All `strategy_set=unified` path). The live scanner and
+    scheduler are untouched and keep using _make_generic_configs.
+
+    Per-symbol calibration is inherited from predecessor types via the alias
+    map (get_param_overrides resolves new->old), so tuning saved under the old
+    names is reused without re-calibration.
+    """
+    from app.services.strategy.models import StrategyConfig
+    from app.services.backtest.scanner_profiles import get_param_overrides
+
+    def _p(strategy_type: str, defaults: dict) -> dict:
+        merged = dict(defaults)
+        merged.update(get_param_overrides(strategy_type, symbol))
+        return merged
+
+    specs = [
+        ("rsi2_reversion", "RSI2_Reversion", {
+            "rsi_period": 2, "rsi_entry_threshold": 10, "rsi_exit_threshold": 65,
+            "sma_trend": 200, "exit_sma": 5, "atr_skip_threshold": 5.0, "hard_stop_pct": 2.5,
+            "exit_policy": {"trail": "atr", "atr_mult": 1.5, "trigger_pct": 3.0, "time_stop_bars": 8},
+        }),
+        ("trend_pullback", "Trend_Pullback", {
+            "ema_trend": 50, "ema_slope_bars": 5, "atr_proximity_mult": 1.2, "rsi_period": 14,
+            "rsi_min": 35, "rsi_max": 55, "wick_ratio_min": 0.4, "exit_rsi": 65,
+            "exit_extension_pct": 3.0, "bear_skip_threshold_pct": 10.0, "stop_atr_mult": 1.5,
+            "exit_policy": {"trail": "chandelier", "atr_mult": 3.0, "time_stop_bars": 20, "trend_fail": "ema:50"},
+        }),
+        ("squeeze_breakout", "Squeeze_Breakout", {
+            "bb_period": 20, "bb_std": 2.0, "squeeze_lookback": 20, "squeeze_percentile": 0.40,
+            "rsi_entry_min": 50, "vol_ratio_min": 1.3, "break_atr_frac": 0.10, "exit_ema": 20,
+            "stop_atr_mult": 2.0,
+            "exit_policy": {"trail": "chandelier", "atr_mult": 3.0, "time_stop_bars": 15, "trend_fail": "ema:20"},
+        }),
+        ("momentum_breakout", "Momentum_Breakout", {
+            "donchian": 20, "donchian_exit": 10, "ema_fast": 9, "ema_slow": 21,
+            "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "vol_ratio_min": 1.2,
+            "sma_trend": 200, "stop_atr_mult": 2.5,
+            "exit_policy": {"trail": "chandelier", "atr_mult": 3.0, "trend_fail": "ema_cross:9,21", "regime_exit": "deep_bear"},
+        }),
+        ("panic_reversal", "Panic_Reversal", {
+            "atr_period": 14, "atr_spike_threshold": 3.0, "atr_exit_threshold": 2.0,
+            "rsi_period": 14, "rsi_entry_max": 30, "rsi_exit": 55, "bb_pos_max": 0.20,
+            "wick_ratio_min": 0.5, "prior_decline_pct": 2.0, "prior_decline_bars": 3, "hard_stop_pct": 4.0,
+            "exit_policy": {"trail": "atr", "atr_mult": 1.5, "trigger_pct": 2.0, "time_stop_bars": 8},
+        }),
+        ("trend_follow", "Trend_Follow", {
+            "st_period": 10, "st_multiplier": 3.0, "sma_trend": 200, "adx_min": 20.0,
+            "exit_policy": {"trail": "chandelier", "atr_mult": 4.5, "trend_fail": "supertrend", "regime_exit": "deep_bear"},
+        }),
+    ]
+    return [
+        StrategyConfig(name=f"{symbol}_{label}", symbol=symbol, type=stype,
+                       enabled=True, params=_p(stype, defaults))
+        for stype, label, defaults in specs
+    ]
+
+
 def get_latest_results(limit: int = 50) -> list[ScanResultOut]:
     """Return the most recent scan results from DB."""
     with SessionLocal() as db:

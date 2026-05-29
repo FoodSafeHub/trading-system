@@ -24,6 +24,7 @@ from typing import List, Optional
 
 import pandas as pd
 
+from app.services.backtest.costs import CostModel
 from app.services.backtest.engine import run_backtest
 from app.services.backtest.walkforward_engine import (
     _TRADING_DAYS_PER_YEAR,
@@ -88,6 +89,7 @@ def _run_slice(
     df_slice: pd.DataFrame,
     warmup_df: Optional[pd.DataFrame],
     initial_capital: float,
+    cost_model: Optional[CostModel] = None,
 ) -> V2Segment:
     """Backtest one slice. warmup_df (IS history) is prepended so indicators
     have lookback, then trimmed out of the reported window so only OOS bars
@@ -111,6 +113,7 @@ def _run_slice(
         initial_capital=initial_capital,
         quantity=0,
         df=df_full,
+        cost_model=cost_model,
     )
 
     # When warmed up, keep only the equity points that fall inside the OOS span
@@ -143,6 +146,7 @@ def run_simple_split_v2(
     period: str = "5y",
     train_pct: float = 0.70,
     initial_capital: float = 100_000.0,
+    cost_model: Optional[CostModel] = None,
 ) -> V2SimpleSplitResult:
     """One IS (train_pct) / one OOS (rest) split by bar count, both seeded with
     the same initial capital. OOS uses IS bars for indicator warmup."""
@@ -157,8 +161,8 @@ def run_simple_split_v2(
     df_train = df_full.iloc[:split]
     df_test = df_full.iloc[split:]
 
-    is_seg = _run_slice(strategy_type, symbol, params, df_train, None, initial_capital)
-    oos_seg = _run_slice(strategy_type, symbol, params, df_test, df_train, initial_capital)
+    is_seg = _run_slice(strategy_type, symbol, params, df_train, None, initial_capital, cost_model)
+    oos_seg = _run_slice(strategy_type, symbol, params, df_test, df_train, initial_capital, cost_model)
 
     wfe_val = _wfe(oos_seg.cagr, is_seg.cagr)
     return V2SimpleSplitResult(
@@ -183,6 +187,7 @@ def run_rolling_v2(
     test_years: float = 1.0,
     step_years: float = 1.0,
     initial_capital: float = 100_000.0,
+    cost_model: Optional[CostModel] = None,
 ) -> V2RollingResult:
     """Slide IS/OOS windows across full history; stitch OOS curves into one
     composite (rebased at each join) and compute a global WFE."""
@@ -210,8 +215,8 @@ def run_rolling_v2(
         df_is = df_full.iloc[t0:t0 + train_len]
         df_oos = df_full.iloc[t0 + train_len:t0 + train_len + test_len]
 
-        is_seg = _run_slice(strategy_type, symbol, params, df_is, None, initial_capital)
-        oos_seg = _run_slice(strategy_type, symbol, params, df_oos, df_is, initial_capital)
+        is_seg = _run_slice(strategy_type, symbol, params, df_is, None, initial_capital, cost_model)
+        oos_seg = _run_slice(strategy_type, symbol, params, df_oos, df_is, initial_capital, cost_model)
 
         oos_curve = oos_seg.equity_curve
         if oos_curve:
