@@ -212,101 +212,95 @@
   "rsi2_reversion:NVDA": {
     "symbol": "NVDA",
     "strategy_type": "rsi2_reversion",
-    "calibrated_at": "2026-05-29",
-    "n_trades": 28,
-    "n_wins": 23,
-    "win_rate_pct": 82.1,
+    "calibrated_at": "2026-05-27",
+    "n_trades": 31,
+    "n_wins": 28,
+    "win_rate_pct": 90.3,
     "param_overrides": {
-      "rsi_exit_threshold": 55,
-      "atr_skip_threshold": 5.0
+      "rsi_entry_threshold": 8,
+      "atr_skip_threshold": 7.0,
+      "trail_enabled": true,
+      "trail_trigger_pct": 3.0,
+      "atr_trail_mult": 3.0,
+      "atr_trail_period": 22
     },
-    "survival_rate_pct": 93.3,
+    "survival_rate_pct": 96.9,
     "improved_by": [
       "expectancy",
       "total_return"
     ],
-    "notes": "grid-search winner from 22 combos vs 30 baseline round-trips over 5y"
+    "notes": "migrated from rsi2_mean_reversion (alias); grid-search winner from 19 combos vs 32 baseline round-trips over 5y | chandelier trail enabled 2026-05-28 (A/B +427.8pp total-return, 5y, no-lookahead engine)"
   },
   "trend_pullback:AAPL": {
     "symbol": "AAPL",
     "strategy_type": "trend_pullback",
-    "calibrated_at": "2026-05-29",
-    "n_trades": 23,
-    "n_wins": 8,
-    "win_rate_pct": 34.8,
+    "calibrated_at": "2026-05-26",
+    "n_trades": 12,
+    "n_wins": 11,
+    "win_rate_pct": 91.7,
     "param_overrides": {
-      "atr_proximity_mult": 0.8,
-      "rsi_min": 40,
-      "wick_ratio_min": 0.4,
-      "exit_extension_pct": 4.0
+      "wick_ratio_min": 0.6
     },
-    "survival_rate_pct": 85.2,
+    "survival_rate_pct": 92.3,
     "improved_by": [
+      "win_rate",
       "expectancy",
       "total_return"
     ],
-    "notes": "grid-search winner from 24 combos vs 27 baseline round-trips over 5y"
+    "notes": "migrated from pullback_ema50 (alias); grid-search winner from 14 combos vs 13 baseline round-trips over 5y"
   },
   "trend_pullback:BHARTIARTL": {
     "symbol": "BHARTIARTL",
     "strategy_type": "trend_pullback",
-    "calibrated_at": "2026-05-29",
-    "n_trades": 23,
-    "n_wins": 13,
-    "win_rate_pct": 56.5,
+    "calibrated_at": "2026-05-26",
+    "n_trades": 21,
+    "n_wins": 19,
+    "win_rate_pct": 90.5,
     "param_overrides": {
-      "atr_proximity_mult": 0.8,
-      "rsi_min": 40,
-      "rsi_max": 50,
-      "wick_ratio_min": 0.4,
-      "exit_extension_pct": 5.0
+      "wick_ratio_min": 0.5
     },
-    "survival_rate_pct": 59.0,
+    "survival_rate_pct": 75.0,
     "improved_by": [
       "win_rate",
-      "expectancy",
-      "total_return"
+      "expectancy"
     ],
-    "notes": "grid-search winner from 24 combos vs 39 baseline round-trips over 5y"
+    "notes": "migrated from pullback_ema50 (alias); grid-search winner from 14 combos vs 28 baseline round-trips over 10y"
   },
   "trend_pullback:FANG": {
     "symbol": "FANG",
     "strategy_type": "trend_pullback",
-    "calibrated_at": "2026-05-29",
-    "n_trades": 47,
-    "n_wins": 20,
-    "win_rate_pct": 42.5,
+    "calibrated_at": "2026-05-28",
+    "n_trades": 16,
+    "n_wins": 14,
+    "win_rate_pct": 87.5,
     "param_overrides": {
-      "atr_proximity_mult": 0.8,
-      "rsi_max": 55,
-      "wick_ratio_min": 0.5,
-      "exit_extension_pct": 4.0
+      "rsi_max": 50,
+      "wick_ratio_min": 0.3,
+      "exit_extension_pct": 5.0
     },
-    "survival_rate_pct": 117.5,
-    "improved_by": [
-      "expectancy",
-      "total_return"
-    ],
-    "notes": "grid-search winner from 27 combos vs 40 baseline round-trips over 5y"
-  },
-  "trend_pullback:RELIANCE": {
-    "symbol": "RELIANCE",
-    "strategy_type": "trend_pullback",
-    "calibrated_at": "2026-05-29",
-    "n_trades": 38,
-    "n_wins": 17,
-    "win_rate_pct": 44.7,
-    "param_overrides": {
-      "atr_proximity_mult": 1.0,
-      "rsi_max": 60,
-      "wick_ratio_min": 0.4
-    },
-    "survival_rate_pct": 102.7,
+    "survival_rate_pct": 84.2,
     "improved_by": [
       "win_rate",
       "expectancy",
       "total_return"
     ],
-    "notes": "grid-search winner from 21 combos vs 37 baseline round-trips over 5y"
+    "notes": "migrated from pullback_ema50 (alias); grid-search winner from 27 combos vs 19 baseline round-trips over 5y"
+  },
+  "trend_pullback:RELIANCE": {
+    "symbol": "RELIANCE",
+    "strategy_type": "trend_pullback",
+    "calibrated_at": "2026-05-26",
+    "n_trades": 29,
+    "n_wins": 24,
+    "win_rate_pct": 82.8,
+    "param_overrides": {
+      "wick_ratio_min": 0.3
+    },
+    "survival_rate_pct": 107.4,
+    "improved_by": [
+      "expectancy",
+      "total_return"
+    ],
+    "notes": "migrated from pullback_ema50 (alias); grid-search winner from 14 combos vs 27 baseline round-trips over 10y"
   }
 }
