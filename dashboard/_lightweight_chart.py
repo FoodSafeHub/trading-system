@@ -15,7 +15,7 @@ from typing import Any
 import streamlit.components.v1 as components
 
 
-_LIBRARY_URL = "https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"
+_LIBRARY_URL = "https://unpkg.com/lightweight-charts@5.0.7/dist/lightweight-charts.standalone.production.js"
 
 
 # Single overlay-styling source so legend + line colours stay in sync.
@@ -341,44 +341,44 @@ async function main() {
     visible: false,
   });
 
-  // Oscillator sub-panes (RSI / MACD / Stochastic / ATR / OBV). Each gets its
-  // own stacked price scale below price+volume. Only present on the daily chart;
-  // the live tab sends no `oscillators`, so this block is a no-op there.
+  // Oscillator sub-panes (RSI / MACD / Stochastic / ATR / OBV).
   //
-  // Math (FIXED): the price scale uses the top (1 - oscArea); each oscillator
-  // gets an equal `slot = oscArea / N` band below price. The previous version
-  // computed `top = oscArea + slot*pi` (treating the bottom-margin variable as
-  // a top-offset) which made oscillator scales overlap the price scale, so the
-  // indicator lines were drawn across the candles using the price Y axis.
+  // Upgraded to lightweight-charts v5 native panes: pass `paneIndex` as the
+  // 2nd arg to series factories and v5 creates a real stacked pane WITH ITS
+  // OWN right-axis labels (e.g. 0/30/50/70/100 for RSI, signed values for
+  // MACD). v4's custom-priceScaleId hack got us visually-separated bands but
+  // overlay scales never render axis labels, which is what the user saw.
   const oscPanes = CFG.oscillators || [];
   if (oscPanes.length) {
-    // Vertical share reserved at the bottom for the oscillator stack. Caps at
-    // 0.55 so price never gets squeezed below ~45% of the chart.
-    const oscArea = Math.min(0.55, 0.10 + oscPanes.length * 0.18);
-    chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.05, bottom: oscArea } });
-    const slot = oscArea / oscPanes.length;        // vertical fraction per pane
-    const priceEnd = 1 - oscArea;                  // y where price ends, oscillators begin
-    const gap = 0.005;                             // tiny gap so scales don't kiss
     oscPanes.forEach((pane, pi) => {
+      const paneIndex = pi + 1;  // 0 is the main price+volume pane
       (pane.series || []).forEach(ser => {
-        const common = { priceScaleId: pane.id, priceLineVisible: false,
-                         lastValueVisible: false, crosshairMarkerVisible: false };
+        const common = { priceLineVisible: false, lastValueVisible: true,
+                         crosshairMarkerVisible: false };
         let s;
         if (ser.type === "histogram") {
-          s = chart.addHistogramSeries({ ...common, color: ser.color, base: ser.base || 0 });
+          s = chart.addHistogramSeries({ ...common, color: ser.color, base: ser.base || 0 }, paneIndex);
         } else {
           s = chart.addLineSeries({ ...common, color: ser.color,
-                                    lineWidth: ser.width || 1, lineStyle: ser.lineStyle || 0 });
+                                    lineWidth: ser.width || 1, lineStyle: ser.lineStyle || 0 }, paneIndex);
         }
         s.setData(ser.data || []);
       });
-      const top = priceEnd + slot * pi + gap;
-      const bottom = Math.max(0.0, 1 - top - slot + gap);
-      chart.priceScale(pane.id).applyOptions({
-        scaleMargins: { top: top, bottom: bottom },
-        borderColor: "#2a2e39",
-      });
     });
+    // Give the price pane the majority of vertical space; share the rest among
+    // the oscillator panes. v5's chart.panes() returns the live Pane objects.
+    try {
+      const panes = chart.panes();
+      const totalH = host.clientHeight || 600;
+      const oscShare = Math.min(0.40, 0.20 + oscPanes.length * 0.08);
+      const oscH = Math.floor((totalH * oscShare) / oscPanes.length);
+      const mainH = totalH - oscH * oscPanes.length;
+      panes[0] && panes[0].setHeight && panes[0].setHeight(mainH);
+      oscPanes.forEach((_, i) => {
+        const p = panes[i + 1];
+        if (p && p.setHeight) p.setHeight(oscH);
+      });
+    } catch (e) { /* setHeight is best-effort; ignore if v5 surface differs */ }
   }
 
   // Overlay line series — all backend-computed; we just draw what's sent.
