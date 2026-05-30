@@ -344,15 +344,22 @@ async function main() {
   // Oscillator sub-panes (RSI / MACD / Stochastic / ATR / OBV). Each gets its
   // own stacked price scale below price+volume. Only present on the daily chart;
   // the live tab sends no `oscillators`, so this block is a no-op there.
+  //
+  // Math (FIXED): the price scale uses the top (1 - oscArea); each oscillator
+  // gets an equal `slot = oscArea / N` band below price. The previous version
+  // computed `top = oscArea + slot*pi` (treating the bottom-margin variable as
+  // a top-offset) which made oscillator scales overlap the price scale, so the
+  // indicator lines were drawn across the candles using the price Y axis.
   const oscPanes = CFG.oscillators || [];
   if (oscPanes.length) {
-    // Squeeze price into the top region so the panes have room below.
-    const priceBottom = Math.min(0.55, 0.10 + oscPanes.length * 0.14);
-    chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.05, bottom: priceBottom } });
-    const slot = (1 - priceBottom) / oscPanes.length;  // vertical fraction per pane
+    // Vertical share reserved at the bottom for the oscillator stack. Caps at
+    // 0.55 so price never gets squeezed below ~45% of the chart.
+    const oscArea = Math.min(0.55, 0.10 + oscPanes.length * 0.18);
+    chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.05, bottom: oscArea } });
+    const slot = oscArea / oscPanes.length;        // vertical fraction per pane
+    const priceEnd = 1 - oscArea;                  // y where price ends, oscillators begin
+    const gap = 0.005;                             // tiny gap so scales don't kiss
     oscPanes.forEach((pane, pi) => {
-      const top = priceBottom + slot * pi + 0.01;
-      const bottom = 1 - (priceBottom + slot * (pi + 1)) + 0.02;
       (pane.series || []).forEach(ser => {
         const common = { priceScaleId: pane.id, priceLineVisible: false,
                          lastValueVisible: false, crosshairMarkerVisible: false };
@@ -365,8 +372,10 @@ async function main() {
         }
         s.setData(ser.data || []);
       });
+      const top = priceEnd + slot * pi + gap;
+      const bottom = Math.max(0.0, 1 - top - slot + gap);
       chart.priceScale(pane.id).applyOptions({
-        scaleMargins: { top: top, bottom: Math.max(0.0, bottom) },
+        scaleMargins: { top: top, bottom: bottom },
         borderColor: "#2a2e39",
       });
     });
@@ -480,11 +489,30 @@ async function main() {
     }
   }
 
+  function fmtTs(t) {
+    // Markers come from two backends: intraday (`time` is a unix epoch in
+    // seconds) and daily (`time` is a "YYYY-MM-DD" string). The old version
+    // multiplied unconditionally by 1000 and called toISOString(), which threw
+    // "Invalid time value" on daily markers and was caught by main().catch as
+    // "chart init failed: Invalid time value". Handle both shapes here.
+    if (t === null || t === undefined) return "—";
+    let d;
+    if (typeof t === "number") {
+      d = new Date(t * 1000);
+    } else if (typeof t === "string") {
+      d = new Date(t);
+    } else {
+      return String(t);
+    }
+    return Number.isNaN(d.getTime())
+      ? String(t)
+      : d.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+  }
   function renderExplain(m, idx, total) {
     const pill = m._accepted
       ? (m.side === "BUY" ? `<span class="pill buy">BUY</span>` : `<span class="pill sell">${m.side||"SELL"}</span>`)
       : `<span class="pill rej">REJECTED</span>`;
-    const ts = m.time ? new Date(m.time * 1000).toISOString().replace("T"," ").slice(0,16) + " UTC" : "—";
+    const ts = fmtTs(m.time);
     const counter = (total && total > 1)
       ? `<span style="opacity:.6;font-size:11px">  ·  marker ${idx} of ${total} on this bar (click again to cycle)</span>`
       : "";
