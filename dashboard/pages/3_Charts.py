@@ -5,6 +5,7 @@ import streamlit as st
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
 from _theme import apply_theme
+import _charts as charts
 import _lightweight_chart as lwc
 
 # India detection — UI-only copy kept in sync with app.services.markets, so the
@@ -52,8 +53,8 @@ with col2:
         "overlays and ▲/▼ strategy-signal markers. India symbols render in ₹."
     )
 
-chart_tab, live_tab = st.tabs(
-    ["Chart (daily + signals)", "Strategy Live (intraday)"]
+chart_tab, live_tab, tv_tab = st.tabs(
+    ["Chart (daily + signals)", "Strategy Live (intraday)", "TradingView (full UI)"]
 )
 
 with chart_tab:
@@ -149,6 +150,13 @@ with chart_tab:
             data_source=_src,
             currency=_cur,
             height=_chart_h,
+        )
+        st.markdown(
+            f"<div style='text-align:right;margin-top:-8px'>"
+            f"<a href='{charts.tradingview_url(symbol)}' target='_blank' "
+            f"style='color:#42A5F5;font-size:12px;text-decoration:none'>"
+            f"Open {charts.tv_symbol(symbol)} in TradingView ↗</a></div>",
+            unsafe_allow_html=True,
         )
     else:
         st.caption(f"No OHLC data available for {symbol}.")
@@ -260,6 +268,13 @@ with live_tab:
             show_levels=True,
             height=720,
         )
+        st.markdown(
+            f"<div style='text-align:right;margin-top:-8px'>"
+            f"<a href='{charts.tradingview_url(symbol)}' target='_blank' "
+            f"style='color:#42A5F5;font-size:12px;text-decoration:none'>"
+            f"Open {charts.tv_symbol(symbol)} in TradingView ↗</a></div>",
+            unsafe_allow_html=True,
+        )
 
         # ── Explainability table: all markers in a sortable list ──
         rows = []
@@ -299,6 +314,24 @@ with live_tab:
                 f"<meta http-equiv='refresh' content='{refresh_secs}'>",
                 height=0,
             )
+
+# ── TradingView Advanced Chart (full pro UI) ──────────────────────
+with tv_tab:
+    _tv_sym = charts.tv_symbol(symbol)
+    st.caption(
+        "Full TradingView Advanced Chart — drawing tools, alerts, watchlists, "
+        "multi-timeframe, and TradingView's own indicator library. "
+        "**Independent from the engine**: no platform overlays or signal markers are shown here. "
+        "For engine-faithful indicators + ▲/▼ markers + ENTRY/STOP/TARGET lines, use the other tabs."
+    )
+    st.markdown(
+        f"<div style='margin-bottom:6px'>"
+        f"Routed as <code>{_tv_sym}</code> · "
+        f"<a href='{charts.tradingview_url(symbol)}' target='_blank' "
+        f"style='color:#42A5F5;text-decoration:none'>Open {_tv_sym} in TradingView ↗</a></div>",
+        unsafe_allow_html=True,
+    )
+    charts.tradingview_embed(_tv_sym, interval="D", height=720)
 
 # ── Financials ────────────────────────────────────────────────────
 st.divider()

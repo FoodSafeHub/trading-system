@@ -500,6 +500,43 @@ def intraday_candles(
     return fig
 
 
+# ── Shared TradingView symbol routing ─────────────────────────────────────────
+
+_TV_EXCHANGE_GUESS = {"SPY": "AMEX", "QQQ": "NASDAQ", "IWM": "AMEX"}
+_TV_NYSE_HINTS = {"JPM", "BAC", "GS", "MS", "WFC", "XOM", "CVX",
+                  "JNJ", "UNH", "V", "MA"}
+
+
+def tv_symbol(sym: str) -> str:
+    """Format a ticker for any TradingView widget URL ('NSE:RELIANCE', 'NASDAQ:AAPL', ...).
+
+    * Already-prefixed inputs (NSE:..., NASDAQ:..., BSE:...) pass through.
+    * India symbols (Nifty 200 pool OR Upstox NSE map) → NSE:; .BO → BSE:.
+    * US fallback: NYSE for known NYSE names; AMEX for SPY/IWM; NASDAQ otherwise.
+    """
+    s = (sym or "").upper().strip()
+    if ":" in s:
+        return s
+    try:
+        from app.services.markets import is_india_symbol
+        if is_india_symbol(s):
+            if s.endswith(".BO"):
+                return f"BSE:{s[:-3]}"
+            if s.endswith(".NS"):
+                return f"NSE:{s[:-3]}"
+            return f"NSE:{s}"
+    except Exception:
+        pass
+    if s in _TV_EXCHANGE_GUESS:
+        return f"{_TV_EXCHANGE_GUESS[s]}:{s}"
+    return f"NYSE:{s}" if s in _TV_NYSE_HINTS else f"NASDAQ:{s}"
+
+
+def tradingview_url(sym: str) -> str:
+    """Public TradingView chart URL for opening a symbol in a new tab."""
+    return f"https://www.tradingview.com/chart/?symbol={tv_symbol(sym)}"
+
+
 # ── TradingView Advanced Chart embed ───────────────────────────────────────────
 def tradingview_embed(
     symbol: str,

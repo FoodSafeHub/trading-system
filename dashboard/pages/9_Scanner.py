@@ -37,10 +37,9 @@ _NYSE_HINTS = {"JPM","BAC","GS","MS","WFC","XOM","CVX","JNJ","UNH","V","MA"}
 
 
 def _tv_symbol(sym: str) -> str:
-    s = sym.upper()
-    if s in _EXCHANGE_GUESS:
-        return f"{_EXCHANGE_GUESS[s]}:{s}"
-    return f"NYSE:{s}" if s in _NYSE_HINTS else f"NASDAQ:{s}"
+    """Backwards-compat shim. Routing now lives in charts.tv_symbol so the
+    Scanner and the Charts page share one rule (incl. India NSE:/BSE: routing)."""
+    return charts.tv_symbol(sym)
 
 
 def _parse_strategies_from_reason(reason: str | None) -> list[str]:
