@@ -116,14 +116,65 @@ def _run_slice(
         cost_model=cost_model,
     )
 
-    # When warmed up, keep only the equity points that fall inside the OOS span
-    # so the reported return/CAGR reflect the held-out window, not the warmup.
+    # Default: report the full backtest result as-is (correct for the IS case
+    # where df_full == df_slice — no warmup, so r already covers only the IS span).
     curve = r.equity_curve
+    trades_count = r.total_trades
+    win_rate = r.win_rate_pct
+    max_dd = r.max_drawdown_pct
+    sharpe = r.sharpe_ratio
+
+    # When warmed up (OOS case): trim the equity curve to the OOS span AND
+    # recompute trade-derived sub-metrics on OOS-only data. Without this, r
+    # reflects trades / drawdown / sharpe across IS+OOS (the warmup span is
+    # traded too) and contaminates the OOS view.
     if warmup_df is not None and not warmup_df.empty and not df_slice.empty:
         oos_start = str(df_slice.index[0])[:10]
         trimmed = [pt for pt in curve if pt["date"] >= oos_start]
         if len(trimmed) >= 2:
             curve = trimmed
+
+        # Trades that fall on/after OOS start. A leading SELL is a carry-over
+        # close of an IS-opened position — dropped from OOS round-trip pairing
+        # so we count only round-trips entirely within the held-out window.
+        oos_events = [t for t in r.trades if t.date >= oos_start]
+        while oos_events and "SELL" in oos_events[0].side:
+            oos_events.pop(0)
+        trades_count = len(oos_events)
+        buys = [t for t in oos_events if t.side == "BUY"]
+        sells = [t for t in oos_events if "SELL" in t.side]
+        rt = min(len(buys), len(sells))
+        wins = sum(1 for b, s in zip(buys[:rt], sells[:rt]) if s.value > b.value)
+        win_rate = round(wins / rt * 100, 2) if rt > 0 else 0.0
+
+        # Max drawdown with the peak reset at OOS start.
+        if curve:
+            peak = curve[0]["equity"]
+            mdd = 0.0
+            for pt in curve:
+                if pt["equity"] > peak:
+                    peak = pt["equity"]
+                if peak > 0:
+                    dd = (peak - pt["equity"]) / peak * 100
+                    if dd > mdd:
+                        mdd = dd
+            max_dd = round(mdd, 2)
+
+        # Sharpe from the trimmed curve's daily returns (rf = 0, annualised).
+        if len(curve) >= 2:
+            import statistics
+            rets = []
+            for i in range(1, len(curve)):
+                prev = curve[i - 1]["equity"]
+                cur_eq = curve[i]["equity"]
+                if prev > 0:
+                    rets.append((cur_eq - prev) / prev)
+            if len(rets) >= 2:
+                avg = statistics.mean(rets)
+                sd = statistics.stdev(rets)
+                sharpe = round(avg / sd * (252 ** 0.5), 2) if sd > 0 else None
+            else:
+                sharpe = None
 
     return V2Segment(
         start=curve[0]["date"] if curve else r.start_date,
@@ -131,10 +182,10 @@ def _run_slice(
         bars=len(df_slice),
         total_return_pct=calc_total_return(curve),
         cagr=calc_cagr(curve),
-        win_rate_pct=r.win_rate_pct,
-        max_drawdown_pct=r.max_drawdown_pct,
-        trades=r.total_trades,
-        sharpe=r.sharpe_ratio,
+        win_rate_pct=win_rate,
+        max_drawdown_pct=max_dd,
+        trades=trades_count,
+        sharpe=sharpe,
         equity_curve=curve,
     )
 

@@ -1330,7 +1330,7 @@ elif mode == "Walk-Forward OOS":
     if wf_mode == "Simple split":
         sc1, sc2, sc3 = st.columns([2, 2, 2])
         with sc1:
-            wf_period = st.selectbox("Period", ["2y", "5y", "10y"], index=1, key="wf_period_s")
+            wf_period = st.selectbox("Period", ["2y", "5y", "10y"], index=2, key="wf_period_s")
         with sc2:
             wf_train_pct = st.slider("In-sample %", 50, 85, 70, 5, key="wf_train_pct") / 100.0
         with sc3:
