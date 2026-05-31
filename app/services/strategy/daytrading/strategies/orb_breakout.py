@@ -35,6 +35,9 @@ from app.services.strategy.daytrading.market_open import (
     localize_for_symbol, market_session,
 )
 from app.services.strategy.daytrading.models import DayTradeSignal
+from app.services.strategy.daytrading.risk_templates import (
+    get_symbol_bucket, orb_exit_plan,
+)
 
 # No new ORB entries after 2 hours past the open — late breakouts have poor
 # follow-through. Expressed as a per-market clock time (open + 2h) so it lines
@@ -48,17 +51,31 @@ class ORBBreakout:
     name = "ORBBreakout"
     timeframe = "5m"
     default_config: dict[str, Any] = {
-        "orb_minutes": 15,          # opening range window
+        "orb_minutes": 15,          # opening range window (overridden to 20 for NSE)
         "entry_buffer_pct": 0.10,   # must close this % above ORB high (eliminates fakeouts)
-        "vol_multiple": 1.8,        # volume must exceed this × 20-bar avg (raised from 1.5)
-        "tp_multiplier": 2.0,       # target = entry + orb_height × this (raised for better R:R)
-        "atr_stop_mult": 1.0,       # stop = entry - atr × this (tighter than full ORB range)
+        "vol_multiple": 1.8,        # volume must exceed this × 20-bar avg
+        "tp_multiplier": 2.0,       # legacy single-target multiplier (superseded by ExitPlan)
+        # Stop: US_ETF/LARGE_CAP = 0.75×ATR, US_MID_SMALL = 1.2×ATR, NSE = 1.0×ATR
+        # These are now looked up from risk_templates; atr_stop_mult is kept as fallback.
+        "atr_stop_mult": 1.0,
         "rsi_period": 14,
-        "rsi_min": 52,              # slightly above 50 — confirmed momentum
-        "max_orb_atr_ratio": 2.5,   # skip if ORB height > 2.5×ATR (range too wide to trade)
-        "min_rr": 2.0,              # minimum R:R required to take the trade
-        "max_hold_bars": 48,        # 4 hours max (was 60)
+        "rsi_min": 52,
+        "max_orb_atr_ratio": 2.5,
+        "min_rr": 2.0,
+        "max_hold_bars": 36,        # 3 hours (reduced from 48)
     }
+
+    # Stop multiplier per bucket (used in _compute_stop below)
+    _STOP_ATR: dict[str, float] = {
+        "US_ETF":        0.75,
+        "US_LARGE_CAP":  0.75,
+        "US_MID_SMALL":  1.20,
+        "NSE_LARGE_CAP": 1.00,
+        "NSE_MID_CAP":   1.00,
+    }
+
+    # NSE uses a wider ORB window to let the opening auction settle
+    _NSE_ORB_MINUTES = 20
 
     def generate_signals(
         self,
@@ -73,6 +90,13 @@ class ORBBreakout:
 
         if regime == "BEAR_OPEN":
             return signals
+
+        bucket = get_symbol_bucket(symbol, market="NSE" if "." in symbol else "US")
+        is_nse = "NSE" in bucket
+
+        # NSE uses 20-min ORB (4×5m bars) to let opening auction overhang settle
+        if is_nse:
+            cfg["orb_minutes"] = self._NSE_ORB_MINUTES
 
         today_bars = _today_bars(df_5m, symbol)
         # Need at least one full ATR/RSI window (14) of bars — the `ta` library
@@ -150,11 +174,14 @@ class ORBBreakout:
                 if prev_low < prev2_low:
                     continue  # lower low before breakout — likely a fakeout
 
-            # ATR-based stop (tighter than full ORB range)
+            # ── Stop: bucket-aware ATR multiplier, floor at ORB low ──────────
             entry = close
-            stop = entry - cfg["atr_stop_mult"] * atr_val
-            # Never let stop go above ORB low — use whichever is tighter
-            stop = max(stop, orb_low)
+            stop_atr_mult = self._STOP_ATR.get(bucket, cfg["atr_stop_mult"])
+            stop = entry - stop_atr_mult * atr_val
+            stop = max(stop, orb_low)   # never let stop drop below ORB low
+
+            # ── Target: keep legacy single-target for R:R gate; ExitPlan ──────
+            # holds the multi-tranche plan consumed by PositionManager.
             target = entry + orb_height * cfg["tp_multiplier"]
 
             risk = entry - stop
@@ -164,7 +191,16 @@ class ORBBreakout:
             if rr < cfg["min_rr"]:
                 continue
 
-            confidence = _score(rsi_val, volume / avg_vol, regime, rr)
+            vol_ratio = volume / avg_vol
+            confidence = _score(rsi_val, vol_ratio, regime, rr)
+
+            # Build structured exit plan (scale-outs, trail, time gates)
+            exit_plan = orb_exit_plan(
+                bucket=bucket,
+                entry=entry,
+                stop=stop,
+                orb_range=orb_height,
+            )
 
             signals.append(
                 DayTradeSignal(
@@ -178,8 +214,8 @@ class ORBBreakout:
                     confidence=round(confidence, 2),
                     reason=(
                         f"ORB breakout: close {close:.2f} > threshold {breakout_threshold:.2f}. "
-                        f"ORB range {orb_height:.2f}. Vol {volume/avg_vol:.1f}× avg. "
-                        f"RSI {rsi_val:.1f}. R:R {rr:.1f}."
+                        f"ORB range {orb_height:.2f}. Vol {vol_ratio:.1f}× avg. "
+                        f"RSI {rsi_val:.1f}. R:R {rr:.1f}. [{bucket}]"
                     ),
                     regime=regime,
                     indicators={
@@ -189,10 +225,14 @@ class ORBBreakout:
                         "atr": round(atr_val, 4),
                         "orb_atr_ratio": round(orb_height / atr_val, 2),
                         "rsi": round(rsi_val, 2),
-                        "vol_ratio": round(volume / avg_vol, 2),
+                        "vol_ratio": round(vol_ratio, 2),
                         "r_r": round(rr, 2),
+                        "bucket": bucket,
+                        "stop_atr_mult": stop_atr_mult,
+                        "exit_plan": exit_plan.to_dict(),
                     },
                     signal_time=bar.name.isoformat(),
+                    exit_plan=exit_plan,
                 )
             )
             open_signal_seen = True

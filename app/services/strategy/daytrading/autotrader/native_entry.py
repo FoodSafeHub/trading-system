@@ -46,10 +46,22 @@ _NO_ENTRY_AFTER = time(15, 15)  # universal hard cutoff — matches EntryDecider
 # signals via their generate_signals() output. Order matters only for the
 # `native_candidates_considered` diagnostic list.
 SUPPORTED_NATIVE_STRATEGIES: tuple[str, ...] = (
-    "BollingerMomentum",
-    "SupertrendTrend",
-    "EMAMomentum",
     "ORBBreakout",
+    "VWAPMeanReversion",
+    "EMAMomentum",
+    "OpeningGapFade",
+    "SupertrendTrend",
+    "NRSqueezeBreakout",
+)
+
+# Kept for backtest-comparison imports; NOT loaded into live STRATEGY_MAP.
+RETIRED_NATIVE_STRATEGIES: tuple[str, ...] = (
+    "BollingerMomentum",
+    "NarrowRangeBreakout",
+    "EngulfingVolumeSurge",
+    "ThreeBarPush",
+    "HammerShootingStar",
+    "VolumeSpikeReversal",
 )
 
 
@@ -318,6 +330,7 @@ class NativeStrategyEntry:
             target_price=round(winner.target_price, 4),
             size_multiplier=round(size_mult, 2),
             checks=checks,
+            exit_plan=winner.exit_plan,   # thread ExitPlan from signal → decision
         )
 
 

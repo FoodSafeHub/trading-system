@@ -32,8 +32,9 @@ from app.services.strategy.daytrading.market_open import ET, compute_vwap, now_e
 
 logger = logging.getLogger(__name__)
 
-_EOD_FORCE_FLAT  = time(15, 45)
+_EOD_FORCE_FLAT  = time(15, 45)   # US hard EOD (overridable by ExitPlan)
 _EOD_WARN_TIME   = time(15, 30)
+_EOD_FORCE_FLAT_IST = time(14, 45)   # NSE hard EOD
 _MAX_HOLD_BARS   = 48
 _PARABOLIC_MULT  = 2.5
 
@@ -206,6 +207,7 @@ class ExitManager:
         first_target = tsm.first_target
         initial_stop = tsm.initial_stop
         strategy     = tsm.strategy or "EMAMomentum"
+        exit_plan    = tsm.exit_plan   # may be None for legacy signals
 
         risk_unit = (
             (entry - initial_stop) if side == "LONG"
@@ -239,10 +241,18 @@ class ExitManager:
 
         # ── 2. EOD force-flatten ──────────────────────────────────────────────
         now_time = now_et().time()
-        if now_time >= _EOD_FORCE_FLAT:
+        # Use ExitPlan's hard exit time if available; fall back to global default.
+        # TODO: detect IST vs ET based on symbol market — currently always ET.
+        eod_et_str = (exit_plan.hard_exit_time_et if exit_plan else None) or "15:45"
+        try:
+            eod_h, eod_m = int(eod_et_str.split(":")[0]), int(eod_et_str.split(":")[1])
+            eod_time = time(eod_h, eod_m)
+        except Exception:
+            eod_time = _EOD_FORCE_FLAT
+        if now_time >= eod_time:
             return ExitDecision(
                 action="FULL_EXIT",
-                reason=f"EOD force flatten at {now_time.strftime('%H:%M')} ET",
+                reason=f"EOD force flatten at {now_time.strftime('%H:%M')} ET (plan: {eod_et_str})",
                 exit_price=close,
                 urgency="high",
             )
@@ -273,7 +283,8 @@ class ExitManager:
                 pass
 
         # ── 4. Time-based stop-out ────────────────────────────────────────────
-        if self._hold_bars >= self.max_hold_bars:
+        effective_max = exit_plan.max_hold_bars if exit_plan else self.max_hold_bars
+        if self._hold_bars >= effective_max:
             return ExitDecision(
                 action="FULL_EXIT",
                 reason=f"Trade expired after {self._hold_bars} bars (no follow-through)",
@@ -281,7 +292,50 @@ class ExitManager:
                 urgency="medium",
             )
 
-        # ── 5. Profit target ──────────────────────────────────────────────────
+        # ── 4b. ExitPlan: break-even stop move ───────────────────────────────
+        if exit_plan and risk_unit > 0:
+            be_r = exit_plan.breakeven_r
+            if r_multiple >= be_r:
+                be_stop = entry
+                if side == "LONG" and current_stop < be_stop:
+                    return ExitDecision(
+                        action="MOVE_STOP",
+                        reason=f"ExitPlan break-even at +{r_multiple:.2f}R (trigger={be_r}R)",
+                        new_stop=round(be_stop, 4),
+                        urgency="low",
+                    )
+                if side == "SHORT" and current_stop > be_stop:
+                    return ExitDecision(
+                        action="MOVE_STOP",
+                        reason=f"ExitPlan break-even at +{r_multiple:.2f}R (trigger={be_r}R)",
+                        new_stop=round(be_stop, 4),
+                        urgency="low",
+                    )
+
+        # ── 4c. ExitPlan: scale-out tiers ────────────────────────────────────
+        if exit_plan and risk_unit > 0:
+            next_scale = tsm.next_scale_level
+            if next_scale is not None and r_multiple >= next_scale.trigger_r:
+                exit_qty = round(tsm.qty * next_scale.pct_to_close, 0)
+                if exit_qty >= 1:
+                    exit_px = (
+                        next_scale.trigger_price
+                        if next_scale.trigger_price > 0
+                        else close
+                    )
+                    tsm.advance_scale_level()
+                    return ExitDecision(
+                        action="PARTIAL_EXIT",
+                        reason=(
+                            f"ExitPlan scale-out tier {tsm._scale_level_idx}: "
+                            f"{next_scale.pct_to_close:.0%} at +{r_multiple:.2f}R "
+                            f"(trigger={next_scale.trigger_r}R)"
+                        ),
+                        exit_price=round(exit_px, 4),
+                        urgency="medium",
+                    )
+
+        # ── 5. Profit target (legacy / no ExitPlan) ───────────────────────────
         if side == "LONG" and close >= first_target:
             return ExitDecision(
                 action="FULL_EXIT",
@@ -313,6 +367,17 @@ class ExitManager:
                         new_stop=tight_stop,
                         urgency="medium",
                     )
+
+        # ── 5b. ExitPlan Supertrend trail: exit on ST direction flip ─────────
+        if (
+            exit_plan
+            and exit_plan.trail_type == "supertrend_5m"
+            and r_multiple >= exit_plan.trail_trigger_r
+            and tsm.state.value in ("TRAILING", "PARTIAL_EXIT_TAKEN")
+        ):
+            st_exit = self._check_supertrend_flip(tsm, df_5m)
+            if st_exit is not None:
+                return st_exit
 
         # ── 6. Trailing stop ──────────────────────────────────────────────────
         if tsm.state.value in ("TRAILING",):
@@ -577,6 +642,78 @@ class ExitManager:
                 fade_signals=fired,
             )
 
+        return None
+
+
+    # ── Supertrend flip exit ──────────────────────────────────────────────────
+
+    def _check_supertrend_flip(
+        self,
+        tsm: TradeStateMachine,
+        df_5m: pd.DataFrame,
+    ) -> ExitDecision | None:
+        """Exit the runner if the 5m Supertrend has flipped against us."""
+        if df_5m is None or len(df_5m) < 15:
+            return None
+        try:
+            import numpy as np
+            high  = df_5m["High"].values.astype(float)
+            low   = df_5m["Low"].values.astype(float)
+            close = df_5m["Close"].values.astype(float)
+            n = len(close)
+            length, multiplier = 10, 3.0
+
+            tr = np.maximum(high - low,
+                 np.maximum(np.abs(high - np.roll(close, 1)),
+                            np.abs(low  - np.roll(close, 1))))
+            tr[0] = high[0] - low[0]
+            atr = np.zeros(n)
+            atr[length - 1] = tr[:length].mean()
+            for j in range(length, n):
+                atr[j] = (atr[j - 1] * (length - 1) + tr[j]) / length
+
+            hl2   = (high + low) / 2
+            upper = hl2 + multiplier * atr
+            lower = hl2 - multiplier * atr
+            direction = np.ones(n, dtype=int)
+            st = np.zeros(n)
+
+            for j in range(1, n):
+                upper[j] = upper[j] if (upper[j] < upper[j-1] or close[j-1] > upper[j-1]) else upper[j-1]
+                lower[j] = lower[j] if (lower[j] > lower[j-1] or close[j-1] < lower[j-1]) else lower[j-1]
+                if st[j-1] == upper[j-1]:
+                    if close[j] <= upper[j]:
+                        st[j], direction[j] = upper[j], -1
+                    else:
+                        st[j], direction[j] = lower[j], 1
+                else:
+                    if close[j] >= lower[j]:
+                        st[j], direction[j] = lower[j], 1
+                    else:
+                        st[j], direction[j] = upper[j], -1
+
+            curr_dir = int(direction[-1])
+            prev_dir = int(direction[-2]) if n >= 2 else curr_dir
+            flipped = curr_dir != prev_dir
+
+            if flipped:
+                side = tsm.side
+                if side == "LONG" and curr_dir == -1:
+                    return ExitDecision(
+                        action="FULL_EXIT",
+                        reason=f"SupertrendTrend runner exit: 5m ST flipped bearish (dir={curr_dir})",
+                        exit_price=float(close[-1]),
+                        urgency="medium",
+                    )
+                if side == "SHORT" and curr_dir == 1:
+                    return ExitDecision(
+                        action="FULL_EXIT",
+                        reason=f"SupertrendTrend runner exit: 5m ST flipped bullish (dir={curr_dir})",
+                        exit_price=float(close[-1]),
+                        urgency="medium",
+                    )
+        except Exception:
+            pass
         return None
 
 

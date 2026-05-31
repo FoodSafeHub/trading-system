@@ -560,6 +560,7 @@ class SingleStockTrader:
             target=decision.target_price,
             strategy=decision.chosen_strategy,
             entry_reason=decision.entry_reason,
+            exit_plan=getattr(decision, "exit_plan", None),
         )
         self.position_manager.reset()
         self.exit_manager.reset()
@@ -580,10 +581,14 @@ class SingleStockTrader:
         df_1m = self._df_1m
         ms_str = self._last_market_state_str
 
+        # Guard: track how many partial exits fire this bar across both managers.
+        # If both PositionManager and ExitManager return PARTIAL_EXIT in the same
+        # bar, skip the ExitManager one (same-bar double scale-out is always wrong).
+        _partial_exits_this_bar = 0
+
         # ── Position manager: stop moves / partial exits ───────────────────────
         pm_update = self.position_manager.evaluate(self.tsm, df_5m, df_1m, ms_str)
         if pm_update.action == "MOVE_STOP" and pm_update.new_stop:
-            old = self.tsm.current_stop
             self.tsm.current_stop = pm_update.new_stop
             self.tsm.trailing_stop = pm_update.new_stop
             if self.tsm.state not in (State.TRAILING, State.PARTIAL_EXIT_TAKEN):
@@ -592,7 +597,6 @@ class SingleStockTrader:
             self._notify_update()
 
         elif pm_update.action == "PARTIAL_EXIT" and pm_update.exit_qty > 0:
-            close = self._last_price()
             exit_filled = self._place_exit_order(
                 "SELL" if self.tsm.side == "LONG" else "BUY_COVER",
                 pm_update.exit_qty,
@@ -603,6 +607,7 @@ class SingleStockTrader:
                     self.tsm.transition(State.PARTIAL_EXIT_TAKEN, pm_update.reason)
                 self._log("PARTIAL_EXIT", pm_update.reason, "info")
                 self._notify_update()
+                _partial_exits_this_bar += 1
 
         elif pm_update.action == "ACTIVATE_TRAIL" and pm_update.new_stop:
             self.tsm.current_stop = pm_update.new_stop
@@ -618,6 +623,17 @@ class SingleStockTrader:
             price = ex_decision.exit_price or self._last_price()
             self._execute_full_exit(price, ex_decision.reason)
 
+        elif ex_decision.action == "PARTIAL_EXIT":
+            if _partial_exits_this_bar > 0:
+                logger.warning(
+                    "[%s] double PARTIAL_EXIT in one bar — skipping ExitManager tier "
+                    "(PositionManager already scaled out this bar)",
+                    self.symbol,
+                )
+            else:
+                self._execute_partial_exit_from_exit_manager(ex_decision)
+                _partial_exits_this_bar += 1
+
         elif ex_decision.action == "MOVE_STOP" and ex_decision.new_stop:
             self.tsm.current_stop = ex_decision.new_stop
             self.tsm.trailing_stop = ex_decision.new_stop
@@ -625,6 +641,80 @@ class SingleStockTrader:
             self._notify_update()
 
     # ── Execution helpers ─────────────────────────────────────────────────────
+
+    def _execute_partial_exit_from_exit_manager(self, ex_decision: Any) -> None:
+        """Scale out the position for one ExitPlan tier returned by ExitManager.
+
+        ExitManager.evaluate() calls tsm.advance_scale_level() before returning
+        PARTIAL_EXIT, so _scale_level_idx already points to the NEXT unpassed
+        tier.  The tier we just consumed is therefore at index _scale_level_idx - 1.
+
+        Option B (no exit_qty on ExitDecision): derive pct_to_close from
+        exit_plan.scale_levels[consumed_idx] so ExitDecision stays clean.
+        """
+        if not self.tsm.has_position:
+            return
+
+        ep = self.tsm.exit_plan
+        consumed_idx = self.tsm._scale_level_idx - 1   # advance_scale_level already called
+
+        if ep is None or consumed_idx < 0 or consumed_idx >= len(ep.scale_levels):
+            # Fallback: no plan — treat as FULL_EXIT so position doesn't stall
+            logger.warning(
+                "[%s] PARTIAL_EXIT from ExitManager but no valid ExitPlan scale level "
+                "(ep=%s, consumed_idx=%d) — falling back to FULL_EXIT",
+                self.symbol, ep, consumed_idx,
+            )
+            price = getattr(ex_decision, "exit_price", None) or self._last_price()
+            self._execute_full_exit(price, ex_decision.reason + " [no plan — forced full]")
+            return
+
+        pct = ep.scale_levels[consumed_idx].pct_to_close
+        exit_qty = max(1.0, round(self.tsm.qty * pct, 0))
+        # Safety cap: never exit more than we hold
+        exit_qty = min(exit_qty, self.tsm.qty)
+
+        action = "SELL" if self.tsm.side == "LONG" else "BUY_COVER"
+        fill_px = self._place_exit_order(action, exit_qty)
+
+        if fill_px <= 0:
+            # Order rejected — roll back the scale level so ExitManager retries next bar
+            self.tsm._scale_level_idx = max(0, self.tsm._scale_level_idx - 1)
+            self._log(
+                "PARTIAL_EXIT_FAILED",
+                f"Scale tier {consumed_idx + 1}: order rejected, rolled back idx. {ex_decision.reason}",
+                "warning",
+            )
+            return
+
+        self.tsm.qty -= exit_qty
+
+        if self.tsm.state not in (State.PARTIAL_EXIT_TAKEN, State.TRAILING):
+            self.tsm.transition(State.PARTIAL_EXIT_TAKEN, ex_decision.reason)
+
+        self._log(
+            "PARTIAL_EXIT",
+            (
+                f"Scale tier {consumed_idx + 1}/{len(ep.scale_levels)}: "
+                f"{pct:.0%} × {exit_qty:.0f} shares @ {fill_px:.4f} | "
+                f"{ex_decision.reason} | "
+                f"remaining qty={self.tsm.qty:.0f}"
+            ),
+            "info",
+        )
+        self._notify_update()
+
+        # If all scale levels consumed and no runner planned, close the remainder now
+        if (
+            self.tsm._scale_level_idx >= len(ep.scale_levels)
+            and ep.trail_type == "none"
+            and self.tsm.qty > 0
+        ):
+            price = getattr(ex_decision, "exit_price", None) or self._last_price()
+            self._execute_full_exit(
+                price,
+                f"All scale levels consumed, no runner (trail_type=none) — full close",
+            )
 
     def _execute_full_exit(self, price: float, reason: str) -> None:
         """Close entire position at market and record the trade."""
@@ -821,9 +911,12 @@ def _describe_management_profile(market_state: str, strategy: str) -> str:
     }.get(market_state, "Default")
 
     strategy_desc = {
-        "ORBBreakout":       "25% partial, trail @ +1.5R",
-        "VWAPMeanReversion": "50% partial, trail @ +1.0R",
-        "EMAMomentum":       "33% partial, trail @ +1.25R",
+        "ORBBreakout":       "Scale: 40%@ORB×1.2 → 30%@ORB×2.0 → EMA9 runner",
+        "VWAPMeanReversion": "Scale: 60%@VWAP → 30%@VWAP+overshoot → small runner",
+        "EMAMomentum":       "Scale: 40%@1.5R → 30%@2.5R → EMA trail",
+        "OpeningGapFade":    "Scale: 60%@60%fill → ATR trail on runner",
+        "SupertrendTrend":   "Scale: 30%@2R → ST-line trail to flip",
+        "NRSqueezeBreakout": "Scale: 35%@2R → 30%@3.5R → structure trail",
     }.get(strategy, "")
 
     if strategy_desc:

@@ -33,6 +33,9 @@ from app.services.strategy.daytrading.market_open import (
     compute_vwap, localize_for_symbol, market_session,
 )
 from app.services.strategy.daytrading.models import DayTradeSignal
+from app.services.strategy.daytrading.risk_templates import (
+    get_symbol_bucket, ema_exit_plan,
+)
 
 # Entry window as offsets from the session open (works on both US and NSE):
 # skip first 30 min; no new entries after open+4.5h.
@@ -52,11 +55,26 @@ class EMAMomentum:
         "rsi_period": 14,
         "rsi_low": 40,
         "rsi_high": 70,
-        "atr_stop_mult": 1.2,
-        "atr_tp_mult": 2.5,
+        # Stop is now anchored to the bounce bar's LOW, not to entry − N×ATR.
+        # stop = bar_low − stop_bar_atr_buffer × ATR
+        # This is ~0.3–0.5× ATR below the wick, not 1.2× ATR from entry.
+        "stop_bar_atr_buffer": 0.30,   # US default; NSE uses 0.50
+        "atr_stop_mult": 1.2,          # kept as fallback when bar low unavailable
+        "atr_tp_mult": 2.5,            # legacy single-target (superseded by ExitPlan)
         "min_rr": 1.8,
-        "max_hold_bars": 16,
-        "ema9_bounce_atr": 0.3,   # low must come within 0.3×ATR of EMA9
+        "max_hold_bars": 12,           # 12×15m = 3h (reduced from 16)
+        "ema9_bounce_atr": 0.3,
+        # Setup A (crossover) is restricted to BULL_OPEN / BEAR_OPEN only.
+        # Setup B (bounce) is allowed in CHOPPY at 0.5× size.
+        "setup_a_choppy_allowed": False,
+    }
+
+    _STOP_BAR_ATR_BUFFER: dict[str, float] = {
+        "US_ETF":        0.30,
+        "US_LARGE_CAP":  0.30,
+        "US_MID_SMALL":  0.30,
+        "NSE_LARGE_CAP": 0.50,   # 5m bars on NSE need wider wick buffer
+        "NSE_MID_CAP":   0.50,
     }
 
     def generate_signals(
@@ -69,6 +87,10 @@ class EMAMomentum:
     ) -> list[DayTradeSignal]:
         cfg = {**self.default_config, **(config or {})}
         signals: list[DayTradeSignal] = []
+
+        bucket = get_symbol_bucket(symbol, market="NSE" if "." in symbol else "US")
+        is_nse = "NSE" in bucket
+        stop_buf = self._STOP_BAR_ATR_BUFFER.get(bucket, cfg["stop_bar_atr_buffer"])
 
         # Compute indicators on the full multi-day 15m history so EMAs are
         # warmed up even during the first hour of today's session.
@@ -172,9 +194,22 @@ class EMAMomentum:
                 and close > vwap
             )
 
-            if regime in ("BULL_OPEN", "CHOPPY") and (setup_a or setup_b):
+            # Setup A gating: crossover only in BULL/BEAR_OPEN, not CHOPPY
+            setup_a_allowed = setup_a and regime in ("BULL_OPEN",)
+            # Setup B allowed in CHOPPY but at reduced size (flagged in exit_plan)
+            choppy_mode = regime == "CHOPPY" and setup_b
+
+            if regime in ("BULL_OPEN", "CHOPPY") and (setup_a_allowed or setup_b):
                 entry = close
-                stop = ema_f - cfg["atr_stop_mult"] * atr_val
+                # ── New stop: bar_low − buffer×ATR (not EMA − 1.2×ATR) ────
+                # If the bounce bar's low is available, anchor stop there.
+                bar_low = float(bar["Low"])
+                stop = bar_low - stop_buf * atr_val
+                # Safety: stop must be below entry
+                if stop >= entry:
+                    stop = entry - cfg["atr_stop_mult"] * atr_val
+
+                # Legacy single target for R:R gate; ExitPlan drives actual exits
                 target = entry + cfg["atr_tp_mult"] * atr_val
                 risk = entry - stop
                 if risk <= 0:
@@ -183,25 +218,44 @@ class EMAMomentum:
                 if rr < cfg["min_rr"]:
                     continue
 
-                reason_tag = "Fresh EMA9/21 crossover" if setup_a else "EMA9 bounce — trend continuation"
-                confidence = _score(rsi_val, ema_f - ema_s, hist_val, regime, rr, setup_a)
+                reason_tag = "Fresh EMA9/21 crossover" if setup_a_allowed else "EMA9 bounce — trend continuation"
+                confidence = _score(rsi_val, ema_f - ema_s, hist_val, regime, rr, setup_a_allowed)
+                if choppy_mode:
+                    confidence *= 0.85   # discount choppy signals
+
+                exit_plan = ema_exit_plan(
+                    bucket=bucket, entry=entry, stop=stop,
+                    atr=atr_val, direction="BUY",
+                )
+                # Signal choppy size to position manager via exit_plan metadata
+                if choppy_mode:
+                    exit_plan.strategy = "EMAMomentum_CHOPPY"
 
                 signals.append(DayTradeSignal(
                     symbol=symbol, strategy=self.name,
                     direction="BUY", timeframe=self.timeframe,
                     entry_price=round(entry, 4), stop_price=round(stop, 4),
                     target_price=round(target, 4), confidence=round(confidence, 2),
-                    reason=f"{reason_tag}. MACD hist {hist_val:.4f}. RSI {rsi_val:.1f}. Above VWAP. R:R {rr:.1f}.",
+                    reason=(
+                        f"{reason_tag}. MACD hist {hist_val:.4f}. RSI {rsi_val:.1f}. "
+                        f"Above VWAP. R:R {rr:.1f}. Stop=bar_low-{stop_buf}×ATR. [{bucket}]"
+                    ),
                     regime=regime,
                     indicators={
                         "ema_fast": round(ema_f, 4), "ema_slow": round(ema_s, 4),
                         "ema_spread": round(ema_f - ema_s, 4),
                         "rsi": round(rsi_val, 2), "macd_hist": round(hist_val, 5),
                         "vwap": round(vwap, 4), "atr": round(atr_val, 4),
+                        "bar_low": round(bar_low, 4),
+                        "stop_anchor": "bar_low_atr",
                         "r_r": round(rr, 2),
-                        "setup": "crossover" if setup_a else "ema9_bounce",
+                        "setup": "crossover" if setup_a_allowed else "ema9_bounce",
+                        "bucket": bucket,
+                        "choppy": choppy_mode,
+                        "exit_plan": exit_plan.to_dict(),
                     },
                     signal_time=bar.name.isoformat(),
+                    exit_plan=exit_plan,
                 ))
                 open_signal_seen = True
 
@@ -223,7 +277,11 @@ class EMAMomentum:
 
                 if setup_short_a or setup_short_b:
                     entry = close
-                    stop = ema_f + cfg["atr_stop_mult"] * atr_val
+                    # ── New stop: bar_high + buffer×ATR for shorts ────────
+                    bar_high = float(bar["High"])
+                    stop = bar_high + stop_buf * atr_val
+                    if stop <= entry:
+                        stop = entry + cfg["atr_stop_mult"] * atr_val
                     target = entry - cfg["atr_tp_mult"] * atr_val
                     risk = stop - entry
                     if risk <= 0:
@@ -235,19 +293,32 @@ class EMAMomentum:
                     reason_tag = "Fresh EMA9/21 bearish crossover" if setup_short_a else "EMA9 resistance bounce"
                     confidence = _score(rsi_val, ema_s - ema_f, abs(hist_val), regime, rr, setup_short_a)
 
+                    exit_plan = ema_exit_plan(
+                        bucket=bucket, entry=entry, stop=stop,
+                        atr=atr_val, direction="SELL",
+                    )
                     signals.append(DayTradeSignal(
                         symbol=symbol, strategy=self.name,
                         direction="SELL", timeframe=self.timeframe,
                         entry_price=round(entry, 4), stop_price=round(stop, 4),
                         target_price=round(target, 4), confidence=round(confidence, 2),
-                        reason=f"{reason_tag}. MACD hist {hist_val:.4f}. RSI {rsi_val:.1f}. Below VWAP. R:R {rr:.1f}.",
+                        reason=(
+                            f"{reason_tag}. MACD hist {hist_val:.4f}. RSI {rsi_val:.1f}. "
+                            f"Below VWAP. R:R {rr:.1f}. Stop=bar_high+{stop_buf}×ATR. [{bucket}]"
+                        ),
                         regime=regime,
                         indicators={
                             "ema_fast": round(ema_f, 4), "ema_slow": round(ema_s, 4),
                             "rsi": round(rsi_val, 2), "macd_hist": round(hist_val, 5),
-                            "vwap": round(vwap, 4), "atr": round(atr_val, 4), "r_r": round(rr, 2),
+                            "vwap": round(vwap, 4), "atr": round(atr_val, 4),
+                            "bar_high": round(bar_high, 4),
+                            "stop_anchor": "bar_high_atr",
+                            "r_r": round(rr, 2),
+                            "bucket": bucket,
+                            "exit_plan": exit_plan.to_dict(),
                         },
                         signal_time=bar.name.isoformat(),
+                        exit_plan=exit_plan,
                     ))
                     open_signal_seen = True
 

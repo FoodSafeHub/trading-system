@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.services.strategy.daytrading.risk_templates import ExitPlan
 
 
 @dataclass
@@ -20,6 +24,9 @@ class DayTradeSignal:
     risk_reward: float = 0.0
     time_in_force: str = "DAY"
     signal_time: str = ""
+    # Structured exit plan consumed by PositionManager / ExitManager.
+    # None means legacy behaviour (single target, no scale-outs).
+    exit_plan: "ExitPlan | None" = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.entry_price != self.stop_price:

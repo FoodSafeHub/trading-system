@@ -150,10 +150,15 @@ class PositionManager:
 
         r_multiple = current_gain / risk_unit
 
-        # Determine effective trail mode and partial pct for this bar
-        trail_mode = self._effective_trail_mode(market_state_str)
+        # Prefer ExitPlan values when present; fall back to per-strategy tables
+        exit_plan = tsm.exit_plan
+        trail_mode = self._effective_trail_mode(market_state_str, exit_plan)
         partial_pct = self._effective_partial_pct(strategy, market_state_str)
-        trail_threshold = _STRATEGY_TRAIL_THRESHOLD.get(strategy, 1.25)
+        trail_threshold = (
+            exit_plan.trail_trigger_r
+            if exit_plan and exit_plan.trail_trigger_r > 0
+            else _STRATEGY_TRAIL_THRESHOLD.get(strategy, 1.25)
+        )
 
         # ── Breakeven stop: trigger at +1R ────────────────────────────────────
         be_stop = entry
@@ -231,9 +236,22 @@ class PositionManager:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _effective_trail_mode(self, market_state_str: str) -> TrailMode:
+    def _effective_trail_mode(self, market_state_str: str, exit_plan=None) -> TrailMode:
         if self._trail_mode_override:
             return self._trail_mode_override
+        # ExitPlan trail type takes precedence over regime default
+        if exit_plan and exit_plan.trail_type and exit_plan.trail_type != "none":
+            # Map ExitPlan trail_type → PositionManager TrailMode
+            _PLAN_TO_MODE: dict[str, TrailMode] = {
+                "ema9_5m":          "ema",
+                "ema9_15m":         "ema",
+                "supertrend_5m":    "atr",   # ST trail handled by ExitManager; use ATR here
+                "prior_bar_low_5m": "candle",
+                "atr_fixed":        "atr",
+            }
+            mapped = _PLAN_TO_MODE.get(exit_plan.trail_type)
+            if mapped:
+                return mapped
         return _REGIME_TRAIL_MODE.get(market_state_str, "atr")
 
     def _effective_partial_pct(self, strategy: str, market_state_str: str) -> float:

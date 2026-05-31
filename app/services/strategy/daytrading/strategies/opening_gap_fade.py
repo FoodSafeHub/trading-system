@@ -37,6 +37,9 @@ from app.services.strategy.daytrading.market_open import (
     localize_for_symbol, market_session,
 )
 from app.services.strategy.daytrading.models import DayTradeSignal
+from app.services.strategy.daytrading.risk_templates import (
+    get_symbol_bucket, gap_fade_exit_plan,
+)
 
 # Session-relative gap-fade window so it tracks the right market.
 # Fade only in the first hour; require 5m confirmation after the first 15 min.
@@ -69,6 +72,9 @@ class OpeningGapFade:
     ) -> list[DayTradeSignal]:
         cfg = {**self.default_config, **(config or {})}
         signals: list[DayTradeSignal] = []
+
+        bucket = get_symbol_bucket(symbol, market="NSE" if "." in symbol else "US")
+        is_nse = "NSE" in bucket
 
         today_15m = _today_bars(df_15m, symbol)
         all_15m = _localize(df_15m, symbol)
@@ -135,17 +141,30 @@ class OpeningGapFade:
         # Look for 5m confirmation: a reversal bar in the 9:45–10:30 window
         confirm_bar = _find_5m_confirmation(today_5m, gap_pct, symbol)
 
+        # ── Compute ATR for dynamic stop sizing ───────────────────────────────
+        try:
+            import ta.volatility as _tav
+            _atr_series = _tav.AverageTrueRange(
+                today_15m["High"], today_15m["Low"], today_15m["Close"], window=14
+            ).average_true_range()
+            atr_15m = float(_atr_series.iloc[-1]) if not _atr_series.empty else 0.0
+        except Exception:
+            atr_15m = 0.0
+        # Convert ATR to % of price for dynamic stop (max of fixed % and 0.5×ATR%)
+        atr_15m_pct = (atr_15m / open_price * 100) if open_price > 0 and atr_15m > 0 else 0.0
+        stop_pct = max(cfg["stop_beyond_pct"], 0.50 * atr_15m_pct)
+
         # Gap UP fade → SELL SHORT
         if (
             gap_pct > 0
             and first_close < first_open      # bearish first 15m bar
             and rsi_val > cfg["rsi_overbought"]
-            and (confirm_bar is None or confirm_bar["is_bearish"])  # 5m confirms if available
+            and (confirm_bar is None or confirm_bar["is_bearish"])
         ):
             gap_high = open_price
             entry = first_close if confirm_bar is None else confirm_bar["close"]
             target = gap_high - (gap_high - prior_close) * cfg["target_fill_pct"]
-            stop = gap_high * (1 + cfg["stop_beyond_pct"] / 100)
+            stop = gap_high * (1 + stop_pct / 100)
 
             risk = stop - entry
             reward = entry - target
@@ -158,6 +177,10 @@ class OpeningGapFade:
             confidence = _score(rsi_val, abs_gap, vol_ratio, body_pct, "gap_up", rr)
             sig_time = today_15m.index[0] if confirm_bar is None else confirm_bar["time"]
 
+            exit_plan = gap_fade_exit_plan(
+                bucket=bucket, entry=entry, stop=stop,
+                gap_close=prior_close, gap_pct=gap_pct, direction="SELL",
+            )
             signals.append(
                 DayTradeSignal(
                     symbol=symbol,
@@ -171,7 +194,7 @@ class OpeningGapFade:
                     reason=(
                         f"Gap-up {gap_pct:.2f}% fade. RSI {rsi_val:.1f}. "
                         f"Bearish first bar (body {body_pct:.0%}). "
-                        f"Vol {vol_ratio:.1f}×. Target: {cfg['target_fill_pct']*100:.0f}% fill. R:R {rr:.1f}."
+                        f"Vol {vol_ratio:.1f}×. Stop {stop_pct:.2f}%. R:R {rr:.1f}. [{bucket}]"
                     ),
                     regime=regime,
                     indicators={
@@ -181,23 +204,28 @@ class OpeningGapFade:
                         "rsi": round(rsi_val, 2),
                         "vol_ratio": round(vol_ratio, 2),
                         "body_pct": round(body_pct, 3),
+                        "atr_15m": round(atr_15m, 4),
+                        "stop_pct": round(stop_pct, 3),
                         "r_r": round(rr, 2),
+                        "bucket": bucket,
+                        "exit_plan": exit_plan.to_dict(),
                     },
                     signal_time=sig_time.isoformat() if hasattr(sig_time, "isoformat") else str(sig_time),
+                    exit_plan=exit_plan,
                 )
             )
 
         # Gap DOWN fade → BUY
         elif (
             gap_pct < 0
-            and first_close > first_open      # bullish first 15m bar
+            and first_close > first_open
             and rsi_val < cfg["rsi_oversold"]
             and (confirm_bar is None or not confirm_bar["is_bearish"])
         ):
             gap_low = open_price
             entry = first_close if confirm_bar is None else confirm_bar["close"]
             target = gap_low + (prior_close - gap_low) * cfg["target_fill_pct"]
-            stop = gap_low * (1 - cfg["stop_beyond_pct"] / 100)
+            stop = gap_low * (1 - stop_pct / 100)
 
             risk = entry - stop
             reward = target - entry
@@ -210,6 +238,10 @@ class OpeningGapFade:
             confidence = _score(rsi_val, abs_gap, vol_ratio, body_pct, "gap_down", rr)
             sig_time = today_15m.index[0] if confirm_bar is None else confirm_bar["time"]
 
+            exit_plan = gap_fade_exit_plan(
+                bucket=bucket, entry=entry, stop=stop,
+                gap_close=prior_close, gap_pct=gap_pct, direction="BUY",
+            )
             signals.append(
                 DayTradeSignal(
                     symbol=symbol,
@@ -223,7 +255,7 @@ class OpeningGapFade:
                     reason=(
                         f"Gap-down {gap_pct:.2f}% fade. RSI {rsi_val:.1f}. "
                         f"Bullish first bar (body {body_pct:.0%}). "
-                        f"Vol {vol_ratio:.1f}×. Target: {cfg['target_fill_pct']*100:.0f}% fill. R:R {rr:.1f}."
+                        f"Vol {vol_ratio:.1f}×. Stop {stop_pct:.2f}%. R:R {rr:.1f}. [{bucket}]"
                     ),
                     regime=regime,
                     indicators={
@@ -233,9 +265,14 @@ class OpeningGapFade:
                         "rsi": round(rsi_val, 2),
                         "vol_ratio": round(vol_ratio, 2),
                         "body_pct": round(body_pct, 3),
+                        "atr_15m": round(atr_15m, 4),
+                        "stop_pct": round(stop_pct, 3),
                         "r_r": round(rr, 2),
+                        "bucket": bucket,
+                        "exit_plan": exit_plan.to_dict(),
                     },
                     signal_time=sig_time.isoformat() if hasattr(sig_time, "isoformat") else str(sig_time),
+                    exit_plan=exit_plan,
                 )
             )
 

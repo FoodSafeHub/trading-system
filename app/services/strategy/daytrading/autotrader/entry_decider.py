@@ -17,7 +17,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import time
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from app.services.strategy.daytrading.risk_templates import ExitPlan
 
 import pandas as pd
 
@@ -47,6 +50,9 @@ class EntryDecision:
 
     # Individual sub-scores (for debugging / UI)
     checks: dict[str, Any] = field(default_factory=dict)
+
+    # Structured exit plan from risk_templates (None for legacy/scoring-only paths)
+    exit_plan: "ExitPlan | None" = field(default=None, repr=False)
 
     @property
     def is_tradeable(self) -> bool:

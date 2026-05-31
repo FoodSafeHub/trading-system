@@ -17,10 +17,15 @@ surface immediately rather than silently corrupting position state.
 """
 from __future__ import annotations
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.services.strategy.daytrading.risk_templates import ExitPlan
 
 
 class State(str, Enum):
@@ -130,6 +135,10 @@ class TradeStateMachine:
     strategy: str = ""
     entry_reason: str = ""
     block_reason: str = ""
+    # Structured exit plan from risk_templates; None = legacy single-target behaviour
+    exit_plan: "ExitPlan | None" = None
+    # Index into exit_plan.scale_levels tracking which scale-out tier is next
+    _scale_level_idx: int = 0
 
     # Session history (all closed trades today)
     session_trades: list[TradeRecord] = field(default_factory=list)
@@ -198,6 +207,7 @@ class TradeStateMachine:
         target: float,
         strategy: str,
         entry_reason: str,
+        exit_plan: "ExitPlan | None" = None,
     ) -> None:
         """Transition FLAT/PENDING → LONG/SHORT and populate position fields."""
         new_state = State.LONG if side == "LONG" else State.SHORT
@@ -215,6 +225,8 @@ class TradeStateMachine:
         self.first_target = target
         self.strategy = strategy
         self.entry_reason = entry_reason
+        self.exit_plan = exit_plan
+        self._scale_level_idx = 0
         self.max_favorable_excursion = 0.0
         self.max_adverse_excursion = 0.0
 
@@ -282,6 +294,22 @@ class TradeStateMachine:
         self.trailing_stop = 0.0
         self.strategy = ""
         self.entry_reason = ""
+        self.exit_plan = None
+        self._scale_level_idx = 0
+
+    @property
+    def next_scale_level(self):
+        """Return the next unpassed ScaleLevel, or None if all taken."""
+        if self.exit_plan is None:
+            return None
+        levels = self.exit_plan.scale_levels
+        if self._scale_level_idx >= len(levels):
+            return None
+        return levels[self._scale_level_idx]
+
+    def advance_scale_level(self) -> None:
+        """Mark the current scale level as consumed."""
+        self._scale_level_idx += 1
 
     def block(self, reason: str) -> None:
         """Transition FLAT → BLOCKED; sets block reason."""
