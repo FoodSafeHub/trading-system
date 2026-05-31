@@ -761,7 +761,7 @@ if mode == "Single Strategy":
             index=3,  # Pullback EMA50 — the highest-frequency strategy
         )
     with col3:
-        period = st.selectbox("Historical Period", ["6mo", "1y", "2y", "5y"], index=1)
+        period = st.selectbox("Historical Period", ["6mo", "1y", "2y", "5y", "8y", "10y"], index=1)
     with col4:
         capital = st.number_input("Starting Capital ($)", value=100000, min_value=1000, step=10000)
     with col5:
@@ -908,7 +908,7 @@ elif mode == "Consensus Mode":
     with col1:
         chosen_sym = st.selectbox("Symbol", symbol_list)
     with col2:
-        period = st.selectbox("Historical Period", ["6mo", "1y", "2y"], index=1)
+        period = st.selectbox("Historical Period", ["6mo", "1y", "2y", "5y", "8y", "10y"], index=1)
     with col3:
         capital = st.number_input("Starting Capital ($)", value=100000, min_value=1000, step=10000)
 
@@ -1017,7 +1017,7 @@ elif mode == "Custom Symbol":
             key="custom_bt_sym",
         ).strip().upper()
     with c2:
-        period = st.selectbox("Historical Period", ["6mo", "1y", "2y", "5y"], index=1,
+        period = st.selectbox("Historical Period", ["6mo", "1y", "2y", "5y", "8y", "10y"], index=1,
                               key="custom_bt_period")
     with c3:
         capital = st.number_input("Starting Capital ($)", value=10000, min_value=1000,

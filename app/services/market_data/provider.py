@@ -11,6 +11,7 @@ TODO: Add a broker-native historical data endpoint when Schwab makes one availab
 """
 
 import logging
+import re
 import time
 from typing import Optional
 
@@ -18,6 +19,33 @@ import pandas as pd
 import yfinance as yf
 
 from app.services.markets import is_india_symbol, yf_symbol
+
+# yfinance-supported period strings. Anything else is translated by fetching
+# the next-larger supported window and slicing client-side.
+_YFINANCE_PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"}
+
+
+def _yf_history(ticker_symbol: str, period: str, interval: str) -> pd.DataFrame:
+    """yfinance fetch with translation for non-standard 'Ny' periods.
+
+    yfinance only accepts 1y/2y/5y/10y/max — passing e.g. '8y' yields no data.
+    We detect those, fetch the smallest supported window that contains the
+    request, then slice to the last N years. Standard periods pass straight
+    through so caching and downstream behaviour are unchanged for them.
+    """
+    t = yf.Ticker(ticker_symbol)
+    if period in _YFINANCE_PERIODS:
+        return t.history(period=period, interval=interval)
+    m = re.match(r"^(\d+)y$", period)
+    if not m:
+        return t.history(period=period, interval=interval)  # let yfinance error
+    years = int(m.group(1))
+    fallback = "10y" if years <= 10 else "max"
+    df = t.history(period=fallback, interval=interval)
+    if df.empty:
+        return df
+    cutoff = pd.Timestamp.now(tz=df.index.tz) - pd.Timedelta(days=int(years * 365.25))
+    return df[df.index >= cutoff]
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +93,8 @@ def _fetch_india(symbol: str, period: str, interval: str) -> pd.DataFrame:
     except Exception as exc:  # never let the data feed take down a scan
         logger.debug("[market_data] Upstox fetch failed for %s: %s", symbol, exc)
 
-    # 2) yfinance '.NS' fallback.
-    ticker = yf.Ticker(yf_symbol(symbol))
-    df = ticker.history(period=period, interval=interval)
+    # 2) yfinance '.NS' fallback (with non-standard-period translation).
+    df = _yf_history(yf_symbol(symbol), period, interval)
     if df.empty:
         raise ValueError(f"No India price data for {symbol!r} (Upstox + yfinance.NS both empty)")
     # yfinance often appends a placeholder row for the in-progress/just-closed
@@ -101,8 +128,7 @@ def get_price_series(
         if is_india_symbol(symbol):
             df = _fetch_india(symbol, period, interval)
         else:
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(period=period, interval=interval)
+            df = _yf_history(symbol, period, interval)
         if df.empty:
             raise ValueError(f"No price data returned for {symbol!r}")
         _cache_set(cache_key, df)
@@ -127,8 +153,7 @@ def get_ohlcv(
     if is_india_symbol(symbol):
         df = _fetch_india(symbol, period, interval)
     else:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period, interval=interval)
+        df = _yf_history(symbol, period, interval)
     if df.empty:
         raise ValueError(f"No OHLCV data for {symbol!r}")
     _cache_set(cache_key, df)
