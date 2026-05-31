@@ -322,7 +322,7 @@ async function main() {
     autoSize: true,
   });
 
-  const candleSeries = chart.addCandlestickSeries({
+  const candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {
     upColor: "#26a69a", downColor: "#ef5350",
     borderUpColor: "#26a69a", borderDownColor: "#ef5350",
     wickUpColor: "#26a69a", wickDownColor: "#ef5350",
@@ -331,7 +331,7 @@ async function main() {
   candleSeries.setData(CFG.candles || []);
 
   // Volume on its own scale at the bottom.
-  const volSeries = chart.addHistogramSeries({
+  const volSeries = chart.addSeries(LightweightCharts.HistogramSeries, {
     priceFormat: { type: "volume" },
     priceScaleId: "vol",
   });
@@ -357,10 +357,12 @@ async function main() {
                          crosshairMarkerVisible: false };
         let s;
         if (ser.type === "histogram") {
-          s = chart.addHistogramSeries({ ...common, color: ser.color, base: ser.base || 0 }, paneIndex);
+          s = chart.addSeries(LightweightCharts.HistogramSeries,
+                              { ...common, color: ser.color, base: ser.base || 0 }, paneIndex);
         } else {
-          s = chart.addLineSeries({ ...common, color: ser.color,
-                                    lineWidth: ser.width || 1, lineStyle: ser.lineStyle || 0 }, paneIndex);
+          s = chart.addSeries(LightweightCharts.LineSeries,
+                              { ...common, color: ser.color,
+                                lineWidth: ser.width || 1, lineStyle: ser.lineStyle || 0 }, paneIndex);
         }
         s.setData(ser.data || []);
       });
@@ -385,7 +387,7 @@ async function main() {
   const legendEl = document.getElementById("legend");
   legendEl.innerHTML = "";
   (CFG.overlays || []).forEach(o => {
-    const s = chart.addLineSeries({
+    const s = chart.addSeries(LightweightCharts.LineSeries, {
       color: o.color, lineWidth: o.width || 1, lineStyle: o.lineStyle || 0,
       priceLineVisible: false, lastValueVisible: false,
       crosshairMarkerVisible: false,
@@ -446,7 +448,9 @@ async function main() {
       __payload: m,
     };
   }).filter(m => m.time);
-  candleSeries.setMarkers(markers);
+  // v5: series.setMarkers was removed in favour of the createSeriesMarkers
+  // primitive. The marker objects' shape is unchanged.
+  LightweightCharts.createSeriesMarkers(candleSeries, markers);
 
   // Click-to-explain panel — cycles through multiple markers on the same bar.
   const panel = document.getElementById("explain");
