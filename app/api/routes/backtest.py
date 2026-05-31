@@ -217,12 +217,30 @@ def backtest_live_signals(symbol: str, period: str = "1y"):
             "signals": out}
 
 
+_TRAIL_KEYS = ("trail_enabled", "trail_trigger_pct", "atr_trail_mult", "atr_trail_period")
+
+
+def _strip_exit_layers(params: dict, *, disable_trail: bool, disable_exit_policy: bool) -> dict:
+    """Return a copy of params with Layer-2 (Chandelier trail) and/or Layer-3
+    (Phase-1 exit_policy) keys removed. Used by the dashboard's exit-layer
+    compare toggles so the same backtest can be re-run with layers off."""
+    out = dict(params)
+    if disable_trail:
+        for k in _TRAIL_KEYS:
+            out.pop(k, None)
+    if disable_exit_policy:
+        out.pop("exit_policy", None)
+    return out
+
+
 @router.get("/run-generic/{symbol}/{strategy_type}")
 def backtest_run_generic(
     symbol: str,
     strategy_type: str,
     period: str = "1y",
     initial_capital: float = 100000.0,
+    disable_trail: bool = False,
+    disable_exit_policy: bool = False,
 ):
     """Run a single strategy on an arbitrary symbol using factory defaults.
 
@@ -230,6 +248,11 @@ def backtest_run_generic(
     Single Strategy view can render it without a code path split. Resolves
     the strategy via _make_generic_configs_full(), which covers all 7 types
     (5 regime-aware + Bollinger + Fibonacci).
+
+    Optional `disable_trail` / `disable_exit_policy` query params strip the
+    corresponding exit layers from the config before running. The response
+    echoes the effective params + overrides so the dashboard can render the
+    "Effective exit policy" panel without re-deriving anything client-side.
     """
     from app.services.scanner.scanner_service import _make_generic_configs_full
     sym = symbol.upper().strip()
@@ -244,12 +267,17 @@ def backtest_run_generic(
             status_code=404,
             detail=f"Unknown strategy_type '{strategy_type}'. Valid: {valid}",
         )
+    effective_params = _strip_exit_layers(
+        cfg.params,
+        disable_trail=disable_trail,
+        disable_exit_policy=disable_exit_policy,
+    )
     try:
         result = run_backtest(
             strategy_name=cfg.name,
             symbol=sym,
             strategy_type=cfg.type,
-            params=cfg.params,
+            params=effective_params,
             period=period,
             initial_capital=initial_capital,
             quantity=0,
@@ -259,6 +287,12 @@ def backtest_run_generic(
     return {
         "strategy_name": result.strategy_name,
         "symbol": result.symbol,
+        "strategy_type": cfg.type,
+        "params": effective_params,
+        "overrides": {
+            "disable_trail": disable_trail,
+            "disable_exit_policy": disable_exit_policy,
+        },
         "period": result.period,
         "start_date": result.start_date,
         "end_date": result.end_date,
@@ -486,6 +520,8 @@ def backtest_custom_compare_all(
         results.append({
             "strategy_name": r.strategy_name,
             "symbol": r.symbol,
+            "strategy_type": cfg.type,
+            "params": cfg.params,
             "period": r.period,
             "start_date": r.start_date,
             "end_date": r.end_date,

@@ -589,11 +589,20 @@ def backtest_custom_compare_all(symbol: str, period: str = "1y",
 
 def backtest_run_generic(symbol: str, strategy_type: str,
                          period: str = "1y", initial_capital: float = 100_000.0,
+                         disable_trail: bool = False,
+                         disable_exit_policy: bool = False,
                          timeout: int = 120):
-    """Single-strategy backtest on an arbitrary symbol using factory defaults."""
+    """Single-strategy backtest on an arbitrary symbol using factory defaults.
+
+    The two ``disable_*`` flags strip the Chandelier-trail overlay (Layer 2)
+    and the Phase-1 exit_policy (Layer 3) before the backtest runs, so the
+    Single Strategy UI can compare runs with/without each exit layer.
+    """
     return _get(
         f"/backtest/run-generic/{symbol}/{strategy_type}",
-        params={"period": period, "initial_capital": initial_capital},
+        params={"period": period, "initial_capital": initial_capital,
+                "disable_trail": disable_trail,
+                "disable_exit_policy": disable_exit_policy},
         timeout=timeout,
     )
 

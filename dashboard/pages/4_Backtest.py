@@ -774,6 +774,33 @@ if mode == "Single Strategy":
     # type substrings, so the bare type works.
     _render_strategy_description(chosen_type)
 
+    # ── Exit-policy override (per-run, doesn't touch saved profiles) ──────
+    with st.expander("Exit-policy override (compare runs with layers off)", expanded=False):
+        st.caption(
+            "These toggles only affect *this* backtest run — they strip the "
+            "selected exit layer(s) from the params before the engine starts. "
+            "Saved scanner profiles, strategies.json, and live trading are "
+            "untouched."
+        )
+        oc1, oc2 = st.columns(2)
+        with oc1:
+            disable_trail = st.checkbox(
+                "Disable Layer 2 — Chandelier trailing overlay",
+                value=False, key="bt_disable_trail",
+                help="Removes trail_enabled / trail_trigger_pct / atr_trail_mult / "
+                     "atr_trail_period from params. Useful to A/B the trail's "
+                     "contribution for symbols that have it on (NVDA, COP, TOST, "
+                     "AVPT, ARLO).",
+            )
+        with oc2:
+            disable_exit_policy = st.checkbox(
+                "Disable Layer 3 — exit_policy dict",
+                value=False, key="bt_disable_exit_policy",
+                help="Removes the Phase-1 exit_policy. Only relevant for the "
+                     "unified strategy types which carry one; legacy types "
+                     "don't, so this toggle is inert for them.",
+            )
+
     if not run and "bt_result" not in st.session_state:
         st.info("Type a symbol, pick a strategy, then click Run Backtest.")
         st.stop()
@@ -786,7 +813,10 @@ if mode == "Single Strategy":
             try:
                 result = api.backtest_run_generic(
                     chosen_sym, chosen_type,
-                    period=period, initial_capital=capital, timeout=120,
+                    period=period, initial_capital=capital,
+                    disable_trail=disable_trail,
+                    disable_exit_policy=disable_exit_policy,
+                    timeout=120,
                 )
                 st.session_state["bt_result"] = result
                 st.session_state.pop("bt_consensus", None)
@@ -804,6 +834,19 @@ if mode == "Single Strategy":
     st.subheader(f"Results — {r['strategy_name']} ({r['start_date']} → {r['end_date']})")
 
     _render_backtest_metrics(r)
+
+    # Effective exit policy: shows which layers actually ran for THIS result
+    # (after any override toggles were applied). Compare two runs side-by-side
+    # by toggling Disable Layer 2/3 and re-running.
+    _eff_params = r.get("params")
+    _eff_stype = r.get("strategy_type") or chosen_type
+    if _eff_params is not None:
+        import _exit_policy as exit_policy
+        ov = r.get("overrides") or {}
+        if ov.get("disable_trail") or ov.get("disable_exit_policy"):
+            stripped = [k for k, v in ov.items() if v]
+            st.caption("Overrides applied for this run: " + ", ".join(stripped))
+        exit_policy.render(_eff_stype, _eff_params)
 
     if not r.get("trades"):
         _render_zero_trade_debug_single(chosen_sym, chosen, period)
@@ -1170,10 +1213,18 @@ elif mode == "Custom Symbol":
             expanded=is_winner,
         ):
             _render_backtest_metrics(row)
+            # Effective exit policy for this row (Layer 1 always; Layers 2/3
+            # only when present in the params used). Lets the trader see at a
+            # glance which strategies have the trail on vs off for this symbol.
+            row_params = row.get("params")
+            row_stype = row.get("strategy_type")
+            if row_params is not None and row_stype:
+                import _exit_policy as exit_policy
+                exit_policy.render(row_stype, row_params)
             if not row.get("trades"):
                 st.info(
                     "No trades fired for this strategy on this symbol/period. "
-                    "Try a longer period (2y or 5y)."
+                    "Try a longer period (2y, 5y, 8y, or 10y)."
                 )
             else:
                 _equity_chart(row, symbol=cmp_symbol, period=cmp_period)
