@@ -146,6 +146,28 @@ def watchlist_analyze(req: WatchlistAnalyzeRequest) -> list[dict[str, Any]]:
         if not sym:
             continue
 
+        # ── Price pre-check: probe with one strategy to catch penny stocks early ──
+        # run_backtest returns {"error": ...} for sub-$2 stocks. Detect that
+        # before running all 6 strategies and wasting 30s on junk data.
+        _probe = run_backtest(sym, "ORBBreakout", period, capital)
+        if "error" in _probe and "minimum" in str(_probe.get("error", "")):
+            results.append({
+                "symbol": sym,
+                "verdict": "SKIP",
+                "verdict_color": "red",
+                "reason": _probe["error"],
+                "best_strategy": "—",
+                "best_strategy_trades": 0,
+                "best_strategy_win_pct": 0.0,
+                "best_strategy_profit_factor": 0.0,
+                "total_pnl": 0.0,
+                "strategies_with_trades": 0,
+                "all_weak": True,
+                "diagnostics_summary": "Price below $2 minimum — strategies not valid for penny stocks.",
+                "score": 0.0,
+            })
+            continue
+
         # Run all strategies
         strat_results = run_backtest_all(sym, period, capital)
 

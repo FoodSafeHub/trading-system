@@ -525,6 +525,27 @@ def run_backtest(
         diag.finalise()
         return {"error": f"Insufficient intraday data for {symbol} {period}", "diagnostics": diag.to_dict()}
 
+    # ── Price sanity guard ────────────────────────────────────────────────────
+    # Strategies are calibrated for stocks above $2. Sub-$2 penny stocks produce
+    # nonsensical signals (ATR < 1 cent, stop distances rounding to zero, vol
+    # spikes on trivial dollar amounts). Reject early with a clear message.
+    _last_price = float(df_5m["Close"].iloc[-1])
+    _MIN_BACKTEST_PRICE = 2.0
+    if _last_price < _MIN_BACKTEST_PRICE:
+        return {
+            "error": (
+                f"{symbol} last price ${_last_price:.4f} is below the ${_MIN_BACKTEST_PRICE:.2f} "
+                "minimum. The intraday strategies are not calibrated for penny stocks — "
+                "stops and targets round to noise at sub-$2 price levels. "
+                "Use a stock priced above $2 with at least 500K avg daily volume."
+            ),
+            "symbol": symbol,
+            "strategy": strategy_name,
+            "trades": [],
+            "metrics": {"total_trades": 0},
+            "analysis": {},
+        }
+
     # ── Symbol profile + auto-config ─────────────────────────────────────────
     profile = SymbolAnalyzer.analyze(df_5m, symbol)
     adjustment = ConfigAdjuster.adjust(strategy_name, profile)
