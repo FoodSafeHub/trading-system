@@ -1214,7 +1214,7 @@ with tab_watchlist:
 
             with st.spinner(f"Analyzing {len(sym_list)} symbol(s)… this may take 10–30s"):
                 try:
-                    wl_resp = _api._post(
+                    wl_resp = api._post(
                         "/daytrading/watchlist-analyze",
                         json={
                             "symbols": sym_list,
