@@ -129,6 +129,41 @@ def run_backtest(
                           bars_held=bars_held)
             if position > 0 else None
         )
+        # ── Hard stop-loss: checked BEFORE strategy signal ───────────────
+        # Fires at close price; sells at next-bar open (same fill logic as
+        # strategy exits). Default 8% loss from entry, configurable via
+        # params["stop_loss_pct"]. Set to 0 to disable.
+        _stop_loss_pct = float(params.get("stop_loss_pct", 8.0))
+        if position > 0 and _stop_loss_pct > 0 and entry_price > 0:
+            _loss_pct = (current_close - entry_price) / entry_price * 100.0
+            if _loss_pct <= -_stop_loss_pct:
+                sell_px = fill_price if cost_model is None else cost_model.apply_sell(fill_price)
+                proceeds = sell_px * position
+                commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
+                capital += proceeds - commission
+                trades.append(BacktestTrade(
+                    date=today, symbol=symbol, side="SELL",
+                    price=sell_px, quantity=position, value=proceeds,
+                    signal_from=f"{strategy_name}:stop_loss_{_stop_loss_pct:.0f}pct",
+                ))
+                position = 0.0
+                position_cost = 0.0
+                entry_price = 0.0
+                highest_close = 0.0
+                bars_held = 0
+                # Skip strategy evaluation this bar — position already closed
+                equity = capital
+                equity_curve.append({"date": today, "equity": round(equity, 2)})
+                if equity > peak_equity:
+                    peak_equity = equity
+                dd = (peak_equity - equity) / peak_equity * 100
+                if dd > max_drawdown:
+                    max_drawdown = dd
+                ret = (equity - prev_equity) / prev_equity if prev_equity > 0 else 0
+                daily_returns.append(ret)
+                prev_equity = equity
+                continue
+
         signal = evaluate_strategy(
             strategy_type, symbol, price_series, params, ohlcv=df_slice, position=pos_state
         )

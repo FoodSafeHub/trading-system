@@ -47,7 +47,7 @@ class ExitPolicy:
     trail: str = "none"                 # "none" | "atr" | "chandelier"
     atr_mult: float = 3.0
     atr_period: int = 22
-    trigger_pct: float = 3.0            # start trailing once unrealized >= this %
+    trigger_pct: float = 2.0            # start trailing once unrealized >= this % (was 3.0)
     time_stop_bars: Optional[int] = None
     trend_fail: str = "none"            # "none" | "ema:N" | "ema_cross:f,s" | "supertrend"
     regime_exit: str = "none"           # "none" | "deep_bear"
@@ -121,7 +121,7 @@ def _legacy_chandelier(
     if not params.get("trail_enabled") or position is None:
         return signal
 
-    trigger_pct = float(params.get("trail_trigger_pct", 3.0))
+    trigger_pct = float(params.get("trail_trigger_pct", 2.0))
     atr_mult    = float(params.get("atr_trail_mult", 3.0))
     atr_period  = int(params.get("atr_trail_period", 22))
 

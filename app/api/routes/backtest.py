@@ -241,6 +241,7 @@ def backtest_run_generic(
     initial_capital: float = 100000.0,
     disable_trail: bool = False,
     disable_exit_policy: bool = False,
+    stop_loss_pct: float = 8.0,
 ):
     """Run a single strategy on an arbitrary symbol using factory defaults.
 
@@ -272,6 +273,11 @@ def backtest_run_generic(
         disable_trail=disable_trail,
         disable_exit_policy=disable_exit_policy,
     )
+    # Hard stop-loss injected into params — engine reads it before strategy signal
+    if stop_loss_pct > 0:
+        effective_params = {**effective_params, "stop_loss_pct": stop_loss_pct}
+    elif "stop_loss_pct" in effective_params:
+        effective_params = {k: v for k, v in effective_params.items() if k != "stop_loss_pct"}
     try:
         result = run_backtest(
             strategy_name=cfg.name,
@@ -292,6 +298,7 @@ def backtest_run_generic(
         "overrides": {
             "disable_trail": disable_trail,
             "disable_exit_policy": disable_exit_policy,
+            "stop_loss_pct": stop_loss_pct,
         },
         "period": result.period,
         "start_date": result.start_date,

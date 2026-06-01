@@ -106,7 +106,7 @@ def delete_profile(strategy_type: str, symbol: str) -> bool:
 # trail-enabler (e.g. the live COP/TOST/ARLO/AVPT Chandelier configs), not a
 # genuine grid-search calibration — migration must skip these so it never copies
 # live trail scaffolding under the new strategy names.
-_TRAIL_SCAFFOLD_KEYS = {"trail_enabled", "trail_trigger_pct", "atr_trail_mult", "atr_trail_period"}
+_TRAIL_SCAFFOLD_KEYS = {"trail_enabled", "trail_trigger_pct", "atr_trail_mult", "atr_trail_period", "stop_loss_pct"}
 
 
 def _is_genuine_calibration(raw: dict) -> bool:

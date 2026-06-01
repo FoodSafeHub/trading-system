@@ -782,7 +782,7 @@ if mode == "Single Strategy":
             "Saved scanner profiles, strategies.json, and live trading are "
             "untouched."
         )
-        oc1, oc2 = st.columns(2)
+        oc1, oc2, oc3 = st.columns(3)
         with oc1:
             disable_trail = st.checkbox(
                 "Disable Layer 2 — Chandelier trailing overlay",
@@ -800,6 +800,15 @@ if mode == "Single Strategy":
                      "unified strategy types which carry one; legacy types "
                      "don't, so this toggle is inert for them.",
             )
+        with oc3:
+            bt_stop_loss_pct = st.number_input(
+                "Hard stop-loss % (Layer 0)",
+                min_value=0.0, max_value=50.0, value=8.0, step=0.5,
+                key="bt_stop_loss_pct",
+                help="Exit immediately if unrealized loss reaches this % from entry. "
+                     "Applied before any strategy signal — cannot be overridden. "
+                     "Set to 0 to disable. Default 8%.",
+            )
 
     if not run and "bt_result" not in st.session_state:
         st.info("Type a symbol, pick a strategy, then click Run Backtest.")
@@ -816,6 +825,7 @@ if mode == "Single Strategy":
                     period=period, initial_capital=capital,
                     disable_trail=disable_trail,
                     disable_exit_policy=disable_exit_policy,
+                    stop_loss_pct=float(bt_stop_loss_pct),
                     timeout=120,
                 )
                 st.session_state["bt_result"] = result

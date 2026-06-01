@@ -53,6 +53,8 @@ ENGINE_CASES = [
             # Trailing overlay ON — locks the legacy Chandelier behaviour.
             "trail_enabled": True, "trail_trigger_pct": 3.0,
             "atr_trail_mult": 3.0, "atr_trail_period": 22,
+            # Disable hard stop-loss so golden baseline matches pre-stop-loss engine.
+            "stop_loss_pct": 0,
         },
     },
     {
@@ -72,6 +74,7 @@ def _trail_params(enabled: bool = True) -> dict:
     return {
         "trail_enabled": enabled, "trail_trigger_pct": 3.0,
         "atr_trail_mult": 3.0, "atr_trail_period": 22,
+        "stop_loss_pct": 0,   # disable hard stop so chandelier golden tests are stable
     }
 
 

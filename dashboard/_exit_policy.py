@@ -82,7 +82,7 @@ def describe_layers(strategy_type: str, params: dict[str, Any]) -> list[dict[str
         parts: list[str] = []
         trail = policy.get("trail")
         if trail and trail != "none":
-            parts.append(f"{trail} trail {policy.get('atr_mult', 3.0)}×ATR (trigger {policy.get('trigger_pct', 3.0)}%)")
+            parts.append(f"{trail} trail {policy.get('atr_mult', 3.0)}×ATR (trigger {policy.get('trigger_pct', 2.0)}%)")
         tsb = policy.get("time_stop_bars")
         if tsb:
             parts.append(f"time_stop {tsb} bars")
@@ -99,6 +99,21 @@ def describe_layers(strategy_type: str, params: dict[str, Any]) -> list[dict[str
         })
     else:
         out.append({"label": "Layer 3: exit_policy", "status": "OFF", "detail": "—"})
+
+    # Layer 0: hard stop-loss (runs in engine before strategy signal)
+    sl = params.get("stop_loss_pct", 8.0)
+    if sl and float(sl) > 0:
+        out.insert(0, {
+            "label": "Layer 0: hard stop-loss",
+            "status": "ON",
+            "detail": f"exit if unrealized loss >= {sl:.0f}% from entry (engine-level, cannot be overridden)",
+        })
+    else:
+        out.insert(0, {
+            "label": "Layer 0: hard stop-loss",
+            "status": "OFF",
+            "detail": "stop_loss_pct=0 — no hard stop",
+        })
 
     return out
 

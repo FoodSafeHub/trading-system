@@ -591,6 +591,7 @@ def backtest_run_generic(symbol: str, strategy_type: str,
                          period: str = "1y", initial_capital: float = 100_000.0,
                          disable_trail: bool = False,
                          disable_exit_policy: bool = False,
+                         stop_loss_pct: float = 8.0,
                          timeout: int = 120):
     """Single-strategy backtest on an arbitrary symbol using factory defaults.
 
@@ -602,7 +603,8 @@ def backtest_run_generic(symbol: str, strategy_type: str,
         f"/backtest/run-generic/{symbol}/{strategy_type}",
         params={"period": period, "initial_capital": initial_capital,
                 "disable_trail": disable_trail,
-                "disable_exit_policy": disable_exit_policy},
+                "disable_exit_policy": disable_exit_policy,
+                "stop_loss_pct": stop_loss_pct},
         timeout=timeout,
     )
 
