@@ -123,8 +123,8 @@ with tab_trade:
     tab_signals, tab_autotrader = st.tabs(["Live Signals", "Auto Trader"])
 
 with tab_research:
-    tab_backtest, tab_compare, tab_sizer = st.tabs([
-        "Backtest", "Compare All", "Position Sizer",
+    tab_backtest, tab_compare, tab_sizer, tab_watchlist = st.tabs([
+        "Backtest", "Compare All", "Position Sizer", "🔍 Watchlist Analyzer",
     ])
 
 with tab_settings:
@@ -1085,7 +1085,7 @@ with tab_compare:
     ca_capital = ca3.number_input("Capital ($)", value=10_000, step=1_000, key="ca_capital")
 
     if st.button("▶ Compare All Strategies", key="run_compare"):
-        with st.spinner(f"Running all {len(ALL_STRATEGIES)} strategies…"):
+        with st.spinner(f"Running all {len(ALL_STRATEGIES)} strategies on {ca_symbol}…"):
             results = _cached_backtest_all(ca_symbol, ca_period, float(ca_capital))
 
         if results:
@@ -1093,6 +1093,8 @@ with tab_compare:
             df_compare.insert(0, "Rank", range(1, len(df_compare) + 1))
 
             def _status(row):
+                if row.get("trades", 0) == 0:
+                    return "⚪ No trades"
                 if row["profit_factor"] >= 1.5 and row["win_rate"] >= 50:
                     return "✅ Strong"
                 elif row["profit_factor"] >= 1.0 and row["win_rate"] >= 45:
@@ -1114,15 +1116,163 @@ with tab_compare:
                 "best_day_of_week": "Best DoW",
             }
             df_compare = df_compare.rename(columns=rename)
-            st.dataframe(df_compare, use_container_width=True, hide_index=True)
+
+            _show_cols = ["Rank", "Strategy", "Trades", "Win%", "Profit Factor",
+                          "Total P&L ($)", "Avg P&L%", "Sharpe", "Max DD%",
+                          "Best Hour", "Best DoW", "Status"]
+            _show_cols = [c for c in _show_cols if c in df_compare.columns]
+            st.dataframe(df_compare[_show_cols], use_container_width=True, hide_index=True)
+
+            # ── Why did strategies produce zero trades? ──────────────────────
+            zero_rows = [r for r in results if r.get("trades", 0) == 0]
+            if zero_rows:
+                with st.expander(
+                    f"⚪ {len(zero_rows)} strateg{'y' if len(zero_rows)==1 else 'ies'} "
+                    "produced 0 trades — click to see why", expanded=False
+                ):
+                    for r in zero_rows:
+                        st.markdown(f"**{r['strategy']}**")
+                        expl = r.get("explanation", {})
+                        if expl:
+                            primary = expl.get("primary_reason", "")
+                            detail  = expl.get("detail", "")
+                            diag    = expl.get("diagnostics_summary", "")
+                            recalt  = r.get("recommended_alternative", "")
+                            if primary:
+                                st.info(f"🔎 {primary}")
+                            if detail:
+                                st.caption(detail)
+                            if diag:
+                                st.caption(f"Pipeline: {diag}")
+                            if recalt:
+                                st.caption(f"💡 Better fit for this symbol: **{recalt}**")
+                        else:
+                            diag = r.get("diagnostics", {})
+                            days = diag.get("trading_days_found", "?")
+                            skipped = diag.get("days_skipped_by_regime", 0)
+                            st.caption(
+                                f"Trading days in period: {days} — "
+                                f"{skipped} skipped by regime. "
+                                "The strategy's entry conditions were not met on any day "
+                                f"in the {ca_period} window."
+                            )
+                        st.divider()
         else:
             st.warning(
                 f"No results for **{ca_symbol}** over **{ca_period}**. "
-                "Most often this means no intraday bars were returned for that "
-                "window — Indian (NSE) symbols are served by Upstox, which needs "
-                "a current login (token expires daily ~03:30 IST). Try a shorter "
-                "period or re-login at /upstox/login, then run again."
+                "Most often this means no intraday bars were returned — "
+                "try a shorter period, or for NSE symbols re-login at /upstox/login."
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Watchlist Analyzer tab (inside tab_research)
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_watchlist:
+    st.markdown("### 🔍 Webull Watchlist Analyzer")
+    st.caption(
+        "Paste the symbols you see on Webull (top gainers, most active, unusual volume, etc.) "
+        "and get an instant verdict on whether historical strategy backtests support trading them. "
+        "**TRADE** = at least one strategy is statistically strong. "
+        "**WATCH** = marginal edge, needs live confirmation. "
+        "**SKIP** = no historical edge found in the selected period."
+    )
+
+    wl_col1, wl_col2, wl_col3 = st.columns([2, 1, 1])
+    wl_symbols_raw = wl_col1.text_area(
+        "Symbols (one per line or comma-separated)",
+        placeholder="AAPL\nNVDA\nTSLA\nor: AAPL, NVDA, TSLA",
+        height=140,
+        key="wl_symbols",
+    )
+    wl_period = wl_col2.selectbox(
+        "Backtest period",
+        ["30d", "60d", "90d"],
+        index=1,
+        key="wl_period",
+        help="Longer = more trades sampled = more reliable verdict. 60d is a good default.",
+    )
+    wl_capital = wl_col3.number_input(
+        "Capital ($)", value=10_000, step=1_000, key="wl_capital"
+    )
+
+    st.caption(
+        "⏱ Each symbol runs all 6 strategies × the full period. "
+        "Allow ~5–15 seconds per symbol. Paste up to 10 symbols at once."
+    )
+
+    if st.button("▶ Analyze Watchlist", key="run_watchlist_analyze", type="primary"):
+        # Parse symbols from textarea
+        raw_text = wl_symbols_raw.strip()
+        if not raw_text:
+            st.warning("Paste at least one symbol.")
+        else:
+            # Support comma-separated or newline-separated
+            import re as _re
+            sym_list = [s.strip().upper() for s in _re.split(r"[\n,]+", raw_text) if s.strip()]
+            sym_list = list(dict.fromkeys(sym_list))[:15]  # dedup, cap at 15
+
+            with st.spinner(f"Analyzing {len(sym_list)} symbol(s)… this may take 10–30s"):
+                try:
+                    wl_resp = _api._post(
+                        "/daytrading/watchlist-analyze",
+                        json={
+                            "symbols": sym_list,
+                            "period": wl_period,
+                            "initial_capital": float(wl_capital),
+                        },
+                        timeout=120,  # allow up to 2 min for 10 symbols × 6 strategies
+                    )
+                    wl_results = wl_resp if isinstance(wl_resp, list) else []
+                except Exception as e:
+                    st.error(f"API error: {e}")
+                    wl_results = []
+
+            if not wl_results:
+                st.warning("No results returned. Check that the symbols are valid US tickers.")
+            else:
+                # ── Summary metrics row ──────────────────────────────────────
+                n_trade = sum(1 for r in wl_results if r["verdict"] == "TRADE")
+                n_watch = sum(1 for r in wl_results if r["verdict"] == "WATCH")
+                n_skip  = sum(1 for r in wl_results if r["verdict"] == "SKIP")
+                mc1, mc2, mc3, mc4 = st.columns(4)
+                mc1.metric("Symbols analyzed", len(wl_results))
+                mc2.metric("✅ TRADE", n_trade)
+                mc3.metric("🟡 WATCH", n_watch)
+                mc4.metric("🔴 SKIP", n_skip)
+
+                st.divider()
+
+                # ── Per-symbol cards ─────────────────────────────────────────
+                for row in wl_results:
+                    v = row["verdict"]
+                    color_icon = {"TRADE": "✅", "WATCH": "🟡", "SKIP": "🔴"}.get(v, "⚪")
+                    with st.container(border=True):
+                        h_col, v_col = st.columns([4, 1])
+                        h_col.markdown(
+                            f"**{row['symbol']}** &nbsp; {color_icon} **{v}**"
+                        )
+                        v_col.caption(f"Score: {row['score']:.2f}")
+
+                        st.caption(row["reason"])
+
+                        if row["best_strategy"] != "—":
+                            m1, m2, m3, m4 = st.columns(4)
+                            m1.metric("Best strategy", row["best_strategy"])
+                            m2.metric("Trades", row["best_strategy_trades"])
+                            m3.metric("Win %", f"{row['best_strategy_win_pct']:.0f}%")
+                            m4.metric("Profit factor", f"{row['best_strategy_profit_factor']:.2f}")
+
+                        if row.get("diagnostics_summary"):
+                            st.caption(f"🔧 {row['diagnostics_summary']}")
+
+                        if row["all_weak"]:
+                            st.info(
+                                f"No historical edge on **{row['symbol']}** in the last {wl_period}. "
+                                "This doesn't mean the stock won't move — it means the strategy "
+                                "rules didn't produce tradeable setups in that window. "
+                                "Check live signals manually if it's gapping or on a mover list."
+                            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

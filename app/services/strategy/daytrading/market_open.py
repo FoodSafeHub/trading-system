@@ -450,17 +450,28 @@ def get_premarket_gap(symbol: str, open_price: float | None = None) -> dict:
 
 def regime_allows_strategy(regime: str, strategy_name: str) -> bool:
     """
-    BEAR_OPEN: only strategies that explicitly support shorting are allowed.
-    BollingerMomentum and SupertrendTrend have built-in short logic and
-    self-filter to shorts-only when BEAR_OPEN; pass them through.
-    See docs/strategies_spec.md for the full regime × strategy matrix.
+    BULL_OPEN / CHOPPY: all strategies are allowed (each self-filters inside
+    generate_signals via internal regime checks and returns [] when not applicable).
+
+    BEAR_OPEN: only strategies with an explicit short/sell path pass through.
+    Strategies that are long-only (ORBBreakout) safely return [] on BEAR_OPEN,
+    so including them here is harmless and avoids masking them in backtests.
     """
     bear_open_allowed = {
-        "EMAMomentum",
-        "OpeningGapFade",
+        # Active core strategies (6)
+        "ORBBreakout",           # long-only; returns [] on BEAR_OPEN — safe to include
+        "VWAPMeanReversion",     # short side added for BEAR_OPEN
+        "EMAMomentum",           # bearish crossover path on BEAR_OPEN
+        "OpeningGapFade",        # gap-up fades short on BEAR_OPEN
+        "SupertrendTrend",       # 15m ST bearish → shorts; self-filters direction
+        "NRSqueezeBreakout",     # close below lower band on BEAR_OPEN
+        # Retired strategies — kept for backtest compatibility
         "VolumeSpikeReversal",
-        "BollingerMomentum",   # shorts allowed; strategy returns [] for BULL_OPEN longs
-        "SupertrendTrend",     # shorts allowed; strategy uses 15m ST for direction
+        "BollingerMomentum",
+        "NarrowRangeBreakout",
+        "EngulfingVolumeSurge",
+        "ThreeBarPush",
+        "HammerShootingStar",
     }
     if regime == "BEAR_OPEN" and strategy_name not in bear_open_allowed:
         return False

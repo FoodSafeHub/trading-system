@@ -101,6 +101,149 @@ def backtest_all(
     return run_backtest_all(symbol.upper(), period, initial_capital)
 
 
+# ── Watchlist Analyzer ────────────────────────────────────────────────────────
+
+class WatchlistAnalyzeRequest(BaseModel):
+    symbols: list[str] = Field(..., description="Symbols pasted from Webull/broker")
+    period: str = Field("60d", description="Backtest period: 30d | 60d | 90d")
+    initial_capital: float = Field(10_000.0)
+    market_state: str = Field("", description="Override regime; empty = auto-detect")
+
+
+class SymbolVerdict(BaseModel):
+    symbol: str
+    verdict: str           # "TRADE" | "WATCH" | "SKIP"
+    verdict_color: str     # "green" | "yellow" | "red"
+    reason: str            # one-line human summary
+    best_strategy: str
+    best_strategy_trades: int
+    best_strategy_win_pct: float
+    best_strategy_profit_factor: float
+    total_pnl: float
+    strategies_with_trades: int
+    all_weak: bool
+    diagnostics_summary: str
+    score: float           # 0–1 composite tradability score
+
+
+@router.post("/watchlist-analyze")
+def watchlist_analyze(req: WatchlistAnalyzeRequest) -> list[dict[str, Any]]:
+    """
+    Run all 6 strategies on each symbol and return a per-symbol verdict:
+      TRADE  — at least one strategy is Strong (win%≥50, PF≥1.5)
+      WATCH  — at least one Marginal strategy (PF≥1.0, win%≥40) but nothing Strong
+      SKIP   — all strategies returned 0 trades or are Weak
+
+    This is the Webull Watchlist Analyzer: paste symbols you see on Webull
+    movers/gainers and get an instant tradability verdict per symbol.
+    """
+    results: list[dict[str, Any]] = []
+    period = req.period or "60d"
+    capital = req.initial_capital or 10_000.0
+
+    for raw_sym in req.symbols:
+        sym = raw_sym.strip().upper()
+        if not sym:
+            continue
+
+        # Run all strategies
+        strat_results = run_backtest_all(sym, period, capital)
+
+        best: dict | None = None
+        best_score = -1.0
+        strategies_with_trades = 0
+        has_strong = False
+        has_marginal = False
+        total_pnl = 0.0
+
+        for r in strat_results:
+            t = r.get("trades", 0)
+            pf = r.get("profit_factor", 0.0) or 0.0
+            wr = r.get("win_rate", 0.0) or 0.0
+            pnl = r.get("total_pnl", 0.0) or 0.0
+
+            if t > 0:
+                strategies_with_trades += 1
+                total_pnl += pnl
+                # Composite score: weight win rate + profit factor
+                score = (wr / 100) * 0.4 + min(pf / 3.0, 1.0) * 0.6
+                if score > best_score:
+                    best_score = score
+                    best = r
+                if pf >= 1.5 and wr >= 50:
+                    has_strong = True
+                elif pf >= 1.0 and wr >= 40:
+                    has_marginal = True
+
+        # Determine verdict
+        if has_strong:
+            verdict = "TRADE"
+            color = "green"
+            reason = (
+                f"{best['strategy']} — {best['win_rate']:.0f}% win, "
+                f"PF {best['profit_factor']:.2f}, "
+                f"{best['trades']} trades over {period}"
+            )
+        elif has_marginal:
+            verdict = "WATCH"
+            color = "yellow"
+            reason = (
+                f"Marginal setup on {best['strategy']} — "
+                f"{best['win_rate']:.0f}% win, PF {best['profit_factor']:.2f}. "
+                "Needs live confirmation."
+            )
+        elif strategies_with_trades > 0 and best:
+            verdict = "SKIP"
+            color = "red"
+            reason = (
+                f"All strategies weak on {sym} over {period}. "
+                f"Best was {best['strategy']} (PF {best['profit_factor']:.2f}). "
+                "No edge found."
+            )
+        else:
+            verdict = "SKIP"
+            color = "red"
+            reason = (
+                f"Zero trades generated across all strategies for {sym} over {period}. "
+                "Likely insufficient data or no regime match — "
+                "try a longer period or check ticker."
+            )
+
+        # Diagnostics summary from the best strategy's diagnostics field
+        diag_summary = ""
+        if best and "diagnostics" in best:
+            d = best["diagnostics"]
+            parts = []
+            if d.get("trading_days_found"):
+                parts.append(f"{d['trading_days_found']} trading days")
+            if d.get("days_skipped_by_regime", 0) > 0:
+                parts.append(f"{d['days_skipped_by_regime']} skipped by regime")
+            if d.get("signals_filtered_rr", 0) > 0:
+                parts.append(f"{d['signals_filtered_rr']} rejected R:R")
+            diag_summary = " · ".join(parts)
+
+        results.append({
+            "symbol": sym,
+            "verdict": verdict,
+            "verdict_color": color,
+            "reason": reason,
+            "best_strategy": best["strategy"] if best else "—",
+            "best_strategy_trades": best["trades"] if best else 0,
+            "best_strategy_win_pct": round(best["win_rate"], 1) if best else 0.0,
+            "best_strategy_profit_factor": round(best["profit_factor"], 2) if best else 0.0,
+            "total_pnl": round(total_pnl, 2),
+            "strategies_with_trades": strategies_with_trades,
+            "all_weak": not (has_strong or has_marginal),
+            "diagnostics_summary": diag_summary,
+            "score": round(best_score, 3) if best_score >= 0 else 0.0,
+        })
+
+    # Sort: TRADE first, then WATCH, then SKIP; within each tier by score desc
+    _order = {"TRADE": 0, "WATCH": 1, "SKIP": 2}
+    results.sort(key=lambda r: (_order.get(r["verdict"], 3), -r["score"]))
+    return results
+
+
 @router.get("/scan")
 def scan(
     symbols: str = Query("SPY,QQQ,AAPL,TSLA,NVDA"),
