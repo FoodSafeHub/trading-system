@@ -82,14 +82,12 @@ def _confidence_adjust(snap, base: float) -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 class PerpEngulfingVolumeSurge(PerplexityStrategy):
     name = "Daily_Engulfing_Volume"
-    # NEEDS-FOLLOW-UP (decision pass 2026-06-02): emits short-side SELL
-    # entries that the perplexity engine currently drops (long-only execution
-    # path). Long-side alone shows +$793 / 3 trades -- half the strategy's
-    # surface area is dark. Verdict deferred.
-    # Re-enable: clear research_only after the engine grows a short-entry
-    # path (or after this strategy stops emitting SELL for bearish patterns).
-    # Artifact: reports/perplexity_strategy_decisions.md
-    research_only: bool = True
+    # KEEP (5y re-evaluation 2026-06-02): net +$2,756 / 9 trades / WR 66.7%
+    # over 5y. Short-side engine path now wired; this strategy's short branch
+    # is still 0-trade because momentum_strategies' regime gate uses LIVE
+    # state in backtest (separate follow-up), but the long-side edge is
+    # consistent enough to keep live.
+    # Artifact: reports/perplexity_5y_research_verdicts.md
 
     config: dict = {
         "min_data_bars":   60,
@@ -157,11 +155,10 @@ class PerpEngulfingVolumeSurge(PerplexityStrategy):
 # ══════════════════════════════════════════════════════════════════════════════
 class PerpNarrowRangeBreakout(PerplexityStrategy):
     name = "Daily_NR_Breakout"
-    # NEEDS-FOLLOW-UP (decision pass 2026-06-02): same short-side dropping
-    # issue as the other daily-candle patterns. Long-side: +$1,506 / 2 trades
-    # -- too sparse + half the surface dark to call.
-    # Artifact: reports/perplexity_strategy_decisions.md
-    research_only: bool = True
+    # KEEP -- BORDERLINE (5y re-evaluation 2026-06-02): net +$1,392 / 13
+    # trades / WR 61.5% over 5y. 13 trades is just under the 20-trade
+    # comfort threshold; trades pay (PF 1.83) and direction is consistent.
+    # Artifact: reports/perplexity_5y_research_verdicts.md
 
     config: dict = {
         "min_data_bars":   60,
@@ -245,10 +242,10 @@ class PerpNarrowRangeBreakout(PerplexityStrategy):
 # ══════════════════════════════════════════════════════════════════════════════
 class PerpThreeBarPush(PerplexityStrategy):
     name = "Daily_Three_Bar_Push"
-    # NEEDS-FOLLOW-UP (decision pass 2026-06-02): same short-side dropping
-    # issue. Long-side: -$567 / 2 trades.
-    # Artifact: reports/perplexity_strategy_decisions.md
-    research_only: bool = True
+    # KEEP (5y re-evaluation 2026-06-02): net +$6,511 / 26 trades / WR 65.4%
+    # over 5y. Most-improved on more data -- the 2y -$567 verdict was
+    # sample noise. Strongest of the four daily-candle patterns.
+    # Artifact: reports/perplexity_5y_research_verdicts.md
 
     config: dict = {
         "min_data_bars":  60,
@@ -316,10 +313,10 @@ class PerpThreeBarPush(PerplexityStrategy):
 # ══════════════════════════════════════════════════════════════════════════════
 class PerpHammerShootingStar(PerplexityStrategy):
     name = "Daily_Hammer_Star"
-    # NEEDS-FOLLOW-UP (decision pass 2026-06-02): same short-side dropping
-    # issue. Long-side: +$900 / 2 trades.
-    # Artifact: reports/perplexity_strategy_decisions.md
-    research_only: bool = True
+    # KEEP -- BORDERLINE (5y re-evaluation 2026-06-02): net +$896 / 11
+    # trades / WR 63.6% over 5y. 11 trades is the thinnest of the kept set;
+    # PF 1.57 / hold 3.7d / direction consistent. On the right side of zero.
+    # Artifact: reports/perplexity_5y_research_verdicts.md
 
     config: dict = {
         "min_data_bars":    60,

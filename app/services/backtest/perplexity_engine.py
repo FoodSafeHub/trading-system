@@ -31,6 +31,22 @@ from app.services.strategy.perplexity.base import PerplexityStrategy
 # Engine never silently overrides a strategy that does declare one.
 _DEFAULT_MAX_HOLD_BARS = 60
 
+# ── Short-position convention ────────────────────────────────────────────────
+# `position` carries the SIGNED share count: positive = long, negative = short.
+# `abs(position)` is the number of shares borrowed and sold-to-open. For a
+# short trade, `position_cost` is the dollars RECEIVED at the sell-to-open
+# (positive number); P&L at cover is `position_cost - cover_value - commission`.
+#
+# This is MINIMAL short support for daily-candlestick momentum strategies that
+# need a short-entry path (Daily_NR_Breakout, Daily_Engulfing_Volume,
+# Daily_Three_Bar_Push, Daily_Hammer_Star). It does NOT model:
+#   * margin requirements / Reg-T / portfolio margin
+#   * stock-borrow cost (HTB rates)
+#   * short-sale restrictions / locate failures
+#   * uptick / SSR rules
+# Those are intentionally out of scope. For full short modeling, build a
+# dedicated execution layer; do not extend this engine.
+
 
 def calc_total_return(equity_curve: list) -> float:
     """(E_final / E_initial) - 1, as a percentage."""
@@ -217,8 +233,8 @@ def run_perplexity_backtest(
 
         # Count a holding day BEFORE intra-bar exit checks so the bar a stop
         # fires on is counted. Strategies budget in bars-of-exposure, not
-        # bars-survived.
-        if position > 0:
+        # bars-survived. Symmetric across long (>0) and short (<0) positions.
+        if position != 0:
             bars_held += 1
 
         # ── Check stop / target on open if in position ──────────
@@ -242,6 +258,28 @@ def run_perplexity_backtest(
                 capital += proceeds - commission
                 trades.append(_trade("SELL (target)", today, sell_px, position, proceeds, pnl))
                 position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
+        # Short-side mirror: stop is ABOVE entry, target is BELOW entry.
+        elif position < 0 and entry_stop is not None:
+            open_price = float(df_full["Open"].iloc[i])
+            shares = abs(position)
+            # Gap UP through stop -> buy-to-cover at open
+            if open_price >= entry_stop:
+                cover_px = open_price if cost_model is None else cost_model.apply_buy(open_price)
+                cover_value = cover_px * shares
+                commission = 0.0 if cost_model is None else cost_model.entry_commission(shares, cover_value)
+                pnl = position_cost - cover_value - commission
+                capital -= cover_value + commission
+                trades.append(_trade("COVER (stop)", today, cover_px, shares, cover_value, pnl))
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
+            # Gap DOWN through target -> buy-to-cover at open
+            elif entry_target and open_price <= entry_target:
+                cover_px = open_price if cost_model is None else cost_model.apply_buy(open_price)
+                cover_value = cover_px * shares
+                commission = 0.0 if cost_model is None else cost_model.entry_commission(shares, cover_value)
+                pnl = position_cost - cover_value - commission
+                capital -= cover_value + commission
+                trades.append(_trade("COVER (target)", today, cover_px, shares, cover_value, pnl))
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
 
         # ── Trailing stop: once price moves 1R, trail at 0.5R below high-water mark ──
         # No lookahead: high-water mark = high through the PRIOR bar (the most
@@ -254,6 +292,15 @@ def run_perplexity_backtest(
             if profit_per_share >= initial_risk:
                 trail_stop = high_prior - 0.5 * initial_risk
                 if trail_stop > entry_stop:
+                    entry_stop = trail_stop
+        # Short-side mirror: ratchet stop DOWN once price has moved 1R against
+        # the short (i.e. price has fallen 1R below entry).
+        elif position < 0 and entry_stop is not None and entry_price_rec and initial_risk and i > 0:
+            low_prior = float(df_full["Low"].iloc[i - 1])
+            profit_per_share = entry_price_rec - low_prior   # gain for short = entry - low
+            if profit_per_share >= initial_risk:
+                trail_stop = low_prior + 0.5 * initial_risk
+                if trail_stop < entry_stop:
                     entry_stop = trail_stop
 
         # ── Intraday stop / target on close ─────────────────────
@@ -276,6 +323,27 @@ def run_perplexity_backtest(
                 capital += proceeds - commission
                 trades.append(_trade("SELL (target)", today, sell_px, position, proceeds, pnl))
                 position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
+        # Short-side mirror.
+        elif position < 0 and entry_stop is not None:
+            low_today = float(df_full["Low"].iloc[i])
+            high_today = float(df_full["High"].iloc[i])
+            shares = abs(position)
+            if high_today >= entry_stop:
+                cover_px = entry_stop if cost_model is None else cost_model.apply_buy(entry_stop)
+                cover_value = cover_px * shares
+                commission = 0.0 if cost_model is None else cost_model.entry_commission(shares, cover_value)
+                pnl = position_cost - cover_value - commission
+                capital -= cover_value + commission
+                trades.append(_trade("COVER (stop)", today, cover_px, shares, cover_value, pnl))
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
+            elif entry_target and low_today <= entry_target:
+                cover_px = entry_target if cost_model is None else cost_model.apply_buy(entry_target)
+                cover_value = cover_px * shares
+                commission = 0.0 if cost_model is None else cost_model.entry_commission(shares, cover_value)
+                pnl = position_cost - cover_value - commission
+                capital -= cover_value + commission
+                trades.append(_trade("COVER (target)", today, cover_px, shares, cover_value, pnl))
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
 
         # ── Time exit: max_hold_bars budget exceeded ─────────────
         # Closes at this bar's CLOSE to mirror strategy-driven SELL convention
@@ -289,6 +357,15 @@ def run_perplexity_backtest(
             pnl = proceeds - commission - position_cost
             capital += proceeds - commission
             trades.append(_trade("SELL (time)", today, sell_px, position, proceeds, pnl))
+            position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
+        elif position < 0 and bars_held >= max_hold_bars:
+            shares = abs(position)
+            cover_px = current_close if cost_model is None else cost_model.apply_buy(current_close)
+            cover_value = cover_px * shares
+            commission = 0.0 if cost_model is None else cost_model.entry_commission(shares, cover_value)
+            pnl = position_cost - cover_value - commission
+            capital -= cover_value + commission
+            trades.append(_trade("COVER (time)", today, cover_px, shares, cover_value, pnl))
             position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
 
         # ── Run strategy signal ──────────────────────────────────
@@ -312,6 +389,73 @@ def run_perplexity_backtest(
                 )
             except Exception:
                 sig = None
+
+            # ── SHORT entry: SELL signal while flat ─────────────────
+            # For a short trade the stop must be ABOVE entry (price moves up
+            # against us = loss). If the signal lacks that geometry it's not a
+            # valid short — skip rather than guessing. Daily-candle momentum
+            # patterns are the primary customers.
+            if (
+                sig and sig.direction == "SELL"
+                and sig.stop_price and sig.stop_price > fill_price
+            ):
+                # Risk-based sizing: calculate_position_size is long-only
+                # (rejects stop >= entry). For shorts we reuse the same
+                # formula inline: risk_dollars / risk_per_share, capped by
+                # max position notional.
+                if position_pct > 0:
+                    alloc = capital * min(position_pct, max_position_pct)
+                    qty = alloc / fill_price if fill_price > 0 else 0.0
+                    trade_risk = (sig.stop_price - fill_price) * qty
+                else:
+                    risk_per_share = sig.stop_price - fill_price
+                    risk_dollars = capital * regime_caps["risk_pct_per_trade"]
+                    # Don't exceed open-risk budget for the account
+                    risk_budget_remaining = max(
+                        0.0,
+                        capital * regime_caps["max_account_risk_pct"] - open_risk_usd,
+                    )
+                    risk_dollars = min(risk_dollars, risk_budget_remaining)
+                    qty = risk_dollars / risk_per_share if risk_per_share > 0 else 0.0
+                    # Notional cap
+                    max_qty_by_notional = (capital * max_position_pct) / fill_price if fill_price > 0 else 0.0
+                    qty = min(qty, max_qty_by_notional)
+                    trade_risk = risk_per_share * qty
+
+                qty = round(qty, 6)
+                # sell-to-open: cost_model applies sell-side slippage to fill
+                sell_open_px = fill_price if cost_model is None else cost_model.apply_sell(fill_price)
+                if qty >= 0.001:
+                    proceeds = sell_open_px * qty
+                    commission = 0.0 if cost_model is None else cost_model.entry_commission(qty, proceeds)
+                    # Cash flow on short open: receive proceeds, pay commission.
+                    # NOTE: we don't reserve a margin requirement — minimal model.
+                    capital += proceeds - commission
+                    position = -qty                       # signed: short
+                    position_cost = proceeds - commission # dollars NET received at open
+                    open_risk_usd += trade_risk
+                    entry_stop      = sig.stop_price       # above entry
+                    entry_target    = sig.target_price     # below entry
+                    entry_price_rec = sell_open_px
+                    initial_risk    = (sig.stop_price - sell_open_px)  # 1R in $/share
+                    bars_held = 0
+                    atr_pct = round(_current_atr(df_slice) / fill_price * 100, 3) if fill_price else 0.0
+                    trades.append({
+                        "date": today, "side": "SHORT",
+                        "price": round(sell_open_px, 2), "quantity": round(qty, 4),
+                        "value": round(proceeds, 2), "pnl": None,
+                        "stop": round(sig.stop_price, 2),
+                        "target": round(sig.target_price, 2) if sig.target_price else None,
+                        "confidence": sig.confidence,
+                        "reason": sig.reason,
+                        "risk_usd": round(trade_risk, 2),
+                        "regime": regime.value,
+                        "atr_pct": atr_pct,
+                        "volatility_bucket": volatility_bucket,
+                        "strategy_name": strategy.name,
+                        "symbol": symbol,
+                        "commission": round(commission, 4),
+                    })
 
             if sig and sig.direction == "BUY":
                 if position_pct > 0:
@@ -404,6 +548,42 @@ def run_perplexity_backtest(
                 })
                 position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
 
+        elif position < 0:
+            # Strategy-initiated cover: a BUY signal while we're short means
+            # the bearish thesis is broken — cover the position.
+            try:
+                sig = strategy.run(
+                    symbol,
+                    df_slice,
+                    regime=regime,
+                    volatility_bucket=volatility_bucket,
+                    suitability_config=suitability_config,
+                )
+            except Exception:
+                sig = None
+
+            if sig and sig.direction == "BUY":
+                shares = abs(position)
+                cover_px = fill_price if cost_model is None else cost_model.apply_buy(fill_price)
+                cover_value = cover_px * shares
+                commission = 0.0 if cost_model is None else cost_model.entry_commission(shares, cover_value)
+                pnl = position_cost - cover_value - commission
+                capital -= cover_value + commission
+                trades.append({
+                    "date": today, "side": "COVER",
+                    "price": round(cover_px, 2), "quantity": shares,
+                    "value": round(cover_value, 2), "pnl": round(pnl, 2),
+                    "stop": None, "target": None,
+                    "confidence": sig.confidence if sig else None,
+                    "reason": sig.reason if sig else "",
+                    "risk_usd": None,
+                    "regime": regime.value,
+                    "strategy_name": strategy.name,
+                    "symbol": symbol,
+                    "commission": round(commission, 4),
+                })
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
+
         # ── Mark-to-market ───────────────────────────────────────
         equity = capital + position * current_close
         equity_curve.append({"date": today, "equity": round(equity, 2)})
@@ -427,19 +607,34 @@ def run_perplexity_backtest(
         pnl = proceeds - commission - position_cost
         capital += proceeds - commission
         trades.append(_trade("SELL (close)", dates[-1], sell_px, position, proceeds, pnl))
+    elif position < 0:
+        last_price = float(df_full["Close"].iloc[-1])
+        shares = abs(position)
+        cover_px = last_price if cost_model is None else cost_model.apply_buy(last_price)
+        cover_value = cover_px * shares
+        commission = 0.0 if cost_model is None else cost_model.entry_commission(shares, cover_value)
+        pnl = position_cost - cover_value - commission
+        capital -= cover_value + commission
+        trades.append(_trade("COVER (close)", dates[-1], cover_px, shares, cover_value, pnl))
 
     final_capital = capital
     total_pnl = final_capital - initial_capital
 
-    sell_trades = [t for t in trades if "SELL" in t["side"]]
-    buy_trades  = [t for t in trades if t["side"] == "BUY"]
-    winning = [t for t in sell_trades if (t.get("pnl") or 0) > 0]
-    losing  = [t for t in sell_trades if (t.get("pnl") or 0) <= 0]
-    win_rate = len(winning) / len(sell_trades) * 100 if sell_trades else 0.0
-    # total_trades = round trips (sell count), not raw trade records (buy+sell)
-    total_completed_trades = len(sell_trades)
+    # Long exits: "SELL" / "SELL (...)"; short exits: "COVER" / "COVER (...)".
+    # Both are round-trip closes — count and PF-weight them together.
+    exit_trades = [t for t in trades if "SELL" in t["side"] or "COVER" in t["side"]]
+    # Entry legs (no realized P&L on the entry record itself):
+    entry_trades = [t for t in trades if t["side"] in ("BUY", "SHORT")]
+    winning = [t for t in exit_trades if (t.get("pnl") or 0) > 0]
+    losing  = [t for t in exit_trades if (t.get("pnl") or 0) <= 0]
+    win_rate = len(winning) / len(exit_trades) * 100 if exit_trades else 0.0
+    total_completed_trades = len(exit_trades)
 
-    capital_employed = sum(t["value"] for t in buy_trades) if buy_trades else 0.0
+    # Backwards-compat aliases (some callers reference these names)
+    sell_trades = exit_trades
+    buy_trades = entry_trades
+
+    capital_employed = sum(t["value"] for t in entry_trades) if entry_trades else 0.0
     total_return = calc_total_return(equity_curve)
     cagr         = calc_cagr(equity_curve)
 

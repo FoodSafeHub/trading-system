@@ -1,7 +1,8 @@
 # Perplexity strategy registry — current decision pass
 
-**As of 2026-06-02.** Authoritative source artifact:
-[`reports/perplexity_strategy_decisions.md`](../../../../reports/perplexity_strategy_decisions.md).
+**As of 2026-06-02 (5y re-evaluation).** Authoritative source artifacts:
+- [`reports/perplexity_strategy_decisions.md`](../../../../reports/perplexity_strategy_decisions.md) — original 2y decision pass
+- [`reports/perplexity_5y_research_verdicts.md`](../../../../reports/perplexity_5y_research_verdicts.md) — 5y re-evaluation that promoted 5 strategies
 
 Two class-level flags control deployment:
 
@@ -16,21 +17,19 @@ The runner ([runner.py](runner.py)) skips both `not enabled` and `research_only`
 ## Current classification
 
 ### KEEP (live)
-- `EMA_Mean_Reversion` — net +$4,549 / 76 trades / WR 61.8% (2y / 10 symbols, costed)
-- `BB_Mean_Reversion`  — net +$2,898 / 122 trades / WR 59% (2y / 10 symbols, costed)
+From the 2y pass:
+- `EMA_Mean_Reversion` — net +$4,549 / 76 trades / WR 61.8% (2y, costed)
+- `BB_Mean_Reversion`  — net +$2,898 / 122 trades / WR 59% (2y, costed)
 
-### RESEARCH-ONLY (held for research; positive but fragile)
-- `Breakout_Consolidation` — net +$834 / 18 trades / WR 55.6%; hold 15.8d (too long)
-- `RSI_Swing_Reversal` — only 2 trades / 2y (sample too small)
+Promoted by the 5y re-evaluation:
+- `Daily_Three_Bar_Push` — net +$6,511 / 26 trades / WR 65.4% (5y)
+- `Daily_Engulfing_Volume` — net +$2,756 / 9 trades / WR 66.7% (5y)
+- `Breakout_Consolidation` — net +$2,227 / 66 trades / WR 60.6% (5y)
+- `Daily_NR_Breakout` — net +$1,392 / 13 trades / WR 61.5% (5y) — **borderline**
+- `Daily_Hammer_Star` — net +$896 / 11 trades / WR 63.6% (5y) — **borderline**
 
-### NEEDS-FOLLOW-UP (engine still distorts the verdict)
-
-All 4 daily candlestick momentum patterns emit short-side `direction="SELL"` entries that the perplexity engine currently drops (long-only execution path). Long-side alone is half the strategy's edge surface — verdict deferred until the engine grows a short-entry path **or** these strategies stop emitting SELL for bearish patterns.
-
-- `Daily_Engulfing_Volume`
-- `Daily_NR_Breakout`
-- `Daily_Three_Bar_Push`
-- `Daily_Hammer_Star`
+### RESEARCH-ONLY (still too sparse to deploy)
+- `RSI_Swing_Reversal` — net +$1,011 / **only 5 trades** in 5y / 10 symbols. Needs a wider universe before deciding.
 
 ### RETIRE (off; code preserved for future re-enablement)
 - `Supertrend_Swing` — net −$2,085 / 22 trades / WR 41%

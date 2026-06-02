@@ -369,15 +369,10 @@ class BreakoutConsolidation(PerplexityStrategy):
     Target: entry + (upper_BB − lower_BB) (one bandwidth extension).
     """
     name = "Breakout_Consolidation"
-    # RESEARCH-ONLY (decision pass 2026-06-02): net +$834 / 18 trades / WR
-    # 55.6% over 2y. Positive but thin sample, and average hold is 15.8d --
-    # trades take too long to either work or fail. Worth a tighter-time-exit
-    # research pass before live deployment.
-    # Re-enable: bump max_hold_bars down (e.g. 15 -> 10), re-benchmark; if
-    # net pnl stays positive and trades >= 20, flip research_only back to
-    # False.
-    # Artifact: reports/perplexity_strategy_decisions.md
-    research_only: bool = True
+    # KEEP (5y re-evaluation 2026-06-02): net +$2,227 / 66 trades / WR 60.6%
+    # over 5y. The 2y sample (18 trades) was thin; 5y confirms the edge.
+    # Was previously RESEARCH-ONLY. Artifact:
+    # reports/perplexity_5y_research_verdicts.md
 
     config: dict = {
         "consolidation_bars":  15,    # kept for UI compatibility
@@ -763,12 +758,12 @@ class RsiSwingReversal(PerplexityStrategy):
     Target: entry + atr_tp_mult × ATR
     """
     name = "RSI_Swing_Reversal"
-    # RESEARCH-ONLY (decision pass 2026-06-02): only 2 trades in 2y / 10
-    # symbols. Sample too small to deploy or retire. Genuinely picky entry
-    # filter (RSI<40 then turn-up + EMA50 trend) -- opportunistic, low-freq.
-    # Re-enable: needs a 5y / wider-universe benchmark to accumulate 20+
-    # trades before deciding.
-    # Artifact: reports/perplexity_strategy_decisions.md
+    # RESEARCH-ONLY (re-evaluated 5y 2026-06-02): trades grew 2 -> 5 over 5y
+    # / 10 symbols. Net +$1,011 / WR 60% -- direction is right but 5 trades
+    # in 5y is still too sparse to deploy. The strategy is genuinely picky;
+    # widening the symbol universe (Russell 1000? Nifty 200?) is the next
+    # research move.
+    # Artifact: reports/perplexity_5y_research_verdicts.md
     research_only: bool = True
 
     config: dict = {

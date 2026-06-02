@@ -17,21 +17,26 @@ from app.services.strategy.perplexity import PERPLEXITY_STRATEGIES
 from app.services.strategy.perplexity.base import PerplexityStrategy
 
 
-# Decision pass output. Keep these sets in sync with
-# reports/perplexity_strategy_decisions.md.
+# Decision-pass output (combined: original 2y pass + 5y re-evaluation
+# 2026-06-02). Source artifacts:
+#   reports/perplexity_strategy_decisions.md          (2y pass)
+#   reports/perplexity_5y_research_verdicts.md        (5y re-evaluation)
 KEEP = {
+    # From 2y pass:
     "EMA_Mean_Reversion",
     "BB_Mean_Reversion",
+    # Promoted from RESEARCH-ONLY after 5y re-evaluation:
+    "Breakout_Consolidation",
+    # Promoted from NEEDS-FOLLOW-UP after 5y re-evaluation + short-side
+    # engine support landing (their LONG-side numbers became fair):
+    "Daily_Three_Bar_Push",
+    "Daily_Engulfing_Volume",
+    "Daily_NR_Breakout",     # borderline (13 trades)
+    "Daily_Hammer_Star",     # borderline (11 trades)
 }
 RESEARCH_ONLY = {
-    # RESEARCH-ONLY (positive but fragile / thin)
-    "Breakout_Consolidation",
+    # Still too sparse even at 5y (5 trades).
     "RSI_Swing_Reversal",
-    # NEEDS-FOLLOW-UP (engine drops short-side SELLs from these patterns)
-    "Daily_NR_Breakout",
-    "Daily_Hammer_Star",
-    "Daily_Engulfing_Volume",
-    "Daily_Three_Bar_Push",
 }
 RETIRE = {
     "Supertrend_Swing",
@@ -144,12 +149,8 @@ def test_retired_strategies_still_importable():
 
 
 def test_research_only_strategies_still_importable():
-    """RESEARCH-ONLY / NEEDS-FOLLOW-UP classes must remain importable for
-    the same reason — flag flip, not code resurrection."""
-    daily = importlib.import_module("app.services.strategy.perplexity.momentum_strategies")
+    """RESEARCH-ONLY classes must remain importable — flag flip, not code
+    resurrection."""
     swing = importlib.import_module("app.services.strategy.perplexity.strategies")
-    for name in ("PerpEngulfingVolumeSurge", "PerpNarrowRangeBreakout",
-                 "PerpThreeBarPush", "PerpHammerShootingStar"):
-        assert hasattr(daily, name), f"{name} must remain importable"
-    for name in ("BreakoutConsolidation", "RsiSwingReversal"):
+    for name in ("RsiSwingReversal",):
         assert hasattr(swing, name), f"{name} must remain importable"
