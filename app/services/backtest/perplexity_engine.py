@@ -13,6 +13,7 @@ from typing import List, Optional
 
 import pandas as pd
 
+from app.services.backtest.costs import CostModel
 from app.services.market_data.provider import get_ohlcv
 from app.services.market_regime import MarketRegime, get_regime_risk_caps
 from app.services.performance_breakdown import bucket_atr_pct
@@ -25,6 +26,10 @@ from app.services.performance_metrics import (
 from app.services.perplexity.suitability import load_suitability_config
 from app.services.risk.position_sizer import calculate_position_size
 from app.services.strategy.perplexity.base import PerplexityStrategy
+
+# Fallback used only when the strategy doesn't declare a max_hold_bars budget.
+# Engine never silently overrides a strategy that does declare one.
+_DEFAULT_MAX_HOLD_BARS = 60
 
 
 def calc_total_return(equity_curve: list) -> float:
@@ -128,6 +133,7 @@ def run_perplexity_backtest(
     position_pct: float = 0.0,             # >0 = fixed % of capital per trade (overrides risk sizing)
     df_full: Optional[pd.DataFrame] = None,   # inject pre-fetched OHLCV to skip the download
     spy_close: Optional[pd.Series] = None,    # inject pre-fetched SPY Close for regime detection
+    cost_model: Optional[CostModel] = None,   # opt-in slippage/commission; None == identity (no behaviour change)
 ) -> PerplexityBacktestResult:
     # Callers that compare many strategies on one symbol can fetch the bars once
     # and pass them in (df_full/spy_close), avoiding a redundant Yahoo download per
@@ -160,6 +166,18 @@ def run_perplexity_backtest(
     else:
         lookback = min(210, max(60, len(df_full) * 6 // 10))
 
+    # Honor the strategy's own max_hold_bars budget. Strategies declare this in
+    # their config dict (e.g. RSI-2: 10, Fib pullback: 8). The engine previously
+    # ignored it — trades sat until stop/target/SELL fired, which produced
+    # systematically worse results for capitulation/mean-reversion strategies
+    # that depend on a tight time budget.
+    try:
+        max_hold_bars = int(getattr(strategy, "config", {}).get("max_hold_bars", _DEFAULT_MAX_HOLD_BARS))
+    except Exception:
+        max_hold_bars = _DEFAULT_MAX_HOLD_BARS
+    if max_hold_bars <= 0:
+        max_hold_bars = _DEFAULT_MAX_HOLD_BARS
+
     dates = [str(d)[:10] for d in df_full.index]
     capital = initial_capital
     position = 0.0
@@ -169,6 +187,7 @@ def run_perplexity_backtest(
     entry_stop: Optional[float] = None
     entry_target: Optional[float] = None
     open_risk_usd: float = 0.0
+    bars_held: int = 0                         # bars since current position opened
     trades: List[dict] = []
     equity_curve: List[dict] = []
     peak_equity = initial_capital
@@ -182,32 +201,44 @@ def run_perplexity_backtest(
         fill_price    = float(df_full["Open"].iloc[i])   # always valid — i is bounded by range()
         today = dates[i]
 
+        # Count a holding day BEFORE intra-bar exit checks so the bar a stop
+        # fires on is counted. Strategies budget in bars-of-exposure, not
+        # bars-survived.
+        if position > 0:
+            bars_held += 1
+
         # ── Check stop / target on open if in position ──────────
         if position > 0 and entry_stop is not None:
             open_price = float(df_full["Open"].iloc[i])
             # Gap down through stop
             if open_price <= entry_stop:
-                proceeds = open_price * position
-                pnl = proceeds - position_cost
-                capital += proceeds
-                trades.append(_trade("SELL (stop)", today, open_price, position, proceeds, pnl))
-                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None
+                sell_px = open_price if cost_model is None else cost_model.apply_sell(open_price)
+                proceeds = sell_px * position
+                commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
+                pnl = proceeds - commission - position_cost
+                capital += proceeds - commission
+                trades.append(_trade("SELL (stop)", today, sell_px, position, proceeds, pnl))
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
             # Gap up through target
             elif entry_target and open_price >= entry_target:
-                proceeds = open_price * position
-                pnl = proceeds - position_cost
-                capital += proceeds
-                trades.append(_trade("SELL (target)", today, open_price, position, proceeds, pnl))
-                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None
+                sell_px = open_price if cost_model is None else cost_model.apply_sell(open_price)
+                proceeds = sell_px * position
+                commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
+                pnl = proceeds - commission - position_cost
+                capital += proceeds - commission
+                trades.append(_trade("SELL (target)", today, sell_px, position, proceeds, pnl))
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
 
         # ── Trailing stop: once price moves 1R, trail at 0.5R below high-water mark ──
-        # This locks in profit on mid-term trades without exiting too early on momentum.
-        if position > 0 and entry_stop is not None and entry_price_rec and initial_risk:
-            high_today = float(df_full["High"].iloc[i])
-            profit_per_share = high_today - entry_price_rec
+        # No lookahead: high-water mark = high through the PRIOR bar (the most
+        # recent fully-closed bar). The previous version used `iloc[i]`, which
+        # could ratchet the stop using THIS bar's high and then fire the stop
+        # on the same bar's low — a same-bar future read.
+        if position > 0 and entry_stop is not None and entry_price_rec and initial_risk and i > 0:
+            high_prior = float(df_full["High"].iloc[i - 1])
+            profit_per_share = high_prior - entry_price_rec
             if profit_per_share >= initial_risk:
-                # Move stop to: high_water_mark - 0.5R (trail tightly after 1R gain)
-                trail_stop = high_today - 0.5 * initial_risk
+                trail_stop = high_prior - 0.5 * initial_risk
                 if trail_stop > entry_stop:
                     entry_stop = trail_stop
 
@@ -216,17 +247,35 @@ def run_perplexity_backtest(
             low_today = float(df_full["Low"].iloc[i])
             high_today = float(df_full["High"].iloc[i])
             if low_today <= entry_stop:
-                pnl = entry_stop * position - position_cost
-                capital += entry_stop * position
-                trades.append(_trade("SELL (stop)", today, entry_stop, position,
-                                     entry_stop * position, pnl))
-                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None
+                sell_px = entry_stop if cost_model is None else cost_model.apply_sell(entry_stop)
+                proceeds = sell_px * position
+                commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
+                pnl = proceeds - commission - position_cost
+                capital += proceeds - commission
+                trades.append(_trade("SELL (stop)", today, sell_px, position, proceeds, pnl))
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
             elif entry_target and high_today >= entry_target:
-                pnl = entry_target * position - position_cost
-                capital += entry_target * position
-                trades.append(_trade("SELL (target)", today, entry_target, position,
-                                     entry_target * position, pnl))
-                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None
+                sell_px = entry_target if cost_model is None else cost_model.apply_sell(entry_target)
+                proceeds = sell_px * position
+                commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
+                pnl = proceeds - commission - position_cost
+                capital += proceeds - commission
+                trades.append(_trade("SELL (target)", today, sell_px, position, proceeds, pnl))
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
+
+        # ── Time exit: max_hold_bars budget exceeded ─────────────
+        # Closes at this bar's CLOSE to mirror strategy-driven SELL convention
+        # (the engine's existing SELL block uses fill_price = open, but a time
+        # exit conceptually fires AT the close of the budget bar — same as how
+        # the day-trading simulator treats max_hold).
+        if position > 0 and bars_held >= max_hold_bars:
+            sell_px = current_close if cost_model is None else cost_model.apply_sell(current_close)
+            proceeds = sell_px * position
+            commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
+            pnl = proceeds - commission - position_cost
+            capital += proceeds - commission
+            trades.append(_trade("SELL (time)", today, sell_px, position, proceeds, pnl))
+            position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
 
         # ── Run strategy signal ──────────────────────────────────
         regime = _regime_from_spy(spy_raw, df_full.index[i - 1])
@@ -276,20 +325,24 @@ def run_perplexity_backtest(
                     trade_risk = 0.0
 
                 qty = round(qty, 6)
-                if qty >= 0.001 and fill_price * qty <= capital:
-                    cost = fill_price * qty
-                    capital -= cost
+                # cost-adjusted buy price: cost_model=None → buy_px==fill_price (identity)
+                buy_px = fill_price if cost_model is None else cost_model.apply_buy(fill_price)
+                if qty >= 0.001 and buy_px * qty <= capital:
+                    cost = buy_px * qty
+                    commission = 0.0 if cost_model is None else cost_model.entry_commission(qty, cost)
+                    capital -= cost + commission
                     position = qty
-                    position_cost = cost
+                    position_cost = cost + commission
                     open_risk_usd += trade_risk
                     entry_stop      = sig.stop_price
                     entry_target    = sig.target_price
-                    entry_price_rec = fill_price
-                    initial_risk    = (fill_price - sig.stop_price) if sig.stop_price else None
+                    entry_price_rec = buy_px
+                    initial_risk    = (buy_px - sig.stop_price) if sig.stop_price else None
+                    bars_held = 0
                     atr_pct = round(_current_atr(df_slice) / fill_price * 100, 3) if fill_price else 0.0
                     trades.append({
                         "date": today, "side": "BUY",
-                        "price": round(fill_price, 2), "quantity": round(qty, 4),
+                        "price": round(buy_px, 2), "quantity": round(qty, 4),
                         "value": round(cost, 2), "pnl": None,
                         "stop": round(sig.stop_price, 2) if sig.stop_price else None,
                         "target": round(sig.target_price, 2) if sig.target_price else None,
@@ -301,6 +354,7 @@ def run_perplexity_backtest(
                         "volatility_bucket": volatility_bucket,
                         "strategy_name": strategy.name,
                         "symbol": symbol,
+                        "commission": round(commission, 4),
                     })
 
         elif position > 0:
@@ -316,12 +370,14 @@ def run_perplexity_backtest(
                 sig = None
 
             if sig and sig.direction == "SELL":
-                proceeds = fill_price * position
-                pnl = proceeds - position_cost
-                capital += proceeds
+                sell_px = fill_price if cost_model is None else cost_model.apply_sell(fill_price)
+                proceeds = sell_px * position
+                commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
+                pnl = proceeds - commission - position_cost
+                capital += proceeds - commission
                 trades.append({
                     "date": today, "side": "SELL",
-                    "price": round(fill_price, 2), "quantity": position,
+                    "price": round(sell_px, 2), "quantity": position,
                     "value": round(proceeds, 2), "pnl": round(pnl, 2),
                     "stop": None, "target": None,
                     "confidence": sig.confidence if sig else None,
@@ -330,8 +386,9 @@ def run_perplexity_backtest(
                     "regime": regime.value,
                     "strategy_name": strategy.name,
                     "symbol": symbol,
+                    "commission": round(commission, 4),
                 })
-                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
 
         # ── Mark-to-market ───────────────────────────────────────
         equity = capital + position * current_close
@@ -350,10 +407,12 @@ def run_perplexity_backtest(
     # Close any open position at last close
     if position > 0:
         last_price = float(df_full["Close"].iloc[-1])
-        proceeds = last_price * position
-        pnl = proceeds - position_cost
-        capital += proceeds
-        trades.append(_trade("SELL (close)", dates[-1], last_price, position, proceeds, pnl))
+        sell_px = last_price if cost_model is None else cost_model.apply_sell(last_price)
+        proceeds = sell_px * position
+        commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
+        pnl = proceeds - commission - position_cost
+        capital += proceeds - commission
+        trades.append(_trade("SELL (close)", dates[-1], sell_px, position, proceeds, pnl))
 
     final_capital = capital
     total_pnl = final_capital - initial_capital
