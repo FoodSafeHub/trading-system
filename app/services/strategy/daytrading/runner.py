@@ -15,6 +15,9 @@ from app.services.strategy.daytrading.brain.config_adjuster import ConfigAdjuste
 from app.services.strategy.daytrading.brain.strategy_selector import StrategySelector
 from app.services.strategy.daytrading.brain.symbol_profiles import SymbolAnalyzer
 from app.services.strategy.daytrading.brain.trade_explainer import TradeExplainer
+from app.services.strategy.daytrading.backtest_exit_simulator import (
+    SimulatedExit, aggregate_pnl, simulate_exit,
+)
 from app.services.strategy.daytrading.execution.fill_simulator import FillConfig, FillSimulator
 from app.services.strategy.daytrading.market_open import (
     ET,
@@ -27,6 +30,9 @@ from app.services.strategy.daytrading.market_open import (
     regime_allows_strategy,
 )
 from app.services.strategy.daytrading.models import DayTradeSignal
+from app.services.strategy.daytrading.risk_templates import (
+    get_symbol_bucket, position_size as risk_position_size,
+)
 from app.services.strategy.daytrading.pipeline_diagnostics import (
     PipelineDiagnostics, _categorise_rejection,
 )
@@ -650,7 +656,6 @@ def run_backtest(
             entry = sig.entry_price
             stop = sig.stop_price
             target = sig.target_price
-            position_size = (equity * position_pct) / entry
 
             sig_time = pd.Timestamp(sig.signal_time)
             future_bars = day_5m[day_5m.index > sig_time]
@@ -660,6 +665,24 @@ def run_backtest(
                 logger.debug(
                     "run_backtest: %s %s no future bars after signal at %s — skipping",
                     symbol, strategy_name, sig_time,
+                )
+                continue
+
+            # ── Position size: bucket-aware risk-based sizing ──────────────
+            # Stop distance determines size so a 0.4–0.6%-of-equity loss limit
+            # is honored regardless of the strategy's stop width. `position_pct`
+            # remains as a notional cap so a tiny stop can't oversize.
+            market = "NSE" if _is_india_for_sizing(symbol) else "US"
+            bucket = get_symbol_bucket(symbol, market=market)
+            position_size = _risk_based_size(
+                equity=equity, bucket=bucket,
+                entry=entry, stop=stop, notional_cap_pct=position_pct,
+            )
+            if position_size <= 0:
+                diag.trades_skipped_no_future_bars += 1   # reused: invalid trade
+                logger.debug(
+                    "run_backtest: %s %s zero size (entry=%.4f stop=%.4f bucket=%s) — skipping",
+                    symbol, strategy_name, entry, stop, bucket,
                 )
                 continue
 
@@ -675,53 +698,27 @@ def run_backtest(
             except Exception:
                 pass
 
-            outcome = "OPEN"
-            exit_price = entry
-            exit_time = sig_time
-            hold_bars = 0
-
-            for _, bar in future_bars.iterrows():
-                hold_bars += 1
-                bar_high = float(bar["High"])
-                bar_low = float(bar["Low"])
-
-                if sig.direction == "BUY":
-                    if bar_low <= stop:
-                        exit_price = stop
-                        outcome = "STOPPED"
-                        exit_time = bar.name
-                        break
-                    if bar_high >= target:
-                        exit_price = target
-                        outcome = "TARGET"
-                        exit_time = bar.name
-                        break
-                else:  # SELL SHORT
-                    if bar_high >= stop:
-                        exit_price = stop
-                        outcome = "STOPPED"
-                        exit_time = bar.name
-                        break
-                    if bar_low <= target:
-                        exit_price = target
-                        outcome = "TARGET"
-                        exit_time = bar.name
-                        break
-
-                if hold_bars >= strategy.default_config.get("max_hold_bars", 60):
-                    exit_price = float(bar["Close"])
-                    outcome = "TIME_EXIT"
-                    exit_time = bar.name
-                    break
-
-            if outcome == "OPEN":
-                exit_price = float(future_bars["Close"].iloc[-1]) if not future_bars.empty else entry
-                exit_time = future_bars.index[-1] if not future_bars.empty else sig_time
-                outcome = "EOD_EXIT"
+            # ── Exit simulation: honor ExitPlan if the strategy emitted one ─
+            sim = simulate_exit(
+                direction=sig.direction,
+                entry_price=entry, initial_stop=stop, initial_target=target,
+                qty=float(position_size), signal_time=sig_time,
+                future_bars=future_bars, exit_plan=sig.exit_plan, symbol=symbol,
+                max_hold_bars_default=strategy.default_config.get("max_hold_bars", 60),
+            )
+            agg = aggregate_pnl(sig.direction, entry, sim)
+            exit_price = agg["exit_price"] if agg["qty"] > 0 else entry
+            exit_time  = sim.legs[-1].time if sim.legs else sig_time
+            outcome    = sim.primary_outcome
+            hold_bars  = sim.hold_bars
 
             diag.trades_closed += 1
 
-            # Fill-simulator: apply commission + slippage to both legs
+            # Fill-simulator: apply commission + slippage to both legs.
+            # Costs are modelled on the full qty for a single round-trip (one
+            # entry leg + one exit leg with the qty-weighted exit price). This
+            # is consistent with how the metrics aggregator treats one signal
+            # as one trade; multi-tranche leg-by-leg fill costs are a follow-up.
             vol_pct = profile.volatility_pct if profile else 1.0
             entry_fill = fill_sim.fill_entry(sig.direction, entry, position_size, vol_pct)
             exit_fill  = fill_sim.fill_exit(sig.direction, exit_price, position_size, vol_pct)
@@ -756,6 +753,17 @@ def run_backtest(
                 "outcome": outcome,
                 "regime": regime,
                 "confidence": sig.confidence,
+                # ExitPlan / sizing diagnostics
+                "bucket": bucket,
+                "position_size": float(position_size),
+                "final_stop": round(sim.final_stop, 4),
+                "breakeven_hit": sim.breakeven_hit,
+                "trail_activated": sim.trail_activated,
+                "exit_legs": [
+                    {"qty": leg.qty, "price": round(leg.price, 4),
+                     "reason": leg.reason, "time": _ts_str(leg.time, _mkt_tz)}
+                    for leg in sim.legs
+                ],
             })
 
     diag.regime_distribution = regime_counts
@@ -824,6 +832,42 @@ def _ts_str(ts, tz=ET) -> str:
     if t.tzinfo is not None:
         t = t.tz_convert(tz).tz_localize(None)
     return t.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _is_india_for_sizing(symbol: str) -> bool:
+    """Used by backtest sizing to pick US vs NSE risk bucket. Safe-defaults to US."""
+    try:
+        from app.services.markets import is_india_symbol
+        return bool(is_india_symbol(symbol))
+    except Exception:
+        return False
+
+
+def _risk_based_size(
+    equity: float, bucket: str, entry: float, stop: float,
+    notional_cap_pct: float = 0.95,
+) -> int:
+    """Risk-budgeted share count, capped by notional exposure.
+
+    Delegates to risk_templates.position_size (the canonical bucket-aware
+    helper) for the risk math, then applies `notional_cap_pct` of equity as a
+    hard ceiling so an unusually tight stop cannot oversize.
+
+    Returns 0 (skip trade) when stop distance or equity is non-positive, when
+    the entry price is non-positive, or when the bucketed share count rounds
+    to 0 even after at-least-1-share floor.
+    """
+    if equity <= 0 or entry <= 0 or abs(entry - stop) <= 0:
+        return 0
+    shares_by_risk = risk_position_size(
+        account_value=equity, bucket=bucket, entry=entry, stop=stop,
+    )
+    if shares_by_risk <= 0:
+        return 0
+    max_shares_by_notional = int((equity * notional_cap_pct) / entry)
+    if max_shares_by_notional <= 0:
+        return 0
+    return min(shares_by_risk, max_shares_by_notional)
 
 
 def _compute_metrics(
@@ -1271,7 +1315,6 @@ def run_backtest_with_brain(
             entry = sig.entry_price
             stop = sig.stop_price
             target = sig.target_price
-            position_size = (equity * position_pct * size_mult) / entry
 
             sig_time = pd.Timestamp(sig.signal_time)
             future_bars = day_5m[day_5m.index > sig_time]
@@ -1280,35 +1323,33 @@ def run_backtest_with_brain(
                 brain_diag.trades_skipped_no_future_bars += 1
                 continue
 
+            # Bucket-aware risk size, then apply brain size_mult, then cap by notional.
+            market = "NSE" if _is_india_for_sizing(symbol) else "US"
+            bucket = get_symbol_bucket(symbol, market=market)
+            base_shares = _risk_based_size(
+                equity=equity, bucket=bucket,
+                entry=entry, stop=stop, notional_cap_pct=position_pct,
+            )
+            position_size = int(base_shares * size_mult) if base_shares > 0 else 0
+            if position_size <= 0:
+                brain_diag.trades_skipped_no_future_bars += 1
+                continue
+
             brain_diag.trades_opened += 1
             brain_diag.accepted_signals += 1
 
-            outcome = "OPEN"
-            exit_price = entry
-            exit_time = sig_time
-            hold_bars = 0
-
-            for _, bar in future_bars.iterrows():
-                hold_bars += 1
-                bar_high = float(bar["High"])
-                bar_low = float(bar["Low"])
-                if sig.direction == "BUY":
-                    if bar_low <= stop:
-                        exit_price = stop; outcome = "STOPPED"; exit_time = bar.name; break
-                    if bar_high >= target:
-                        exit_price = target; outcome = "TARGET"; exit_time = bar.name; break
-                else:
-                    if bar_high >= stop:
-                        exit_price = stop; outcome = "STOPPED"; exit_time = bar.name; break
-                    if bar_low <= target:
-                        exit_price = target; outcome = "TARGET"; exit_time = bar.name; break
-                if hold_bars >= strategy.default_config.get("max_hold_bars", 60):
-                    exit_price = float(bar["Close"]); outcome = "TIME_EXIT"; exit_time = bar.name; break
-
-            if outcome == "OPEN":
-                exit_price = float(future_bars["Close"].iloc[-1]) if not future_bars.empty else entry
-                exit_time = future_bars.index[-1] if not future_bars.empty else sig_time
-                outcome = "EOD_EXIT"
+            sim = simulate_exit(
+                direction=sig.direction,
+                entry_price=entry, initial_stop=stop, initial_target=target,
+                qty=float(position_size), signal_time=sig_time,
+                future_bars=future_bars, exit_plan=sig.exit_plan, symbol=symbol,
+                max_hold_bars_default=strategy.default_config.get("max_hold_bars", 60),
+            )
+            agg = aggregate_pnl(sig.direction, entry, sim)
+            exit_price = agg["exit_price"] if agg["qty"] > 0 else entry
+            exit_time  = sim.legs[-1].time if sim.legs else sig_time
+            outcome    = sim.primary_outcome
+            hold_bars  = sim.hold_bars
 
             brain_diag.trades_closed += 1
             vol_pct = profile.volatility_pct if profile else 1.0
@@ -1348,6 +1389,17 @@ def run_backtest_with_brain(
                 "brain_size_multiplier": size_mult,
                 "market_state": ms.state if ms else "UNKNOWN",
                 "market_state_confidence": round(ms.confidence, 3) if ms else 0.0,
+                # ExitPlan / sizing diagnostics
+                "bucket": bucket,
+                "position_size": float(position_size),
+                "final_stop": round(sim.final_stop, 4),
+                "breakeven_hit": sim.breakeven_hit,
+                "trail_activated": sim.trail_activated,
+                "exit_legs": [
+                    {"qty": leg.qty, "price": round(leg.price, 4),
+                     "reason": leg.reason, "time": _ts_str(leg.time, _mkt_tz)}
+                    for leg in sim.legs
+                ],
             })
 
     brain_result = _compute_metrics(filtered_trades, initial_capital, equity, symbol, strategy_name,
