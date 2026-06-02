@@ -124,6 +124,10 @@ class EmaMeanReversionUptrend(PerplexityStrategy):
     Target: entry × (1 + take_profit_pct/100).
     """
     name = "EMA_Mean_Reversion"
+    # KEEP (decision pass 2026-06-02): live set. Net +$4,549 / 76 trades /
+    # WR 61.8% over 2y. Highest-edge strategy in the stack. Already
+    # calibrated in scanner_profiles.json (AAPL 90%, RELIANCE 83%, BHARTIARTL
+    # 91% WR). Artifact: reports/perplexity_strategy_decisions.md
 
     config: dict = {
         "ema_period":       20,        # kept for UI compatibility (unused in new logic)
@@ -226,6 +230,12 @@ class MaCrossoverRsi(PerplexityStrategy):
     Target: entry + atr_tp_multiplier × ATR.
     """
     name = "MA_Crossover_RSI"
+    # RETIRE (decision pass 2026-06-02): net -$7,102 / 57 trades / WR 40.4%
+    # over 2y on 10 symbols after the corrected harness. Daily EMA-crossover
+    # whipsaw at sub-50% WR; no rescue path without an entry-logic rewrite.
+    # Re-enable: flip enabled back to True after a confirmatory backtest pass.
+    # Artifact: reports/perplexity_strategy_decisions.md
+    enabled: bool = False
 
     config: dict = {
         "ema_fast":      20,       # kept for UI compatibility
@@ -359,6 +369,15 @@ class BreakoutConsolidation(PerplexityStrategy):
     Target: entry + (upper_BB − lower_BB) (one bandwidth extension).
     """
     name = "Breakout_Consolidation"
+    # RESEARCH-ONLY (decision pass 2026-06-02): net +$834 / 18 trades / WR
+    # 55.6% over 2y. Positive but thin sample, and average hold is 15.8d --
+    # trades take too long to either work or fail. Worth a tighter-time-exit
+    # research pass before live deployment.
+    # Re-enable: bump max_hold_bars down (e.g. 15 -> 10), re-benchmark; if
+    # net pnl stays positive and trades >= 20, flip research_only back to
+    # False.
+    # Artifact: reports/perplexity_strategy_decisions.md
+    research_only: bool = True
 
     config: dict = {
         "consolidation_bars":  15,    # kept for UI compatibility
@@ -474,6 +493,9 @@ class BollingerMeanReversionUptrend(PerplexityStrategy):
     Stop : hard_stop_pct % below entry.
     """
     name = "BB_Mean_Reversion"
+    # KEEP (decision pass 2026-06-02): live set. Net +$2,898 / 122 trades /
+    # WR 59% over 2y. Highest trade count + only strategy that survives mild
+    # bear conditions. Artifact: reports/perplexity_strategy_decisions.md
 
     config: dict = {
         "bb_period":      20,      # kept for UI compatibility
@@ -605,6 +627,12 @@ class FibPullbackSupport(PerplexityStrategy):
     Target: take_profit_pct % above entry.
     """
     name = "Fib_Pullback_Support"
+    # RETIRE (decision pass 2026-06-02): net -$11,793 / 97 trades / WR 47%
+    # over 2y -- worst performer in the stack even after max_hold_bars budget
+    # enforcement saved +$5,963. Losers materially exceed winners in $ size.
+    # Re-enable: requires entry-logic rework, not just retuning.
+    # Artifact: reports/perplexity_strategy_decisions.md
+    enabled: bool = False
 
     config: dict = {
         "swing_lookback":   60,       # kept for UI compatibility
@@ -735,6 +763,13 @@ class RsiSwingReversal(PerplexityStrategy):
     Target: entry + atr_tp_mult × ATR
     """
     name = "RSI_Swing_Reversal"
+    # RESEARCH-ONLY (decision pass 2026-06-02): only 2 trades in 2y / 10
+    # symbols. Sample too small to deploy or retire. Genuinely picky entry
+    # filter (RSI<40 then turn-up + EMA50 trend) -- opportunistic, low-freq.
+    # Re-enable: needs a 5y / wider-universe benchmark to accumulate 20+
+    # trades before deciding.
+    # Artifact: reports/perplexity_strategy_decisions.md
+    research_only: bool = True
 
     config: dict = {
         "min_data_bars":     60,
@@ -839,6 +874,12 @@ class SupertrendSwing(PerplexityStrategy):
     Target: entry + rr_target × risk
     """
     name = "Supertrend_Swing"
+    # RETIRE (decision pass 2026-06-02): net -$2,085 / 22 trades / WR 41%
+    # over 2y. Same pathology as the intraday Supertrend -- flips on noise
+    # without a higher-timeframe trend filter.
+    # Re-enable: requires a 15m/daily EMA50 trend gate + min_rr tightening.
+    # Artifact: reports/perplexity_strategy_decisions.md
+    enabled: bool = False
 
     config: dict = {
         "min_data_bars":  30,
@@ -970,6 +1011,13 @@ class BollingerBandBreakout(PerplexityStrategy):
     Target: upper BB + (upper BB - mid BB) — one full band width above breakout
     """
     name = "BB_Breakout"
+    # RETIRE (decision pass 2026-06-02): net -$2,329 / 43 trades / WR 49%
+    # over 2y. Per-trade aggregation confirms true PF=0.80 (the per-symbol
+    # PF average shown in the rollup was upward-biased). The lookahead-fix
+    # specifically targeted this strategy and removed ~$8k of phantom edge.
+    # Re-enable: requires entry-logic rework.
+    # Artifact: reports/perplexity_strategy_decisions.md
+    enabled: bool = False
 
     config: dict = {
         "min_data_bars":   30,

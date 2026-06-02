@@ -101,7 +101,13 @@ def run_perplexity_signal(
     volatility_bucket = bucket_atr_pct(_current_atr(df)) if not df.empty else "unknown"
 
     for strategy in get_perplexity_strategies():
+        # Skip strategies that are off entirely (RETIRE set) or held back from
+        # live signals pending further research (RESEARCH-ONLY / NEEDS-FOLLOW-
+        # UP sets). Backtests still load these via PERPLEXITY_STRATEGIES — the
+        # filter applies only to the LIVE signal path.
         if not strategy.enabled:
+            continue
+        if getattr(strategy, "research_only", False):
             continue
         try:
             sig = strategy.run(

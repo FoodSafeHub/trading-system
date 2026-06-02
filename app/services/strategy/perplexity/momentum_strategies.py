@@ -82,6 +82,14 @@ def _confidence_adjust(snap, base: float) -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 class PerpEngulfingVolumeSurge(PerplexityStrategy):
     name = "Daily_Engulfing_Volume"
+    # NEEDS-FOLLOW-UP (decision pass 2026-06-02): emits short-side SELL
+    # entries that the perplexity engine currently drops (long-only execution
+    # path). Long-side alone shows +$793 / 3 trades -- half the strategy's
+    # surface area is dark. Verdict deferred.
+    # Re-enable: clear research_only after the engine grows a short-entry
+    # path (or after this strategy stops emitting SELL for bearish patterns).
+    # Artifact: reports/perplexity_strategy_decisions.md
+    research_only: bool = True
 
     config: dict = {
         "min_data_bars":   60,
@@ -149,6 +157,11 @@ class PerpEngulfingVolumeSurge(PerplexityStrategy):
 # ══════════════════════════════════════════════════════════════════════════════
 class PerpNarrowRangeBreakout(PerplexityStrategy):
     name = "Daily_NR_Breakout"
+    # NEEDS-FOLLOW-UP (decision pass 2026-06-02): same short-side dropping
+    # issue as the other daily-candle patterns. Long-side: +$1,506 / 2 trades
+    # -- too sparse + half the surface dark to call.
+    # Artifact: reports/perplexity_strategy_decisions.md
+    research_only: bool = True
 
     config: dict = {
         "min_data_bars":   60,
@@ -232,6 +245,10 @@ class PerpNarrowRangeBreakout(PerplexityStrategy):
 # ══════════════════════════════════════════════════════════════════════════════
 class PerpThreeBarPush(PerplexityStrategy):
     name = "Daily_Three_Bar_Push"
+    # NEEDS-FOLLOW-UP (decision pass 2026-06-02): same short-side dropping
+    # issue. Long-side: -$567 / 2 trades.
+    # Artifact: reports/perplexity_strategy_decisions.md
+    research_only: bool = True
 
     config: dict = {
         "min_data_bars":  60,
@@ -299,6 +316,10 @@ class PerpThreeBarPush(PerplexityStrategy):
 # ══════════════════════════════════════════════════════════════════════════════
 class PerpHammerShootingStar(PerplexityStrategy):
     name = "Daily_Hammer_Star"
+    # NEEDS-FOLLOW-UP (decision pass 2026-06-02): same short-side dropping
+    # issue. Long-side: +$900 / 2 trades.
+    # Artifact: reports/perplexity_strategy_decisions.md
+    research_only: bool = True
 
     config: dict = {
         "min_data_bars":    60,

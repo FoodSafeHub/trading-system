@@ -32,6 +32,12 @@ from app.services.market_regime import MarketRegime
 class PerplexityStrategy:
     name: str = "base"
     enabled: bool = True
+    # When True, the strategy code is kept and remains importable / runnable
+    # in backtests, but the LIVE runner (`run_perplexity_signal`) skips it.
+    # Used by the decision pass to hold strategies for further research
+    # without deleting their implementation. See:
+    #   reports/perplexity_strategy_decisions.md
+    research_only: bool = False
 
     def run(
         self,
