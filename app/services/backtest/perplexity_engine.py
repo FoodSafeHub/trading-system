@@ -107,20 +107,34 @@ def _current_atr(df: pd.DataFrame, period: int = 14) -> float:
 
 def _regime_from_spy(spy_close: pd.Series, as_of_date: pd.Timestamp) -> MarketRegime:
     """
-    Compute market regime from SPY SMA200 as of a specific date.
-    Uses the SPY close series pre-fetched for the full backtest period.
-    Falls back to BULL if SPY data doesn't reach that date.
+    Point-in-time market regime from SPY close series.
+
+    Delegates to the live :func:`detect_market_regime` (the same function the
+    scheduler / scanner / live signal path call via ``get_current_regime``) so
+    the backtest cannot disagree with live on the same SPY history. The
+    previous inline classifier diverged from live on two material points:
+        * BULL gate omitted the SMA(50) >= SMA(200) cross check, so the
+          "death-cross" window above SMA200 was labelled BULL in backtest
+          and BEAR in live.
+        * DEEP_BEAR threshold was ``close < 0.80 * SMA200`` instead of
+          ``close < SMA200 AND drawdown from 52w high <= -20%`` — different
+          condition, different label.
+
+    Build a minimal ``DataFrame`` with a ``Close`` column so the live function
+    can consume it; the bar warm-up requirements (200 closes) are inherited.
+
+    Falls back to BULL only when the SPY history hasn't accumulated enough
+    bars yet (same fallback the prior implementation used).
     """
     history = spy_close.loc[spy_close.index <= as_of_date]
-    if len(history) < 50:
+    if len(history) < 200:
+        # Live function requires 200 bars; for early backtest dates we keep the
+        # legacy BULL fallback rather than throwing — matches prior behaviour.
         return MarketRegime.BULL
-    sma200 = float(history.rolling(200).mean().iloc[-1]) if len(history) >= 200 else float(history.mean())
-    c = float(history.iloc[-1])
-    if c < sma200 * 0.80:
-        return MarketRegime.DEEP_BEAR
-    if c < sma200:
-        return MarketRegime.BEAR
-    return MarketRegime.BULL
+    # Import here to avoid a circular import at module load (market_regime
+    # imports get_ohlcv which transitively imports backtest helpers in tests).
+    from app.services.market_regime import detect_market_regime
+    return detect_market_regime(pd.DataFrame({"Close": history}))
 
 
 def run_perplexity_backtest(

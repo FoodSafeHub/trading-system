@@ -15,9 +15,13 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+from app.services.backtest.costs import CostModel
 from app.services.backtest.perplexity_engine import calc_cagr, calc_total_return
 from app.services.market_data.provider import get_ohlcv
 from app.services.strategy.perplexity.base import PerplexityStrategy
+
+# Engine-level default when a strategy doesn't declare a budget.
+_DEFAULT_MAX_HOLD_BARS = 60
 
 
 @dataclass
@@ -64,6 +68,7 @@ def run_portfolio_backtest(
     initial_capital: float = 100_000.0,
     position_pct: float = 0.20,      # % of portfolio equity per position
     max_open_positions: int = 5,     # never hold more than this many symbols at once
+    cost_model: Optional[CostModel] = None,  # opt-in slippage/commission; None == identity (baseline byte-equivalent)
 ) -> PortfolioBacktestResult:
     """
     Run one strategy over a portfolio of symbols with shared capital.
@@ -93,9 +98,17 @@ def run_portfolio_backtest(
 
     lookback = 210  # need SMA200
 
+    # Read the strategy's own time-budget; same convention as perplexity_engine.
+    try:
+        max_hold_bars = int(getattr(strategy, "config", {}).get("max_hold_bars", _DEFAULT_MAX_HOLD_BARS))
+    except Exception:
+        max_hold_bars = _DEFAULT_MAX_HOLD_BARS
+    if max_hold_bars <= 0:
+        max_hold_bars = _DEFAULT_MAX_HOLD_BARS
+
     # ── State ─────────────────────────────────────────────────
     capital = initial_capital
-    # positions[sym] = {qty, cost, stop, target}
+    # positions[sym] = {qty, cost, stop, target, bars_held}
     positions: Dict[str, dict] = {}
 
     all_trades: List[dict] = []
@@ -137,27 +150,56 @@ def run_portfolio_backtest(
             low  = float(df["Low"].iloc[iloc])
             high = float(df["High"].iloc[iloc])
 
+            # Count a holding day BEFORE intra-bar exit checks so the bar a
+            # stop/target/time-exit fires on counts towards the budget.
+            pos["bars_held"] = pos.get("bars_held", 0) + 1
+
             if pos["stop"] and low <= pos["stop"]:
-                proceeds = pos["stop"] * pos["qty"]
-                pnl = proceeds - pos["cost"]
-                capital += proceeds
+                sell_px = pos["stop"] if cost_model is None else cost_model.apply_sell(pos["stop"])
+                proceeds = sell_px * pos["qty"]
+                commission = 0.0 if cost_model is None else cost_model.exit_commission(pos["qty"], proceeds)
+                pnl = proceeds - commission - pos["cost"]
+                capital += proceeds - commission
                 position_value -= pos["qty"] * close  # already counted above
                 all_trades.append({
                     "date": today, "symbol": sym, "side": "SELL (stop)",
-                    "price": round(pos["stop"], 2), "quantity": round(pos["qty"], 4),
+                    "price": round(sell_px, 2), "quantity": round(pos["qty"], 4),
                     "value": round(proceeds, 2), "pnl": round(pnl, 2), "reason": "stop hit",
+                    "commission": round(commission, 4),
                 })
                 del positions[sym]
                 continue
 
             if pos["target"] and high >= pos["target"]:
-                proceeds = pos["target"] * pos["qty"]
-                pnl = proceeds - pos["cost"]
-                capital += proceeds
+                sell_px = pos["target"] if cost_model is None else cost_model.apply_sell(pos["target"])
+                proceeds = sell_px * pos["qty"]
+                commission = 0.0 if cost_model is None else cost_model.exit_commission(pos["qty"], proceeds)
+                pnl = proceeds - commission - pos["cost"]
+                capital += proceeds - commission
                 all_trades.append({
                     "date": today, "symbol": sym, "side": "SELL (target)",
-                    "price": round(pos["target"], 2), "quantity": round(pos["qty"], 4),
+                    "price": round(sell_px, 2), "quantity": round(pos["qty"], 4),
                     "value": round(proceeds, 2), "pnl": round(pnl, 2), "reason": "target hit",
+                    "commission": round(commission, 4),
+                })
+                del positions[sym]
+                continue
+
+            # Time exit: this bar's CLOSE if max_hold_bars budget exceeded.
+            # Mirrors perplexity_engine's "SELL (time)" convention so the
+            # downstream metrics aggregator treats it consistently.
+            if pos["bars_held"] >= max_hold_bars:
+                sell_px = close if cost_model is None else cost_model.apply_sell(close)
+                proceeds = sell_px * pos["qty"]
+                commission = 0.0 if cost_model is None else cost_model.exit_commission(pos["qty"], proceeds)
+                pnl = proceeds - commission - pos["cost"]
+                capital += proceeds - commission
+                all_trades.append({
+                    "date": today, "symbol": sym, "side": "SELL (time)",
+                    "price": round(sell_px, 2), "quantity": round(pos["qty"], 4),
+                    "value": round(proceeds, 2), "pnl": round(pnl, 2),
+                    "reason": f"max_hold_bars={max_hold_bars} reached",
+                    "commission": round(commission, 4),
                 })
                 del positions[sym]
                 continue
@@ -188,22 +230,28 @@ def run_portfolio_backtest(
                     alloc = equity_now * position_pct
                     if alloc > capital:
                         alloc = capital  # can't spend more than free cash
-                    qty = alloc / fill_price if fill_price > 0 else 0.0
+                    # cost-adjusted buy price: cost_model=None → identity
+                    buy_px = fill_price if cost_model is None else cost_model.apply_buy(fill_price)
+                    qty = alloc / buy_px if buy_px > 0 else 0.0
                     qty = round(qty, 6)
-                    cost = fill_price * qty
-                    if qty >= 0.001 and cost <= capital:
-                        capital -= cost
+                    cost = buy_px * qty
+                    commission = 0.0 if cost_model is None else cost_model.entry_commission(qty, cost)
+                    if qty >= 0.001 and cost + commission <= capital:
+                        capital -= cost + commission
                         positions[sym] = {
-                            "qty": qty, "cost": cost,
+                            "qty": qty,
+                            "cost": cost + commission,   # include entry commission in cost basis
                             "stop": sig.stop_price,
                             "target": sig.target_price,
-                            "last_price": fill_price,
+                            "last_price": buy_px,
+                            "bars_held": 0,
                         }
                         all_trades.append({
                             "date": today, "symbol": sym, "side": "BUY",
-                            "price": round(fill_price, 2), "quantity": round(qty, 4),
+                            "price": round(buy_px, 2), "quantity": round(qty, 4),
                             "value": round(cost, 2), "pnl": None,
                             "reason": sig.reason or "",
+                            "commission": round(commission, 4),
                         })
             else:
                 # Check for SELL signal
@@ -214,14 +262,17 @@ def run_portfolio_backtest(
 
                 if sig and sig.direction == "SELL" and sym in positions:
                     pos = positions[sym]
-                    proceeds = fill_price * pos["qty"]
-                    pnl = proceeds - pos["cost"]
-                    capital += proceeds
+                    sell_px = fill_price if cost_model is None else cost_model.apply_sell(fill_price)
+                    proceeds = sell_px * pos["qty"]
+                    commission = 0.0 if cost_model is None else cost_model.exit_commission(pos["qty"], proceeds)
+                    pnl = proceeds - commission - pos["cost"]
+                    capital += proceeds - commission
                     all_trades.append({
                         "date": today, "symbol": sym, "side": "SELL",
-                        "price": round(fill_price, 2), "quantity": round(pos["qty"], 4),
+                        "price": round(sell_px, 2), "quantity": round(pos["qty"], 4),
                         "value": round(proceeds, 2), "pnl": round(pnl, 2),
                         "reason": sig.reason or "",
+                        "commission": round(commission, 4),
                     })
                     del positions[sym]
 
@@ -252,13 +303,16 @@ def run_portfolio_backtest(
         df = raw.get(sym)
         if df is not None:
             last_close = float(df["Close"].iloc[-1])
-            proceeds = last_close * pos["qty"]
-            pnl = proceeds - pos["cost"]
-            capital += proceeds
+            sell_px = last_close if cost_model is None else cost_model.apply_sell(last_close)
+            proceeds = sell_px * pos["qty"]
+            commission = 0.0 if cost_model is None else cost_model.exit_commission(pos["qty"], proceeds)
+            pnl = proceeds - commission - pos["cost"]
+            capital += proceeds - commission
             all_trades.append({
                 "date": last_date, "symbol": sym, "side": "SELL (close)",
-                "price": round(last_close, 2), "quantity": round(pos["qty"], 4),
+                "price": round(sell_px, 2), "quantity": round(pos["qty"], 4),
                 "value": round(proceeds, 2), "pnl": round(pnl, 2), "reason": "end of backtest",
+                "commission": round(commission, 4),
             })
 
     final_capital = capital
