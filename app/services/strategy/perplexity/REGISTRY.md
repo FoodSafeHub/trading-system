@@ -1,8 +1,9 @@
 # Perplexity strategy registry — current decision pass
 
-**As of 2026-06-02 (5y re-evaluation).** Authoritative source artifacts:
+**As of 2026-06-02 (truthful-regime re-evaluation).** Authoritative source artifacts:
 - [`reports/perplexity_strategy_decisions.md`](../../../../reports/perplexity_strategy_decisions.md) — original 2y decision pass
-- [`reports/perplexity_5y_research_verdicts.md`](../../../../reports/perplexity_5y_research_verdicts.md) — 5y re-evaluation that promoted 5 strategies
+- [`reports/perplexity_5y_research_verdicts.md`](../../../../reports/perplexity_5y_research_verdicts.md) — 5y re-evaluation that promoted 5 strategies (then partly reversed by the truthful-regime pass below)
+- [`reports/perplexity_truthful_regime_verdicts.md`](../../../../reports/perplexity_truthful_regime_verdicts.md) — point-in-time momentum regime closed a backtest-side data leak; flipped 2 candle patterns from KEEP back to RETIRE
 
 Two class-level flags control deployment:
 
@@ -21,21 +22,24 @@ From the 2y pass:
 - `EMA_Mean_Reversion` — net +$4,549 / 76 trades / WR 61.8% (2y, costed)
 - `BB_Mean_Reversion`  — net +$2,898 / 122 trades / WR 59% (2y, costed)
 
-Promoted by the 5y re-evaluation:
-- `Daily_Three_Bar_Push` — net +$6,511 / 26 trades / WR 65.4% (5y)
-- `Daily_Engulfing_Volume` — net +$2,756 / 9 trades / WR 66.7% (5y)
-- `Breakout_Consolidation` — net +$2,227 / 66 trades / WR 60.6% (5y)
-- `Daily_NR_Breakout` — net +$1,392 / 13 trades / WR 61.5% (5y) — **borderline**
-- `Daily_Hammer_Star` — net +$896 / 11 trades / WR 63.6% (5y) — **borderline**
+Surviving the truthful-regime 5y re-evaluation:
+- `Daily_Three_Bar_Push` — net +$6,525 / 50 trades / WR 54% / PF 2.34 (5y)
+- `Daily_Hammer_Star`    — net +$3,725 / 11 trades / WR **81.8%** (5y) — improved under truthful regime
+- `Breakout_Consolidation` — net +$2,179 / 66 trades / WR 60.6% (5y) — unaffected (not momentum-gated)
 
 ### RESEARCH-ONLY (still too sparse to deploy)
 - `RSI_Swing_Reversal` — net +$1,011 / **only 5 trades** in 5y / 10 symbols. Needs a wider universe before deciding.
 
 ### RETIRE (off; code preserved for future re-enablement)
+From the 2y decision pass:
 - `Supertrend_Swing` — net −$2,085 / 22 trades / WR 41%
 - `BB_Breakout`     — net −$2,329 / 43 trades / WR 49% (true PF=0.80)
 - `MA_Crossover_RSI` — net −$7,102 / 57 trades / WR 40%
 - `Fib_Pullback_Support` — net −$11,793 / 97 trades / WR 47% (worst performer)
+
+Newly retired by the truthful-regime 5y re-evaluation (the leaky-regime KEEP labels were artefacts of suppressed entries):
+- `Daily_Engulfing_Volume` — net −$349 / 23 trades / WR 43.5% (5y truthful) — flipped from +$2,756 KEEP
+- `Daily_NR_Breakout`      — net −$2,669 / 36 trades / WR 44.4% (5y truthful) — flipped from +$1,392 KEEP
 
 ## How to re-evaluate or re-enable a strategy
 

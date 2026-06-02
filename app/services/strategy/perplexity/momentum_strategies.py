@@ -38,13 +38,22 @@ from app.services.strategy.perplexity.base import (
 
 # ── Regime gating helpers ─────────────────────────────────────────────────────
 
-def _momentum_snapshot(symbol: str | None = None):
+def _momentum_snapshot(symbol: str | None = None, injected=None):
     """Regime snapshot for the symbol's home market.
 
     India symbols gate on Nifty 50 / India VIX; everything else on SPY / ^VIX.
     Picking the wrong benchmark silently corrupts the gate (e.g. an Indian
     stock being suppressed because the US tape is weak), so route by symbol.
+
+    During BACKTESTS the engine pre-computes a point-in-time snapshot for the
+    current bar (via market_regime_advanced.get_momentum_regime_at) and passes
+    it through as ``injected``. We use it verbatim — never call the live
+    helper from a backtest loop or every historical bar would see the same
+    live tape (data leak). When ``injected`` is None we fall back to live,
+    which is the production signal path.
     """
+    if injected is not None:
+        return injected
     try:
         market = "india" if (symbol and is_india_symbol(symbol)) else "us"
         return get_momentum_regime(market=market)
@@ -82,12 +91,16 @@ def _confidence_adjust(snap, base: float) -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 class PerpEngulfingVolumeSurge(PerplexityStrategy):
     name = "Daily_Engulfing_Volume"
-    # KEEP (5y re-evaluation 2026-06-02): net +$2,756 / 9 trades / WR 66.7%
-    # over 5y. Short-side engine path now wired; this strategy's short branch
-    # is still 0-trade because momentum_strategies' regime gate uses LIVE
-    # state in backtest (separate follow-up), but the long-side edge is
-    # consistent enough to keep live.
-    # Artifact: reports/perplexity_5y_research_verdicts.md
+    # RETIRE (truthful-regime re-evaluation 2026-06-02): under point-in-time
+    # momentum regime the long-side picks up to 20 trades (from 9) plus 3
+    # shorts -- and net P&L FLIPS from +$2,756 to -$349. WR collapses 66.7%
+    # -> 43.5%. The prior KEEP verdict was an artifact of the leaky live-
+    # regime gate that kept the long branch quiet (so only a small high-
+    # quality slice ran). Truthful evaluation exposes a weak edge.
+    # Re-enable: requires entry-logic rework (not retuning) and a fresh
+    # benchmark on the truthful harness.
+    # Artifact: reports/perplexity_truthful_regime_verdicts.md
+    enabled: bool = False
 
     config: dict = {
         "min_data_bars":   60,
@@ -102,7 +115,7 @@ class PerpEngulfingVolumeSurge(PerplexityStrategy):
         if len(df) < cfg["min_data_bars"]:
             return self._hold(symbol, "not enough data")
 
-        snap = _momentum_snapshot(symbol)
+        snap = _momentum_snapshot(symbol, injected=kwargs.get("momentum_snapshot"))
         atr = cp.current_atr(df, 14)
         if atr <= 0:
             return self._hold(symbol, "ATR=0")
@@ -155,10 +168,14 @@ class PerpEngulfingVolumeSurge(PerplexityStrategy):
 # ══════════════════════════════════════════════════════════════════════════════
 class PerpNarrowRangeBreakout(PerplexityStrategy):
     name = "Daily_NR_Breakout"
-    # KEEP -- BORDERLINE (5y re-evaluation 2026-06-02): net +$1,392 / 13
-    # trades / WR 61.5% over 5y. 13 trades is just under the 20-trade
-    # comfort threshold; trades pay (PF 1.83) and direction is consistent.
-    # Artifact: reports/perplexity_5y_research_verdicts.md
+    # RETIRE (truthful-regime re-evaluation 2026-06-02): under point-in-time
+    # momentum regime trades grow 13 -> 36 (4 shorts) and net P&L flips
+    # +$1,392 -> -$2,669. WR collapses 61.5% -> 44.4%. Same pattern as
+    # Daily_Engulfing_Volume: prior borderline KEEP was a sampling artifact
+    # of the live-regime leak suppressing entries.
+    # Re-enable: requires entry-logic rework, not retuning.
+    # Artifact: reports/perplexity_truthful_regime_verdicts.md
+    enabled: bool = False
 
     config: dict = {
         "min_data_bars":   60,
@@ -175,7 +192,7 @@ class PerpNarrowRangeBreakout(PerplexityStrategy):
         if len(df) < cfg["min_data_bars"]:
             return self._hold(symbol, "not enough data")
 
-        snap = _momentum_snapshot(symbol)
+        snap = _momentum_snapshot(symbol, injected=kwargs.get("momentum_snapshot"))
         is_compressed = (
             cp.is_nr7(df, -2) if cfg["use_nr7"] else (cp.is_nr4(df, -2) or cp.is_inside_bar(df, -2))
         )
@@ -242,10 +259,12 @@ class PerpNarrowRangeBreakout(PerplexityStrategy):
 # ══════════════════════════════════════════════════════════════════════════════
 class PerpThreeBarPush(PerplexityStrategy):
     name = "Daily_Three_Bar_Push"
-    # KEEP (5y re-evaluation 2026-06-02): net +$6,511 / 26 trades / WR 65.4%
-    # over 5y. Most-improved on more data -- the 2y -$567 verdict was
-    # sample noise. Strongest of the four daily-candle patterns.
-    # Artifact: reports/perplexity_5y_research_verdicts.md
+    # KEEP (truthful-regime re-evaluation 2026-06-02): trades grow 26 -> 50
+    # (7 shorts, 43 longs) and net P&L holds at +$6,525 (essentially flat
+    # vs +$6,511 prior). WR dropped 65.4 -> 54.0% as more marginal trades
+    # entered the sample, but PF stayed 2.34 -- the long-side edge is real.
+    # Survived the truthful re-evaluation. Live set.
+    # Artifact: reports/perplexity_truthful_regime_verdicts.md
 
     config: dict = {
         "min_data_bars":  60,
@@ -260,7 +279,7 @@ class PerpThreeBarPush(PerplexityStrategy):
         if len(df) < cfg["min_data_bars"]:
             return self._hold(symbol, "not enough data")
 
-        snap = _momentum_snapshot(symbol)
+        snap = _momentum_snapshot(symbol, injected=kwargs.get("momentum_snapshot"))
         atr = cp.current_atr(df, 14)
         if atr <= 0:
             return self._hold(symbol, "ATR=0")
@@ -313,10 +332,11 @@ class PerpThreeBarPush(PerplexityStrategy):
 # ══════════════════════════════════════════════════════════════════════════════
 class PerpHammerShootingStar(PerplexityStrategy):
     name = "Daily_Hammer_Star"
-    # KEEP -- BORDERLINE (5y re-evaluation 2026-06-02): net +$896 / 11
-    # trades / WR 63.6% over 5y. 11 trades is the thinnest of the kept set;
-    # PF 1.57 / hold 3.7d / direction consistent. On the right side of zero.
-    # Artifact: reports/perplexity_5y_research_verdicts.md
+    # KEEP (truthful-regime re-evaluation 2026-06-02): trade count is
+    # unchanged (11) but WR climbed 63.6 -> 81.8% and net P&L rose
+    # +$896 -> +$3,725 under the corrected regime gate. PF 1.11. Borderline
+    # was an artefact of the leak; the truthful number is materially better.
+    # Live set. Artifact: reports/perplexity_truthful_regime_verdicts.md
 
     config: dict = {
         "min_data_bars":    60,
@@ -346,7 +366,7 @@ class PerpHammerShootingStar(PerplexityStrategy):
         if len(df) < cfg["min_data_bars"]:
             return self._hold(symbol, "not enough data")
 
-        snap = _momentum_snapshot(symbol)
+        snap = _momentum_snapshot(symbol, injected=kwargs.get("momentum_snapshot"))
         atr = cp.current_atr(df, 14)
         if atr <= 0:
             return self._hold(symbol, "ATR=0")

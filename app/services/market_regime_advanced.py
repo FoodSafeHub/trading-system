@@ -267,3 +267,146 @@ def get_momentum_regime(*, refresh: bool = False, market: str = "us") -> RegimeS
 def clear_cache() -> None:
     _CACHE.clear()
     _breadth_cache_by_market.clear()
+
+
+# ── Point-in-time historical regime (for backtests) ──────────────────────────
+#
+# The default get_momentum_regime() fetches LIVE data and is cached for the
+# current session — fine for live signal generation, fatal in a backtest loop
+# where every historical bar would see the same live snapshot (a lookahead /
+# leak). get_momentum_regime_at() takes pre-sliced point-in-time inputs and
+# runs the same classifier, so backtests can compute one snapshot per bar
+# without any reference to "today".
+#
+# Inputs are deliberately series-shaped, not single floats: the classifier
+# needs SMA(50) and SMA(200), and the caller controls the slice so we cannot
+# accidentally peek beyond as_of_date.
+
+
+def _classify(
+    label: str,
+    close: float,
+    sma50: float,
+    sma200: float,
+    vix: Optional[float],
+    vix_hot: float,
+    breadth: Optional[float],
+) -> tuple[MomentumRegime, list[str]]:
+    """Pure classifier — same logic as get_momentum_regime, no I/O.
+
+    Returns (regime, reasons). Used by both the live path and the
+    historical point-in-time path so behaviour cannot diverge.
+    """
+    import math
+    if any(map(math.isnan, (close, sma50, sma200))):
+        return MomentumRegime.NO_TRADE, [f"{label} insufficient history for SMAs"]
+
+    spy_above_200 = close > sma200
+    spy_above_50 = close > sma50
+    vix_ok = (vix is None) or (vix < vix_hot)
+    breadth_ok = (breadth is None) or (breadth >= 50.0)
+
+    reasons: list[str] = []
+    if spy_above_200 and spy_above_50 and vix_ok and breadth_ok:
+        regime = MomentumRegime.BULL_MOMENTUM
+        reasons.append(f"{label} {close:.2f} > SMA50 {sma50:.2f} > SMA200 {sma200:.2f}")
+        if vix is not None:
+            reasons.append(f"VIX {vix:.1f} < {vix_hot:.0f}")
+        if breadth is not None:
+            reasons.append(f"Breadth {breadth:.0f}% above 50DMA")
+    elif spy_above_200 and (not spy_above_50 or not vix_ok or not breadth_ok):
+        regime = MomentumRegime.BULL_CAUTION
+        reasons.append(f"{label} > SMA200 but ")
+        if not spy_above_50:
+            reasons.append(f"{label} below SMA50 ({sma50:.2f})")
+        if not vix_ok and vix is not None:
+            reasons.append(f"VIX hot ({vix:.1f})")
+        if not breadth_ok and breadth is not None:
+            reasons.append(f"Breadth weak ({breadth:.0f}%)")
+    elif (not spy_above_200) and (not spy_above_50) and (vix is not None and vix > vix_hot):
+        regime = MomentumRegime.BEAR_MOMENTUM
+        reasons.append(f"{label} {close:.2f} < SMA200 {sma200:.2f}, VIX {vix:.1f} > {vix_hot:.0f}")
+    else:
+        regime = MomentumRegime.NO_TRADE
+        reasons.append("Transitional tape — no clean momentum setup")
+        if not spy_above_200:
+            reasons.append(f"{label} {close:.2f} < SMA200 {sma200:.2f}")
+
+    return regime, reasons
+
+
+def get_momentum_regime_at(
+    as_of_date: pd.Timestamp,
+    *,
+    index_close: pd.Series,
+    vix_close: Optional[pd.Series] = None,
+    breadth_close_by_symbol: Optional[dict[str, pd.Series]] = None,
+    market: str = "us",
+) -> RegimeSnapshot:
+    """Compute a momentum regime snapshot AS-OF a historical date.
+
+    Used by the backtest engine to avoid the live-data leak that
+    get_momentum_regime() introduces when called per historical bar.
+
+    All series are sliced to ``as_of_date`` internally — the caller can pass
+    the full series without thinking about it. Breadth is computed from any
+    symbol series supplied: for each, whether its close is above its own
+    50-bar SMA. Missing VIX / breadth degrade gracefully (same as live).
+
+    Parameters
+    ----------
+    as_of_date         : the bar timestamp to evaluate
+    index_close        : full daily Close series for the market index
+                         (SPY / ^NSEI) — the function slices internally
+    vix_close          : full daily Close series for the relevant VIX
+                         ticker (^VIX / ^INDIAVIX). Optional.
+    breadth_close_by_symbol : dict of {symbol: Close series} for the breadth
+                         sample. Optional; missing → breadth gate degrades
+                         to None (same as live).
+    market             : "us" or "india" — picks the VIX threshold/labels.
+    """
+    cfg = _MARKET_CFG.get(market, _MARKET_CFG["us"])
+    label = cfg["index"]
+    vix_hot = cfg["vix_hot"]
+
+    idx = index_close.loc[index_close.index <= as_of_date]
+    if len(idx) < 200:
+        return RegimeSnapshot(
+            regime=MomentumRegime.NO_TRADE,
+            spy_close=0.0, spy_sma50=0.0, spy_sma200=0.0,
+            vix=None, breadth_pct=None,
+            reasons=[f"Not enough {label} history at {as_of_date.date()} for 200-DMA"],
+        )
+
+    close = float(idx.iloc[-1])
+    sma50 = _sma(idx, 50)
+    sma200 = _sma(idx, 200)
+
+    vix_val: Optional[float] = None
+    if vix_close is not None and not vix_close.empty:
+        v = vix_close.loc[vix_close.index <= as_of_date]
+        if not v.empty:
+            vix_val = float(v.iloc[-1])
+
+    breadth_pct: Optional[float] = None
+    if breadth_close_by_symbol:
+        above = total = 0
+        for sym, series in breadth_close_by_symbol.items():
+            s = series.loc[series.index <= as_of_date]
+            if len(s) < 50:
+                continue
+            sma_sym = float(s.rolling(50).mean().iloc[-1])
+            cs = float(s.iloc[-1])
+            total += 1
+            if cs > sma_sym:
+                above += 1
+        if total > 0:
+            breadth_pct = (above / total) * 100.0
+
+    regime, reasons = _classify(label, close, sma50, sma200, vix_val, vix_hot, breadth_pct)
+    return RegimeSnapshot(
+        regime=regime,
+        spy_close=close, spy_sma50=sma50, spy_sma200=sma200,
+        vix=vix_val, breadth_pct=breadth_pct,
+        reasons=reasons,
+    )

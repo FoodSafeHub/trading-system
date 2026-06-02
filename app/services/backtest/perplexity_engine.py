@@ -189,6 +189,50 @@ def run_perplexity_backtest(
         except Exception:
             spy_raw = df_full["Close"]   # fallback: use symbol itself as regime proxy
 
+    # Point-in-time momentum-regime support for momentum strategies (daily
+    # candle patterns). The strategies' default _momentum_snapshot calls the
+    # LIVE get_momentum_regime() which would leak today's tape into every
+    # historical bar. We pre-fetch the index/VIX/breadth series ONCE here,
+    # then compute a per-bar snapshot via get_momentum_regime_at() and pass
+    # it through to the strategy via kwargs["momentum_snapshot"].
+    #
+    # Indian symbols gate on Nifty 50 + India VIX (per _momentum_snapshot's
+    # market routing). Fetch both market sets and pick by symbol.
+    _is_india = False
+    try:
+        from app.services.markets import is_india_symbol as _is_india_symbol
+        _is_india = bool(_is_india_symbol(symbol))
+    except Exception:
+        pass
+
+    _mom_index_close: Optional[pd.Series] = None
+    _mom_vix_close: Optional[pd.Series] = None
+    _mom_breadth: Optional[dict[str, pd.Series]] = None
+    try:
+        from app.services.market_regime_advanced import (
+            _MARKET_CFG, get_momentum_regime_at,
+        )
+        _mom_market = "india" if _is_india else "us"
+        _mom_cfg = _MARKET_CFG[_mom_market]
+        # Reuse already-fetched SPY series for the US case.
+        if _mom_market == "us":
+            _mom_index_close = spy_raw
+        else:
+            try:
+                _mom_index_close = get_ohlcv(_mom_cfg["index"], period="10y")["Close"]
+            except Exception:
+                _mom_index_close = None
+        try:
+            _mom_vix_close = get_ohlcv(_mom_cfg["vix"], period="10y")["Close"]
+        except Exception:
+            _mom_vix_close = None
+        # Breadth is heavy: 10 daily fetches per backtest. Skip it on the
+        # backtest hot-path -- the classifier degrades gracefully when
+        # breadth is None (same code path as live when ^SPXA50R is down).
+        _mom_breadth = None
+    except Exception:
+        get_momentum_regime_at = None   # type: ignore[assignment]
+
     # Warm up 210 bars so SMA(200) is valid from the first active bar.
     # For very short datasets (< 350 bars), cap at 60% so some trading still occurs.
     if len(df_full) >= 350:
@@ -378,6 +422,24 @@ def run_perplexity_backtest(
             suitability_config = None
 
         volatility_bucket = bucket_atr_pct(_current_atr(df_slice))
+
+        # Point-in-time momentum-regime snapshot for daily-candle pattern
+        # strategies. Pass it through kwargs; non-momentum strategies ignore
+        # the kwarg (their run() signature is **kwargs-tolerant via the base
+        # class). NaN-safe: failures return None and the strategies fall back
+        # to their existing live snapshot path (which is what we replaced).
+        _mom_snapshot_today = None
+        if get_momentum_regime_at is not None and _mom_index_close is not None:
+            try:
+                _mom_snapshot_today = get_momentum_regime_at(
+                    as_of_date=df_full.index[i - 1],
+                    index_close=_mom_index_close,
+                    vix_close=_mom_vix_close,
+                    breadth_close_by_symbol=_mom_breadth,
+                    market="india" if _is_india else "us",
+                )
+            except Exception:
+                _mom_snapshot_today = None
         if position == 0:
             try:
                 sig = strategy.run(
@@ -386,6 +448,7 @@ def run_perplexity_backtest(
                     regime=regime,
                     volatility_bucket=volatility_bucket,
                     suitability_config=suitability_config,
+                    momentum_snapshot=_mom_snapshot_today,
                 )
             except Exception:
                 sig = None
@@ -523,6 +586,7 @@ def run_perplexity_backtest(
                     regime=regime,
                     volatility_bucket=volatility_bucket,
                     suitability_config=suitability_config,
+                    momentum_snapshot=_mom_snapshot_today,
                 )
             except Exception:
                 sig = None
@@ -558,6 +622,7 @@ def run_perplexity_backtest(
                     regime=regime,
                     volatility_bucket=volatility_bucket,
                     suitability_config=suitability_config,
+                    momentum_snapshot=_mom_snapshot_today,
                 )
             except Exception:
                 sig = None

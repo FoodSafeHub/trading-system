@@ -27,12 +27,10 @@ KEEP = {
     "BB_Mean_Reversion",
     # Promoted from RESEARCH-ONLY after 5y re-evaluation:
     "Breakout_Consolidation",
-    # Promoted from NEEDS-FOLLOW-UP after 5y re-evaluation + short-side
-    # engine support landing (their LONG-side numbers became fair):
+    # Survived the truthful-regime re-evaluation (point-in-time momentum
+    # snapshot fixed the live-state leak that had been suppressing entries):
     "Daily_Three_Bar_Push",
-    "Daily_Engulfing_Volume",
-    "Daily_NR_Breakout",     # borderline (13 trades)
-    "Daily_Hammer_Star",     # borderline (11 trades)
+    "Daily_Hammer_Star",
 }
 RESEARCH_ONLY = {
     # Still too sparse even at 5y (5 trades).
@@ -43,6 +41,10 @@ RETIRE = {
     "BB_Breakout",
     "MA_Crossover_RSI",
     "Fib_Pullback_Support",
+    # Truthful-regime re-evaluation 2026-06-02 flipped both from KEEP to
+    # net-negative when the live-regime leak was closed:
+    "Daily_Engulfing_Volume",
+    "Daily_NR_Breakout",
 }
 
 ALL_KNOWN = KEEP | RESEARCH_ONLY | RETIRE
