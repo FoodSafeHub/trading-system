@@ -167,50 +167,104 @@ class ExecutionService:
         account_id: str,
         fill: OrderStatusResponse,
     ) -> None:
-        """Place a resting SELL STOP to protect a freshly-filled BUY.
+        """Place a broker-native trailing stop after a BUY fill.
 
-        No-op unless settings.auto_protective_stop_enabled. Skipped for the
-        paper broker (its STOP fills at market on submit). Stop price is the
-        BUY's own stop_price when the scheduler supplied one, else
-        fill_price * (1 - protective_stop_pct/100).
+        When settings.trailing_stop_enabled=True (default), places a
+        TRAILING_STOP at the broker using chandelier ATR trail distance when
+        OHLCV is available, otherwise falling back to trail_stop_pct%.
+
+        When trailing_stop_enabled=False, falls back to the legacy fixed STOP
+        at fill_price * (1 - protective_stop_pct/100).
+
+        No-op unless auto_protective_stop_enabled=True.
+        Skipped for paper broker (STOP fills at market on submit).
         """
         settings = get_settings()
         if not settings.auto_protective_stop_enabled:
             return
-        # Skip paper: its STOP fills at market on submit, self-closing the
-        # position. A multi-broker that is paper-only is likewise skipped.
+
         broker_name = getattr(self.broker, "name", "") or ""
         if "paper" in broker_name and "schwab" not in broker_name \
                 and "webull" not in broker_name and "zerodha" not in broker_name:
-            logger.debug("[exec] Protective stop skipped — paper broker (%s)", broker_name)
+            logger.debug("[exec] Trailing stop skipped — paper broker (%s)", broker_name)
             return
 
         filled_qty = fill.filled_quantity or buy_req.quantity
         if not filled_qty or filled_qty <= 0:
             return
         fill_price = fill.fill_price or 0.0
-        stop_price = buy_req.stop_price
-        if not stop_price or stop_price <= 0:
-            if fill_price <= 0:
-                logger.warning("[exec] Protective stop skipped — no stop_price and no fill_price")
-                return
-            stop_price = round(fill_price * (1 - settings.protective_stop_pct / 100.0), 2)
-        if fill_price > 0 and stop_price >= fill_price:
-            logger.warning(
-                "[exec] Protective stop %.2f not below fill %.2f — skipping", stop_price, fill_price
-            )
-            return
 
-        stop_req = OrderRequest(
-            symbol=buy_req.symbol,
-            side="SELL",
-            order_type="STOP",
-            quantity=filled_qty,
-            stop_price=stop_price,
-            time_in_force="GTC",
-            source=buy_req.source,
-            idempotency_key=f"protstop-{buy_req.idempotency_key}",
-        )
+        if settings.trailing_stop_enabled:
+            # Compute trail distance using chandelier ATR when possible.
+            trail_pct = settings.trail_stop_pct
+            try:
+                from app.services.market_data.provider import get_ohlcv
+                from app.services.strategy.rules import _atr_raw
+                df = get_ohlcv(buy_req.symbol, period="3mo")
+                if not df.empty and len(df) >= 22:
+                    atr = float(_atr_raw(df, 22).iloc[-1])
+                    if fill_price > 0 and atr > 0:
+                        # Chandelier: 3× ATR trail (same multiplier as rules.py default)
+                        trail_dollar = round(3.0 * atr, 2)
+                        trail_pct_derived = (trail_dollar / fill_price) * 100
+                        # Clamp: at least 2% trail, at most 12% (avoid runaway)
+                        trail_pct = max(2.0, min(12.0, trail_pct_derived))
+                        logger.info(
+                            "[exec] Chandelier trail %s: ATR=%.2f → trail=%.2f (%.1f%%)",
+                            buy_req.symbol, atr, trail_dollar, trail_pct,
+                        )
+            except Exception as exc:
+                logger.debug("[exec] ATR trail compute failed, using pct fallback: %s", exc)
+
+            stop_req = OrderRequest(
+                symbol=buy_req.symbol,
+                side="SELL",
+                order_type="TRAILING_STOP",
+                quantity=filled_qty,
+                trail_type="PERCENT",
+                trail_value=round(trail_pct, 2),
+                time_in_force="GTC",
+                source=buy_req.source,
+                idempotency_key=f"trailstop-{buy_req.idempotency_key}",
+            )
+            event_desc = (
+                f"SELL TRAILING_STOP {buy_req.symbol} x{filled_qty} "
+                f"trail={trail_pct:.1f}% (chandelier ATR, protects BUY {buy_req.idempotency_key})"
+            )
+            log_msg = "[exec] Trailing stop placed: %s x%.4f trail=%.1f%% broker_id=%s"
+            log_args = (buy_req.symbol, filled_qty, trail_pct)
+        else:
+            # Legacy fixed STOP fallback
+            fill_price_safe = fill_price or 0.0
+            stop_price = buy_req.stop_price
+            if not stop_price or stop_price <= 0:
+                if fill_price_safe <= 0:
+                    logger.warning("[exec] Protective stop skipped — no stop_price and no fill_price")
+                    return
+                stop_price = round(fill_price_safe * (1 - settings.protective_stop_pct / 100.0), 2)
+            if fill_price_safe > 0 and stop_price >= fill_price_safe:
+                logger.warning(
+                    "[exec] Protective stop %.2f not below fill %.2f — skipping",
+                    stop_price, fill_price_safe,
+                )
+                return
+            stop_req = OrderRequest(
+                symbol=buy_req.symbol,
+                side="SELL",
+                order_type="STOP",
+                quantity=filled_qty,
+                stop_price=stop_price,
+                time_in_force="GTC",
+                source=buy_req.source,
+                idempotency_key=f"protstop-{buy_req.idempotency_key}",
+            )
+            event_desc = (
+                f"SELL STOP {buy_req.symbol} x{filled_qty} @ {stop_price} "
+                f"(protects BUY {buy_req.idempotency_key})"
+            )
+            log_msg = "[exec] Protective stop placed: SELL STOP %s x%.4f @ %.2f broker_id=%s"
+            log_args = (buy_req.symbol, filled_qty, stop_price)  # type: ignore[assignment]
+
         status_resp = await self.broker.place_order(stop_req, account_id)
         stop_order = self._persist_order(stop_req, None, status="submitted")
         self._update_order_status(
@@ -220,18 +274,12 @@ class ExecutionService:
             submitted_at=datetime.now(tz=timezone.utc),
         )
         _audit.log(
-            event_type="PROTECTIVE_STOP_PLACED",
+            event_type="TRAILING_STOP_PLACED" if settings.trailing_stop_enabled else "PROTECTIVE_STOP_PLACED",
             entity_type="order",
             entity_id=stop_order.id,
-            description=(
-                f"SELL STOP {buy_req.symbol} x{filled_qty} @ {stop_price} "
-                f"(protects BUY {buy_req.idempotency_key})"
-            ),
+            description=event_desc,
         )
-        logger.info(
-            "[exec] Protective stop placed: SELL STOP %s x%.4f @ %.2f broker_id=%s",
-            buy_req.symbol, filled_qty, stop_price, status_resp.broker_order_id,
-        )
+        logger.info(log_msg, *log_args, status_resp.broker_order_id)
 
     async def _buying_power_preflight(
         self,

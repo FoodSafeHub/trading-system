@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import account, assignments, backtest, chart, daytrading, health, notifications, orders, perplexity, pnl, recommendations, risk, rs_rotation, scanner, settings as settings_routes, signals, strategy, schwab_auth, zerodha_auth, upstox_auth
+from app.api.routes import account, assignments, backtest, chart, daytrading, health, notifications, orders, perplexity, pnl, recommendations, risk, rs_rotation, scanner, settings as settings_routes, signals, strategy, schwab_auth, webull_auth, zerodha_auth, upstox_auth
 from app.config import get_settings
 from app.db import init_db
 from app.services.strategy.scheduler import start_scheduler, stop_scheduler
@@ -121,6 +121,7 @@ app.include_router(signals.router)
 app.include_router(risk.router)
 app.include_router(strategy.router)
 app.include_router(schwab_auth.router)
+app.include_router(webull_auth.router)
 app.include_router(zerodha_auth.router)
 app.include_router(upstox_auth.router)
 app.include_router(perplexity.router)

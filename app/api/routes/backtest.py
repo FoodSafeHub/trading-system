@@ -242,6 +242,7 @@ def backtest_run_generic(
     disable_trail: bool = False,
     disable_exit_policy: bool = False,
     stop_loss_pct: float = 8.0,
+    exit_rsi: float = 0.0,   # 0 = use strategy default; >0 overrides the SELL RSI gate
 ):
     """Run a single strategy on an arbitrary symbol using factory defaults.
 
@@ -278,6 +279,10 @@ def backtest_run_generic(
         effective_params = {**effective_params, "stop_loss_pct": stop_loss_pct}
     elif "stop_loss_pct" in effective_params:
         effective_params = {k: v for k, v in effective_params.items() if k != "stop_loss_pct"}
+    # RSI exit override — applies to all RSI-gated sell rules
+    if exit_rsi > 0:
+        for key in ("rsi_exit_threshold", "exit_rsi", "rsi_overbought"):
+            effective_params = {**effective_params, key: exit_rsi}
     try:
         result = run_backtest(
             strategy_name=cfg.name,
@@ -299,6 +304,7 @@ def backtest_run_generic(
             "disable_trail": disable_trail,
             "disable_exit_policy": disable_exit_policy,
             "stop_loss_pct": stop_loss_pct,
+            "exit_rsi": exit_rsi if exit_rsi > 0 else None,
         },
         "period": result.period,
         "start_date": result.start_date,

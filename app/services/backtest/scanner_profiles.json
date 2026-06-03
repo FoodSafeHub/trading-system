@@ -54,24 +54,19 @@
   "rsi2_mean_reversion:NVDA": {
     "symbol": "NVDA",
     "strategy_type": "rsi2_mean_reversion",
-    "calibrated_at": "2026-05-27",
-    "n_trades": 31,
-    "n_wins": 28,
-    "win_rate_pct": 90.3,
+    "calibrated_at": "2026-06-02",
+    "n_trades": 45,
+    "n_wins": 35,
+    "win_rate_pct": 77.8,
     "param_overrides": {
-      "rsi_entry_threshold": 8,
-      "atr_skip_threshold": 7.0,
-      "trail_enabled": true,
-      "trail_trigger_pct": 3.0,
-      "atr_trail_mult": 3.0,
-      "atr_trail_period": 22
+      "atr_skip_threshold": 5.0
     },
-    "survival_rate_pct": 96.9,
+    "survival_rate_pct": 86.5,
     "improved_by": [
-      "expectancy",
-      "total_return"
+      "win_rate",
+      "expectancy"
     ],
-    "notes": "grid-search winner from 19 combos vs 32 baseline round-trips over 5y | chandelier trail enabled 2026-05-28 (A/B +427.8pp total-return, 5y, no-lookahead engine)"
+    "notes": "grid-search winner from 19 combos vs 52 baseline round-trips over 10y"
   },
   "rsi2_mean_reversion:HERITGFOOD": {
     "symbol": "HERITGFOOD",
@@ -92,26 +87,6 @@
       "total_return"
     ],
     "notes": "grid-search winner from 29 combos vs 34 baseline round-trips over 10y"
-  },
-  "pullback_ema50:FANG": {
-    "symbol": "FANG",
-    "strategy_type": "pullback_ema50",
-    "calibrated_at": "2026-05-28",
-    "n_trades": 16,
-    "n_wins": 14,
-    "win_rate_pct": 87.5,
-    "param_overrides": {
-      "rsi_max": 50,
-      "wick_ratio_min": 0.3,
-      "exit_extension_pct": 5.0
-    },
-    "survival_rate_pct": 84.2,
-    "improved_by": [
-      "win_rate",
-      "expectancy",
-      "total_return"
-    ],
-    "notes": "grid-search winner from 27 combos vs 19 baseline round-trips over 5y"
   },
   "rsi2_mean_reversion:TOST": {
     "symbol": "TOST",
@@ -308,5 +283,62 @@
       "total_return"
     ],
     "notes": "grid-search winner from 21 combos vs 37 baseline round-trips over 5y"
+  },
+  "pullback_ema50:ASM": {
+    "symbol": "ASM",
+    "strategy_type": "pullback_ema50",
+    "calibrated_at": "2026-06-01",
+    "n_trades": 15,
+    "n_wins": 13,
+    "win_rate_pct": 86.7,
+    "param_overrides": {
+      "price_ema_proximity_pct": 1.5,
+      "rsi_max": 60,
+      "wick_ratio_min": 0.6,
+      "exit_extension_pct": 2.0
+    },
+    "survival_rate_pct": 68.2,
+    "improved_by": [
+      "win_rate",
+      "expectancy",
+      "total_return"
+    ],
+    "notes": "grid-search winner from 24 combos vs 22 baseline round-trips over 10y"
+  },
+  "pullback_ema50:BIIB": {
+    "symbol": "BIIB",
+    "strategy_type": "pullback_ema50",
+    "calibrated_at": "2026-06-02",
+    "n_trades": 9,
+    "n_wins": 5,
+    "win_rate_pct": 55.6,
+    "param_overrides": {
+      "price_ema_proximity_pct": 0.5,
+      "wick_ratio_min": 0.6,
+      "exit_extension_pct": 4.0
+    },
+    "survival_rate_pct": 40.9,
+    "improved_by": [
+      "expectancy"
+    ],
+    "notes": "grid-search winner from 24 combos vs 22 baseline round-trips over 5y"
+  },
+  "pullback_ema50:KO": {
+    "symbol": "KO",
+    "strategy_type": "pullback_ema50",
+    "calibrated_at": "2026-06-02",
+    "n_trades": 19,
+    "n_wins": 17,
+    "win_rate_pct": 89.5,
+    "param_overrides": {
+      "price_ema_proximity_pct": 0.5,
+      "rsi_max": 60,
+      "wick_ratio_min": 0.3
+    },
+    "survival_rate_pct": 79.2,
+    "improved_by": [
+      "expectancy"
+    ],
+    "notes": "grid-search winner from 21 combos vs 24 baseline round-trips over 5y"
   }
 }

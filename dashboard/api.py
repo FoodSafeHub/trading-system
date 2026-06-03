@@ -130,6 +130,10 @@ def schwab_status():
     """Schwab connection health (token presence/expiry), no token material."""
     return _get("/schwab/status")
 
+def webull_status():
+    """Webull connection health — credential presence + live account ping."""
+    return _get("/webull/status", timeout=15)
+
 def schwab_auth_url():
     """Get the Schwab OAuth authorization URL to open in the browser."""
     return _get("/schwab/auth")
@@ -157,6 +161,9 @@ def strategy_configs():
 
 def run_strategy():
     return _post("/strategy/run")
+
+def run_scheduler_now(dry_run: bool = True):
+    return _post("/strategy/scheduler/run_now", timeout=180, params={"dry_run": str(dry_run).lower()})
 
 def scheduler_status():
     return _get("/strategy/scheduler")
@@ -592,21 +599,16 @@ def backtest_run_generic(symbol: str, strategy_type: str,
                          disable_trail: bool = False,
                          disable_exit_policy: bool = False,
                          stop_loss_pct: float = 8.0,
+                         exit_rsi: float = 0.0,
                          timeout: int = 120):
-    """Single-strategy backtest on an arbitrary symbol using factory defaults.
-
-    The two ``disable_*`` flags strip the Chandelier-trail overlay (Layer 2)
-    and the Phase-1 exit_policy (Layer 3) before the backtest runs, so the
-    Single Strategy UI can compare runs with/without each exit layer.
-    """
-    return _get(
-        f"/backtest/run-generic/{symbol}/{strategy_type}",
-        params={"period": period, "initial_capital": initial_capital,
-                "disable_trail": disable_trail,
-                "disable_exit_policy": disable_exit_policy,
-                "stop_loss_pct": stop_loss_pct},
-        timeout=timeout,
-    )
+    """Single-strategy backtest on an arbitrary symbol using factory defaults."""
+    params = {"period": period, "initial_capital": initial_capital,
+              "disable_trail": disable_trail,
+              "disable_exit_policy": disable_exit_policy,
+              "stop_loss_pct": stop_loss_pct}
+    if exit_rsi > 0:
+        params["exit_rsi"] = exit_rsi
+    return _get(f"/backtest/run-generic/{symbol}/{strategy_type}", params=params, timeout=timeout)
 
 
 def backtest_live_signals(symbol: str, period: str = "1y", timeout: int = 60):

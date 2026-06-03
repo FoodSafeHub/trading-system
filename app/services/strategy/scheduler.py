@@ -44,13 +44,14 @@ def _persist_signal(
     direction: str,
     strategy_label: str,
     entry: float | None,
+    *,
+    acted_on: bool = True,
 ) -> int | None:
     """Write a Signal row so the resulting Order can join back to a strategy name.
 
-    Without this, app/api/routes/orders.py:35-39 has no signal_id to look up
-    and the dashboard's Recent Fills shows Strategy "—". The label may be
-    prefixed (e.g. "perplexity:my_strategy") — we keep the prefix so the
-    dashboard surfaces the originating system as well as the strategy.
+    acted_on=False writes an observation-only row (HOLD or a signal that was
+    evaluated but blocked before order placement). acted_on=True marks signals
+    that reached the broker execution path.
     """
     try:
         with SessionLocal() as db:
@@ -60,7 +61,7 @@ def _persist_signal(
                 direction=direction,
                 strength=1.0,
                 price_at_signal=entry,
-                acted_on=True,
+                acted_on=acted_on,
             )
             db.add(sig)
             db.commit()
@@ -69,6 +70,30 @@ def _persist_signal(
     except Exception as exc:
         logger.warning("[scheduler] Could not persist Signal row for %s/%s: %s", symbol, strategy_label, exc)
         return None
+
+
+def _mark_signal_acted_on(symbol: str, direction: str, strategy_label: str) -> int | None:
+    """Flip the most recent matching signal row to acted_on=True and return its id."""
+    try:
+        with SessionLocal() as db:
+            sig = (
+                db.query(Signal)
+                .filter(
+                    Signal.symbol == symbol.upper(),
+                    Signal.direction == direction,
+                    Signal.strategy_name == strategy_label[:128],
+                    Signal.acted_on == False,  # noqa: E712
+                )
+                .order_by(Signal.id.desc())
+                .first()
+            )
+            if sig:
+                sig.acted_on = True
+                db.commit()
+                return sig.id
+    except Exception as exc:
+        logger.warning("[scheduler] Could not mark signal acted_on for %s/%s: %s", symbol, strategy_label, exc)
+    return None
 
 
 def _quantize_for_broker(shares: float) -> float:
@@ -204,7 +229,15 @@ def _perplexity_enabled() -> bool:
     return get_settings().scheduler_run_perplexity
 
 
-def _run_cycle() -> None:
+def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
+    """Run one strategy evaluation + order cycle.
+
+    force=True   — skips the market-hours gate so a manual run works any time.
+    dry_run=True — evaluates all strategies and writes signal rows but skips
+                   every broker call. Safe to run while the live scheduler is
+                   also running; does NOT touch the kill switch so there is no
+                   race with concurrent cycles.
+    """
     global _running
     if not _lock.acquire(blocking=False):
         logger.debug("[scheduler] Previous cycle still running — skipping")
@@ -213,50 +246,59 @@ def _run_cycle() -> None:
     try:
         settings = get_settings()
 
-        if not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
+        if not force and not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
             logger.debug("[scheduler] Outside market hours — skipping cycle")
             return
 
-        if _risk.is_kill_switch_active():
+        if not force and not dry_run and _risk.is_kill_switch_active():
             logger.warning("[scheduler] Kill switch active — skipping cycle")
             return
 
         settings = get_settings()
-        broker = get_broker()
 
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(broker.authenticate())
-            accounts = loop.run_until_complete(broker.get_accounts())
-            account_id = accounts[0].account_id if accounts else ""
-            svc = ExecutionService(broker)
+            # Dry-run: skip all broker I/O — we only need signal evaluation.
+            if dry_run:
+                broker = None
+                account_id = ""
+                svc = None
 
-            # Lazy per-broker execution-service cache for per-assignment broker
-            # overrides. "default" reuses the global svc / account_id built
-            # above. Anything else builds (authenticates, account lookup) on
-            # first hit this cycle, then is reused for subsequent symbols.
-            broker_svc_cache: dict[str, tuple[ExecutionService, str]] = {
-                "default": (svc, account_id),
-            }
+                def _svc_for(name: str) -> tuple[None, str]:  # type: ignore[misc]
+                    return None, ""
+            else:
+                broker = get_broker()
+                loop.run_until_complete(broker.authenticate())
+                accounts = loop.run_until_complete(broker.get_accounts())
+                account_id = accounts[0].account_id if accounts else ""
+                svc = ExecutionService(broker)
 
-            def _svc_for(name: str) -> tuple[ExecutionService, str]:
-                key = (name or "default").lower()
-                if key in broker_svc_cache:
-                    return broker_svc_cache[key]
-                try:
-                    b = _build_one(key)
-                    loop.run_until_complete(b.authenticate())
-                    accts = loop.run_until_complete(b.get_accounts())
-                    aid = accts[0].account_id if accts else ""
-                    pair = (ExecutionService(b), aid)
-                    broker_svc_cache[key] = pair
-                    return pair
-                except Exception as exc:
-                    logger.warning(
-                        "[scheduler] Broker override %r failed (%s) — falling back to default",
-                        key, exc,
-                    )
-                    return broker_svc_cache["default"]
+                # Lazy per-broker execution-service cache for per-assignment broker
+                # overrides. "default" reuses the global svc / account_id built
+                # above. Anything else builds (authenticates, account lookup) on
+                # first hit this cycle, then is reused for subsequent symbols.
+                broker_svc_cache: dict[str, tuple[ExecutionService, str]] = {
+                    "default": (svc, account_id),
+                }
+
+                def _svc_for(name: str) -> tuple[ExecutionService, str]:  # type: ignore[misc]
+                    key = (name or "default").lower()
+                    if key in broker_svc_cache:
+                        return broker_svc_cache[key]
+                    try:
+                        b = _build_one(key)
+                        loop.run_until_complete(b.authenticate())
+                        accts = loop.run_until_complete(b.get_accounts())
+                        aid = accts[0].account_id if accts else ""
+                        pair = (ExecutionService(b), aid)
+                        broker_svc_cache[key] = pair
+                        return pair
+                    except Exception as exc:
+                        logger.warning(
+                            "[scheduler] Broker override %r failed (%s) — falling back to default",
+                            key, exc,
+                        )
+                        return broker_svc_cache["default"]
 
             from app.models.assignments import SymbolStrategyAssignment
             from app.schemas.orders import OrderRequest
@@ -278,10 +320,9 @@ def _run_cycle() -> None:
             assigned_symbols = {a["symbol"] for a in assignments}
 
             # ── Fetch Schwab live prices for all assigned symbols ─
-            # Used to replace yfinance close for entry price accuracy.
             all_symbols = list(assigned_symbols)
             live_prices: dict[str, float] = {}
-            if all_symbols:
+            if all_symbols and not dry_run:
                 try:
                     quotes = loop.run_until_complete(broker.get_quotes(all_symbols))
                     for sym, q in quotes.items():
@@ -294,12 +335,13 @@ def _run_cycle() -> None:
 
             # ── Fetch current positions to size SELL orders correctly ─
             current_positions: dict[str, float] = {}
-            try:
-                positions = loop.run_until_complete(broker.get_positions(account_id))
-                for pos in positions:
-                    current_positions[pos.symbol.upper()] = pos.quantity
-            except Exception as exc:
-                logger.warning("[scheduler] Could not fetch positions: %s", exc)
+            if not dry_run:
+                try:
+                    positions = loop.run_until_complete(broker.get_positions(account_id))
+                    for pos in positions:
+                        current_positions[pos.symbol.upper()] = pos.quantity
+                except Exception as exc:
+                    logger.warning("[scheduler] Could not fetch positions: %s", exc)
 
             # ── Regime-aware open-position cap ──────────────────────────
             # Resolve the max number of distinct holdings the current market
@@ -342,19 +384,16 @@ def _run_cycle() -> None:
                         df = get_ohlcv(symbol, period="2y")
                         if df.empty or len(df) < 60:
                             continue
-                        # Patch latest close with Schwab live price for accurate signal
                         live = live_prices.get(symbol)
                         if live:
                             df = df.copy()
                             df.iloc[-1, df.columns.get_loc("Close")] = live
                         sig = strat.run(symbol, df)
+                        entry = live or sig.entry_price or float(df["Close"].iloc[-1])
+                        label = f"perplexity:{strategy_name}"
+                        _persist_signal(symbol, sig.direction, label, entry, acted_on=False)
                         if sig.direction != "HOLD":
-                            entry = live or sig.entry_price or float(df["Close"].iloc[-1])
-                            signals_to_act.append((
-                                symbol, sig.direction,
-                                f"perplexity:{strategy_name}",
-                                entry, sig.stop_price,
-                            ))
+                            signals_to_act.append((symbol, sig.direction, label, entry, sig.stop_price))
                             logger.info(
                                 "[scheduler] Assigned %s → %s: %s entry=%.2f stop=%s (%s)",
                                 strategy_name, symbol, sig.direction, entry, sig.stop_price, sig.reason
@@ -367,21 +406,14 @@ def _run_cycle() -> None:
                             prices = get_price_series(symbol, period="1y")
                             sigs = _engine.run(config, prices)
                             for s in sigs:
+                                entry = live_prices.get(symbol) or s.price_at_signal or float(prices.iloc[-1])
+                                _persist_signal(symbol, s.direction, strategy_name, entry, acted_on=False)
                                 if s.direction != "HOLD":
-                                    entry = live_prices.get(symbol) or s.price_at_signal or float(prices.iloc[-1])
-                                    signals_to_act.append((
-                                        symbol, s.direction, strategy_name, entry, None
-                                    ))
+                                    signals_to_act.append((symbol, s.direction, strategy_name, entry, None))
                                     logger.info("[scheduler] Assigned %s → %s: %s", strategy_name, symbol, s.direction)
 
                     elif system == "scanner":
-                        # Scanner-system assignments use the 5 generic strategies the
-                        # scanner builds via _make_generic_configs (e.g. SO_Pullback_EMA50).
-                        # Those configs aren't in strategies.json, so we rebuild them
-                        # here and evaluate the named one directly against full OHLCV
-                        # — rule_pullback_ema50 and rule_vix_spike_reversal need High/Low
-                        # bars, which `_engine.run(config, prices)` cannot supply.
-                        from app.services.scanner.scanner_service import _make_generic_configs
+                        from app.services.scanner.scanner_service import _make_generic_configs_full
                         from app.services.strategy.rules import evaluate_strategy
 
                         df = get_ohlcv(symbol, period="1y")
@@ -391,7 +423,7 @@ def _run_cycle() -> None:
                                 symbol, len(df),
                             )
                         else:
-                            generic = _make_generic_configs(symbol)
+                            generic = _make_generic_configs_full(symbol)
                             match = next((c for c in generic if c.name == strategy_name and c.enabled), None)
                             if match is None:
                                 logger.warning(
@@ -400,16 +432,11 @@ def _run_cycle() -> None:
                                     symbol, strategy_name,
                                 )
                             else:
-                                # Patch latest close with Schwab live price so the signal
-                                # uses the same entry the order will be sized against.
                                 live = live_prices.get(symbol)
                                 if live:
                                     df = df.copy()
                                     df.iloc[-1, df.columns.get_loc("Close")] = live
                                 prices = df["Close"].dropna()
-                                # Trailing-stop overlay needs open-position context
-                                # (entry + peak-since-entry). No-op if flat or if the
-                                # strategy's params don't enable the trail.
                                 pos_state = _live_position_state(
                                     symbol, df, current_positions.get(symbol.upper(), 0.0)
                                 )
@@ -417,13 +444,11 @@ def _run_cycle() -> None:
                                     match.type, symbol, prices, match.params,
                                     ohlcv=df, position=pos_state,
                                 )
+                                entry = live or sig.price_at_signal or float(prices.iloc[-1])
+                                label = f"scanner:{strategy_name}"
+                                _persist_signal(symbol, sig.direction, label, entry, acted_on=False)
                                 if sig.direction != "HOLD":
-                                    entry = live or sig.price_at_signal or float(prices.iloc[-1])
-                                    signals_to_act.append((
-                                        symbol, sig.direction,
-                                        f"scanner:{strategy_name}",
-                                        entry, None,
-                                    ))
+                                    signals_to_act.append((symbol, sig.direction, label, entry, None))
                                     logger.info(
                                         "[scheduler] Assigned scanner %s → %s: %s entry=%.2f",
                                         strategy_name, symbol, sig.direction, entry,
@@ -473,7 +498,9 @@ def _run_cycle() -> None:
                         logger.error("[scheduler] Perplexity pool %s failed: %s", symbol, exc)
 
             # ── 3. Execute assigned signals (no consensus needed) ─
-            for symbol, direction, label, entry, stop in signals_to_act:
+            if dry_run:
+                logger.info("[scheduler] Dry run — %d assigned signal(s) evaluated, no orders placed.", len(signals_to_act))
+            for symbol, direction, label, entry, stop in ([] if dry_run else signals_to_act):
                 asgn = next((a for a in assignments if a["symbol"] == symbol), None)
                 asgn_cap = asgn["max_capital_usd"] if asgn else None
                 asgn_shares = asgn["max_shares"] if asgn else None
@@ -541,7 +568,8 @@ def _run_cycle() -> None:
                     stop_price=stop if direction == "BUY" else None,
                     source="scheduler",
                 )
-                sig_id = _persist_signal(symbol, direction, label, entry)
+                # Mark the signal row we already wrote during evaluation as acted_on.
+                sig_id = _mark_signal_acted_on(symbol, direction, label)
                 try:
                     from app.services.notifications.bus import notify_signal
                     notify_signal(symbol=symbol, direction=direction, strategy=label,
@@ -564,7 +592,7 @@ def _run_cycle() -> None:
                 ))
 
             # ── 4. Execute consensus signals ─────────────────────
-            for symbol, directions in votes.items():
+            for symbol, directions in ({} if dry_run else votes).items():
                 qualifying = {d: v for d, v in directions.items() if len(v) >= min_agree}
                 if len(qualifying) != 1:
                     continue
@@ -668,6 +696,107 @@ def _run_scanner_job() -> None:
 _POSITION_SYNC_INTERVAL_SECONDS = 900   # 15 min — cheap broker read
 
 
+def _run_chandelier_trail_job() -> None:
+    """Ratchet static SELL STOP orders upward using chandelier ATR math.
+
+    Runs every 15 min during market hours. For each open long position that
+    has a resting static STOP (not a broker-native trailing stop), compute the
+    current chandelier stop (highest_close - 3×ATR22) and cancel+replace the
+    old stop if the new level is meaningfully higher (>= 0.5% improvement).
+    This upgrades positions entered before trailing_stop_enabled was set.
+    """
+    settings = get_settings()
+    if not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
+        return
+    if not settings.auto_protective_stop_enabled:
+        return
+    try:
+        import asyncio as _aio
+        from app.services.brokers.factory import get_broker
+        from app.services.market_data.provider import get_ohlcv
+        from app.services.strategy.rules import _atr_raw
+        from app.schemas.orders import OrderRequest
+        from app.models.orders import Order
+
+        loop = _aio.new_event_loop()
+        try:
+            broker = get_broker()
+            loop.run_until_complete(broker.authenticate())
+            accounts = loop.run_until_complete(broker.get_accounts())
+            account_id = accounts[0].account_id if accounts else ""
+
+            # Find all open positions
+            positions = loop.run_until_complete(broker.get_positions(account_id))
+            long_positions = {p.symbol.upper(): p.quantity for p in positions if p.quantity > 0}
+            if not long_positions:
+                return
+
+            # Find resting SELL STOP orders for those symbols
+            open_orders = loop.run_until_complete(broker.list_orders(account_id, status="working"))
+            stop_by_symbol: dict[str, object] = {}
+            for o in open_orders:
+                if o.side == "SELL" and o.order_type in ("STOP", "stop") and o.symbol in long_positions:
+                    stop_by_symbol[o.symbol] = o
+
+            for symbol, qty in long_positions.items():
+                existing_stop = stop_by_symbol.get(symbol)
+                if not existing_stop:
+                    continue
+                old_stop = getattr(existing_stop, "stop_price", None) or 0.0
+                if not old_stop:
+                    # Try to parse from raw
+                    try:
+                        old_stop = float(existing_stop.raw.get("stopPrice", 0) or 0)
+                    except Exception:
+                        continue
+                if old_stop <= 0:
+                    continue
+
+                # Compute chandelier stop
+                try:
+                    df = get_ohlcv(symbol, period="3mo")
+                    if df.empty or len(df) < 22:
+                        continue
+                    atr = float(_atr_raw(df, 22).iloc[-1])
+                    highest_close = float(df["Close"].tail(22).max())
+                    new_stop = round(highest_close - 3.0 * atr, 2)
+                except Exception as exc:
+                    logger.debug("[scheduler] Chandelier trail %s failed: %s", symbol, exc)
+                    continue
+
+                # Only ratchet UP and only when the improvement is >= 0.5%
+                if new_stop <= old_stop * 1.005:
+                    continue
+
+                logger.info(
+                    "[scheduler] Chandelier trail %s: ratchet STOP %.2f → %.2f",
+                    symbol, old_stop, new_stop,
+                )
+                # Cancel old stop, place new one
+                try:
+                    loop.run_until_complete(
+                        broker.cancel_order(existing_stop.broker_order_id, account_id)
+                    )
+                    new_req = OrderRequest(
+                        symbol=symbol,
+                        side="SELL",
+                        order_type="STOP",
+                        quantity=qty,
+                        stop_price=new_stop,
+                        time_in_force="GTC",
+                        source="scheduler",
+                        idempotency_key=f"trail-{symbol}-{int(new_stop*100)}",
+                    )
+                    loop.run_until_complete(broker.place_order(new_req, account_id))
+                    logger.info("[scheduler] Chandelier trail %s: new STOP placed @ %.2f", symbol, new_stop)
+                except Exception as exc:
+                    logger.error("[scheduler] Chandelier trail %s: cancel/replace failed: %s", symbol, exc)
+        finally:
+            loop.close()
+    except Exception as exc:
+        logger.error("[scheduler] Chandelier trail job failed: %s", exc)
+
+
 def _run_position_sync_job() -> None:
     """Scheduled reconciliation — snapshot broker positions during market hours.
 
@@ -757,6 +886,17 @@ def start_scheduler() -> None:
         replace_existing=True,
         max_instances=1,
     )
+    _scheduler.add_job(
+        _run_chandelier_trail_job,
+        trigger=IntervalTrigger(
+            seconds=_POSITION_SYNC_INTERVAL_SECONDS,   # same 15-min cadence
+            start_date=now + timedelta(minutes=3),     # stagger after position sync
+        ),
+        id="chandelier_trail",
+        name="Chandelier Trail Ratchet",
+        replace_existing=True,
+        max_instances=1,
+    )
     _scheduler.start()
     logger.info(
         f"[scheduler] Started — strategy_cycle={settings.scheduler_interval_seconds}s, "
@@ -772,9 +912,15 @@ def stop_scheduler() -> None:
         logger.info("[scheduler] Stopped")
 
 
-def run_once() -> None:
-    """Manually trigger one cycle (for scripts / CLI)."""
-    _run_cycle()
+def run_once(*, force: bool = False, dry_run: bool = False) -> None:
+    """Manually trigger one cycle.
+
+    force=True    — bypasses market-hours gate.
+    dry_run=True  — evaluates signals, writes signal rows, places NO orders.
+                    Does NOT touch the kill switch, so the live scheduler can
+                    run concurrently without interference.
+    """
+    _run_cycle(force=force, dry_run=dry_run)
 
 
 def get_scheduler_status() -> dict:

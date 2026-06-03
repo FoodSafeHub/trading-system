@@ -810,6 +810,25 @@ if mode == "Single Strategy":
                      "Set to 0 to disable. Default 8%.",
             )
 
+    with st.expander("RSI sell threshold — A/B test old vs new", expanded=False):
+        st.caption(
+            "RSI sell thresholds were raised to **72** for US market conditions "
+            "(was 65–70). Use this slider to compare a specific value against the "
+            "new default. Set to 0 to use the strategy default."
+        )
+        _rc1, _rc2 = st.columns([2, 3])
+        with _rc1:
+            bt_exit_rsi = st.slider(
+                "RSI sell threshold", min_value=0, max_value=95, value=0, step=1,
+                key="bt_exit_rsi",
+                help="0 = strategy default (72). Try 65 or 70 to compare old behaviour.",
+            )
+        with _rc2:
+            if bt_exit_rsi > 0:
+                st.info(f"Overriding sell RSI to **{bt_exit_rsi}** for this run.")
+            else:
+                st.info("Using strategy default — 72 for US momentum strategies.")
+
     if not run and "bt_result" not in st.session_state:
         st.info("Type a symbol, pick a strategy, then click Run Backtest.")
         st.stop()
@@ -826,6 +845,7 @@ if mode == "Single Strategy":
                     disable_trail=disable_trail,
                     disable_exit_policy=disable_exit_policy,
                     stop_loss_pct=float(bt_stop_loss_pct),
+                    exit_rsi=float(bt_exit_rsi),
                     timeout=120,
                 )
                 st.session_state["bt_result"] = result
@@ -853,9 +873,12 @@ if mode == "Single Strategy":
     if _eff_params is not None:
         import _exit_policy as exit_policy
         ov = r.get("overrides") or {}
-        if ov.get("disable_trail") or ov.get("disable_exit_policy"):
-            stripped = [k for k, v in ov.items() if v]
-            st.caption("Overrides applied for this run: " + ", ".join(stripped))
+        override_notes = []
+        if ov.get("disable_trail"): override_notes.append("chandelier trail disabled")
+        if ov.get("disable_exit_policy"): override_notes.append("exit policy disabled")
+        if ov.get("exit_rsi"): override_notes.append(f"RSI sell threshold = {ov['exit_rsi']}")
+        if override_notes:
+            st.caption("Overrides for this run: " + " · ".join(override_notes))
         exit_policy.render(_eff_stype, _eff_params)
 
     if not r.get("trades"):

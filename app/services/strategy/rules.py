@@ -73,7 +73,7 @@ def rule_sma_rsi(symbol: str, prices: pd.Series, params: Dict[str, Any], **_) ->
     slow = params.get("sma_slow", 30)
     rsi_period = params.get("rsi_period", 14)
     rsi_momentum_low = params.get("rsi_momentum_low", 45)
-    overbought = params.get("rsi_overbought", 75)
+    overbought = params.get("rsi_overbought", 78)
 
     fast_sma_vals = compute_sma(prices, fast).values
     slow_sma_vals = compute_sma(prices, slow).values
@@ -298,7 +298,7 @@ def rule_vwap_rsi(symbol: str, prices: pd.Series, params: Dict[str, Any], **_) -
     vwap_period = params.get("vwap_period", 20)
     rsi_period  = params.get("rsi_period", 14)
     rsi_oversold = params.get("rsi_oversold", 35)
-    rsi_overbought = params.get("rsi_overbought", 65)
+    rsi_overbought = params.get("rsi_overbought", 72)
 
     if len(prices) < max(vwap_period, rsi_period) + 5:
         return StrategySignal(symbol=symbol, direction="HOLD",
@@ -567,7 +567,7 @@ def rule_rsi2_mean_reversion(
     """
     rsi_period   = params.get("rsi_period", 2)
     rsi_entry    = params.get("rsi_entry_threshold", 10)
-    rsi_exit     = params.get("rsi_exit_threshold", 70)
+    rsi_exit     = params.get("rsi_exit_threshold", 72)
     sma_trend    = params.get("sma_trend", 200)
     exit_sma     = params.get("exit_sma", 5)
     atr_skip     = params.get("atr_skip_threshold", 5.0)
@@ -760,7 +760,7 @@ def rule_pullback_ema50(
     rsi_min      = params.get("rsi_min", 35)
     rsi_max      = params.get("rsi_max", 55)
     wick_min     = params.get("wick_ratio_min", 0.4)
-    exit_rsi     = params.get("exit_rsi", 65)
+    exit_rsi     = params.get("exit_rsi", 72)
     ext_pct      = params.get("exit_extension_pct", 3.0)
     bear_skip    = params.get("bear_skip_threshold_pct", 10.0)
 
@@ -930,7 +930,7 @@ def rule_rsi2_reversion(
     exit_policy so a recovered dip isn't given straight back."""
     rsi_period = params.get("rsi_period", 2)
     rsi_entry  = params.get("rsi_entry_threshold", 10)
-    rsi_exit   = params.get("rsi_exit_threshold", 65)
+    rsi_exit   = params.get("rsi_exit_threshold", 72)
     sma_trend  = params.get("sma_trend", 200)
     exit_sma   = params.get("exit_sma", 5)
     atr_skip   = params.get("atr_skip_threshold", 5.0)
@@ -982,7 +982,7 @@ def rule_trend_pullback(
     rsi_min    = params.get("rsi_min", 35)
     rsi_max    = params.get("rsi_max", 55)
     wick_min   = params.get("wick_ratio_min", 0.4)
-    exit_rsi   = params.get("exit_rsi", 65)
+    exit_rsi   = params.get("exit_rsi", 72)
     ext_pct    = params.get("exit_extension_pct", 3.0)
     bear_skip  = params.get("bear_skip_threshold_pct", 10.0)
     stop_mult  = params.get("stop_atr_mult", 1.5)

@@ -103,6 +103,12 @@ class Settings(BaseSettings):
     # the scheduler supplied one, else fill_price * (1 - protective_stop_pct/100).
     auto_protective_stop_enabled: bool = False
     protective_stop_pct: float = 8.0
+    # When auto_protective_stop_enabled=True, place a broker-native trailing stop
+    # instead of a fixed STOP. trail_stop_pct is the % trail distance (e.g. 5 = 5%).
+    # The chandelier ATR trail is preferred when OHLCV is available; this pct is
+    # the fallback when ATR can't be computed.
+    trailing_stop_enabled: bool = True
+    trail_stop_pct: float = 5.0        # % trail — broker native trailing stop
 
     # ── Phase 0 strategy-refactor scaffolding (inert until later phases) ──────
     # Declared default-OFF now so the Phase 1/2 wiring has switches ready. NOTHING

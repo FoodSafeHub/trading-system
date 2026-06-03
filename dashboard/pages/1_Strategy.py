@@ -592,8 +592,9 @@ st.divider()
 # ════════════════════════════════════════════════════════════════
 st.subheader("Run a cycle now")
 st.caption(
-    "Forces a single scheduler cycle right now, regardless of market hours. "
-    "Use this to preview what would fire before enabling auto-trading."
+    "Forces a single full scheduler cycle right now — runs every assigned symbol "
+    "with its assigned strategy, plus the consensus pool. Dry run activates the "
+    "kill switch so signals are evaluated but no orders are placed."
 )
 
 rc1, rc2, rc3 = st.columns([2, 2, 2])
@@ -620,72 +621,27 @@ with rc3:
     )
 
 if run_clicked:
-    # Dry-run guard: temporarily activate the kill switch around the call.
-    restored_kill = False
-    if dry_run and not kill_active:
+    with st.spinner("Running full scheduler cycle (all assigned symbols + consensus pool)…"):
         try:
-            api.set_kill_switch(True)
-            restored_kill = True
+            result = api.run_scheduler_now(dry_run=dry_run)
+            cycle_error = None
         except Exception as e:
-            st.error(f"Could not engage kill switch for dry run — aborting: {e}")
-            st.stop()
+            result = {}
+            cycle_error = str(e)
 
-    with st.spinner("Running strategy cycle..."):
-        try:
-            result = api.run_strategy()
-        except Exception as e:
-            result = {"error": str(e)}
-        finally:
-            if restored_kill:
-                try:
-                    api.set_kill_switch(False)
-                except Exception as e:
-                    st.error(
-                        f"⚠ Could not deactivate kill switch after dry run: {e}. "
-                        f"Restore manually in the safety banner above."
-                    )
-
-    if "error" in result:
-        st.error(f"Cycle failed: {result['error']}")
+    if cycle_error:
+        st.error(f"Cycle failed: {cycle_error}")
     else:
-        rows = result.get("results", [])
-        min_agree = result.get("min_signal_agreement", 2)
-        orders_placed = result.get("orders_placed", 0)
-
         if dry_run:
             st.info(
-                f"Dry run complete. {len(rows)} strategy result(s) evaluated; "
-                f"orders blocked by kill switch (none placed)."
+                "Dry run complete — all assigned symbols evaluated, no orders placed. "
+                "Check Recent Signals below for what would fire."
             )
-        elif orders_placed > 0:
-            st.success(f"{orders_placed} order(s) placed.")
         else:
-            st.warning(
-                f"No orders placed — no symbol reached consensus "
-                f"({min_agree} strategies must agree)."
+            st.success(
+                "Cycle complete — orders placed for all actionable signals. "
+                "Check Recent Signals and Recent Fills for results."
             )
-
-        if rows:
-            df = pd.DataFrame(rows)
-
-            def _dir(v):
-                v = str(v).upper()
-                return "🟢 BUY" if v == "BUY" else ("🔴 SELL" if v == "SELL" else "⬜ HOLD")
-
-            def _consensus(row):
-                if row.get("direction") == "HOLD":
-                    return "—"
-                met = row.get("consensus_met", False)
-                agree = row.get("agreement", "")
-                return f"✅ {agree}" if met else f"⏳ {agree}"
-
-            if "direction" in df.columns:
-                df["direction"] = df["direction"].apply(_dir)
-            if "consensus_met" in df.columns:
-                df["consensus"] = df.apply(_consensus, axis=1)
-            show_cols = [c for c in ["strategy", "symbol", "direction", "price",
-                                     "consensus", "order_status"] if c in df.columns]
-            st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
 
 st.divider()
 
@@ -752,12 +708,16 @@ try:
             ]
 
         # Would-fire flag: matches an enabled assignment AND is actionable.
+        # Scheduler prefixes scanner/perplexity labels ("scanner:KO_RSI2…") but
+        # the assignment stores the bare name — strip the prefix for comparison.
         def _would_fire(row) -> str:
             d = str(row.get("direction", "")).upper()
             if d not in ("BUY", "SELL"):
                 return "—"
-            key = (str(row.get("symbol", "")).upper(), str(row.get("strategy_name", "")))
-            return "🎯 yes" if key in _live_pairs else "no"
+            sym = str(row.get("symbol", "")).upper()
+            raw_name = str(row.get("strategy_name", ""))
+            bare_name = raw_name.split(":", 1)[-1] if ":" in raw_name else raw_name
+            return "🎯 yes" if (sym, bare_name) in _live_pairs or (sym, raw_name) in _live_pairs else "no"
         df["would_fire"] = df.apply(_would_fire, axis=1)
 
         # Acted-on / order link, made legible.

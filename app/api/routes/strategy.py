@@ -21,7 +21,11 @@ from app.services.indicators.sma import compute_sma
 from app.services.market_data.provider import get_ohlcv, get_price_series
 from app.services.markets import is_india_symbol
 from app.services.strategy.engine import StrategyEngine, load_strategies_from_config
-from app.services.strategy.scheduler import get_scheduler_status, set_scheduler_system_flags
+from app.services.strategy.scheduler import (
+    get_scheduler_status,
+    run_once as _scheduler_run_once,
+    set_scheduler_system_flags,
+)
 
 router = APIRouter(prefix="/strategy", tags=["strategy"])
 _engine = StrategyEngine()
@@ -175,6 +179,36 @@ def list_configs():
     """Return active strategy configurations."""
     configs = load_strategies_from_config()
     return [{"name": c.name, "symbol": c.symbol, "type": c.type, "enabled": c.enabled} for c in configs]
+
+
+@router.post("/scheduler/run_now")
+def run_scheduler_now(dry_run: bool = True):
+    """Trigger one full scheduler cycle synchronously (all assigned symbols + consensus pool).
+
+    dry_run=true  (default) — evaluates every strategy, writes signal rows so
+                  Recent Signals updates, but places NO orders and does NOT
+                  touch the kill switch. Safe to call while the live scheduler
+                  is running.
+    dry_run=false — live run; places real orders.
+    """
+    import threading
+    done = threading.Event()
+    exc_holder: list[Exception] = []
+
+    def _run():
+        try:
+            _scheduler_run_once(force=True, dry_run=dry_run)
+        except Exception as e:
+            exc_holder.append(e)
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    done.wait(timeout=170)
+    if exc_holder:
+        raise HTTPException(status_code=500, detail=str(exc_holder[0]))
+    return {"status": "ok", "dry_run": dry_run, "message": "Scheduler cycle complete"}
 
 
 @router.get("/scheduler")

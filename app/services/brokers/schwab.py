@@ -358,10 +358,21 @@ class SchwabBroker(BrokerBase):
             "orderStrategyType": "SINGLE",
             "orderLegCollection": [leg],
         }
-        if order.order_type in ("LIMIT", "STOP_LIMIT") and order.limit_price:
-            payload["price"] = str(order.limit_price)
-        if order.order_type in ("STOP", "STOP_LIMIT") and order.stop_price:
-            payload["stopPrice"] = str(order.stop_price)
+        if order.order_type == "TRAILING_STOP":
+            # Schwab trailing stop API fields:
+            # stopPriceLinkType: PERCENT (% of price) or VALUE ($ amount)
+            # stopPriceOffset:   the trail distance
+            # Must be GTC so the trail survives past the entry bar.
+            payload["orderType"] = "TRAILING_STOP"
+            trail_val = order.trail_value or 5.0
+            payload["stopPriceLinkType"] = "VALUE" if order.trail_type == "DOLLAR" else "PERCENT"
+            payload["stopPriceOffset"] = trail_val
+            payload["duration"] = "GOOD_TILL_CANCEL"
+        else:
+            if order.order_type in ("LIMIT", "STOP_LIMIT") and order.limit_price:
+                payload["price"] = str(order.limit_price)
+            if order.order_type in ("STOP", "STOP_LIMIT") and order.stop_price:
+                payload["stopPrice"] = str(order.stop_price)
         return payload
 
     async def cancel_order(self, broker_order_id: str, account_id: str) -> bool:

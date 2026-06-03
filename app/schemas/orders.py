@@ -12,10 +12,13 @@ class OrderRequest(BaseModel):
     """Broker-agnostic order request passed into the execution layer."""
     symbol: str = Field(..., min_length=1, max_length=16)
     side: Literal["BUY", "SELL"]
-    order_type: Literal["MARKET", "LIMIT", "STOP", "STOP_LIMIT"] = "MARKET"
+    order_type: Literal["MARKET", "LIMIT", "STOP", "STOP_LIMIT", "TRAILING_STOP"] = "MARKET"
     quantity: float = Field(..., gt=0)
     limit_price: Optional[float] = None
     stop_price: Optional[float] = None
+    # For TRAILING_STOP: trail_type="PERCENT" uses trail_value as %, "DOLLAR" as $ amount.
+    trail_type: Literal["PERCENT", "DOLLAR"] = "PERCENT"
+    trail_value: Optional[float] = None   # e.g. 5.0 = 5% trail or $5.00 trail
     time_in_force: Literal["DAY", "GTC", "IOC", "FOK"] = "DAY"
     signal_id: Optional[int] = None
     idempotency_key: Optional[str] = None  # set by execution service
