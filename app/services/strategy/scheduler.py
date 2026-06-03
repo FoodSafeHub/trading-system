@@ -559,6 +559,32 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         )
                         continue
                     qty = held
+                    # Cancel any resting STOP / TRAILING_STOP orders for this
+                    # symbol before sending the MARKET SELL. Without this, the
+                    # orphaned stop fires after the position is already flat,
+                    # producing a phantom short or broker rejection.
+                    try:
+                        _exec_svc, _exec_acct = _svc_for(asgn_broker)
+                        _open = loop.run_until_complete(
+                            _exec_svc.broker.list_orders(_exec_acct, status="working")
+                        )
+                        for _o in _open:
+                            if (getattr(_o, "symbol", "").upper() == symbol.upper()
+                                    and getattr(_o, "side", "").upper() == "SELL"
+                                    and getattr(_o, "order_type", "").upper() in ("STOP", "TRAILING_STOP")
+                                    and getattr(_o, "broker_order_id", None)):
+                                loop.run_until_complete(
+                                    _exec_svc.broker.cancel_order(_o.broker_order_id, _exec_acct)
+                                )
+                                logger.info(
+                                    "[scheduler] Cancelled resting %s %s before MARKET SELL",
+                                    _o.order_type, symbol,
+                                )
+                    except Exception as _ce:
+                        logger.warning(
+                            "[scheduler] Could not cancel resting stops for %s: %s — proceeding with SELL",
+                            symbol, _ce,
+                        )
                 order_req = OrderRequest(
                     symbol=symbol,
                     side=direction,  # type: ignore[arg-type]

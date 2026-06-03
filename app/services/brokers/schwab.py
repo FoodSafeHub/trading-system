@@ -400,7 +400,8 @@ class SchwabBroker(BrokerBase):
             "maxResults":      100,
         }
         if status:
-            params["status"] = status
+            # Schwab status values are uppercase: WORKING, FILLED, CANCELED, etc.
+            params["status"] = status.upper()
         account_hash = await self._get_account_hash()
         data = await self._get(f"/accounts/{account_hash}/orders", params=params)
         return [self._parse_order_response(o) for o in data]
