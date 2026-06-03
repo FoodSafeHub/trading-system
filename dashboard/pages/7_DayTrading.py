@@ -1864,7 +1864,9 @@ with tab_autotrader:
                 })
             trades_df = pd.DataFrame(rows)
             st.dataframe(
-                trades_df.style.applymap(
+                # Styler.applymap was removed in pandas 2.1+; .map is the
+                # drop-in replacement with the same signature.
+                trades_df.style.map(
                     lambda v: "color: green" if isinstance(v, (int, float)) and v > 0 else
                               "color: red"   if isinstance(v, (int, float)) and v < 0 else "",
                     subset=["P&L ($)", "P&L %"],

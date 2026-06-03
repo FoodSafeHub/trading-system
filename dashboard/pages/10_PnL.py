@@ -484,7 +484,9 @@ else:
             return ""
 
     st.dataframe(
-        df_audit.style.applymap(_highlight_captured, subset=["Trail captured"]),
+        # Styler.applymap was removed in pandas 2.1+; .map is the drop-in
+        # replacement with the same signature.
+        df_audit.style.map(_highlight_captured, subset=["Trail captured"]),
         use_container_width=True,
         hide_index=True,
     )
