@@ -538,19 +538,26 @@ def _render_backtest_metrics(r: dict) -> None:
 
 def _single_trades_table(trades: list) -> None:
     st.divider()
-    st.subheader(f"All Trades ({len(trades)} total)")
-    if not trades:
+
+    # Separate Approach C signal markers from actual fills
+    signal_markers = [t for t in trades if t.get("side") == "SELL_SIGNAL"]
+    real_trades    = [t for t in trades if t.get("side") != "SELL_SIGNAL"]
+
+    st.subheader(f"All Trades ({len(real_trades)} total)"
+                 + (f"  —  {len(signal_markers)} Approach C signal(s)" if signal_markers else ""))
+    if not real_trades:
         st.info("No trades were generated in this period.")
         st.caption("Try a longer period (2y) or a different strategy.")
         return
 
     rows = []
     pending_buy = None
-    for t in trades:
+    for t in real_trades:
         if t["side"] == "BUY":
             pending_buy = t
             rows.append({**t, "pnl": None})
-        elif "SELL" in t["side"]:
+        elif t["side"] in ("SELL", "SELL (close)") or \
+             (t["side"].startswith("SELL") and t.get("quantity", 0) > 0):
             pnl = round(t["value"] - pending_buy["value"], 2) if pending_buy else None
             rows.append({**t, "pnl": pnl})
             pending_buy = None
@@ -561,11 +568,25 @@ def _single_trades_table(trades: list) -> None:
     df["price"] = df["price"].apply(lambda v: f"${v:,.2f}")
     df["pnl"]   = df["pnl"].apply(_pnl_tag)
     df = df.rename(columns={"pnl": "profit / loss"})
-    # Drop internal fields not useful to display
     for col in ["signal_from", "regime"]:
         if col in df.columns:
             df = df.drop(columns=[col])
     st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # Show Approach C signal markers as a separate informational table
+    if signal_markers:
+        with st.expander(f"Approach C — SELL signal markers ({len(signal_markers)})", expanded=False):
+            st.caption(
+                "These are the points where the assigned strategy fired a SELL signal "
+                "and the 2% tight trailing stop was placed. The position stayed open "
+                "until the trail hit — the actual exit is the SELL row above this marker."
+            )
+            sig_df = pd.DataFrame([{
+                "Signal date": t.get("date"),
+                "Signal price": f"${t['price']:,.2f}",
+                "Strategy": (t.get("signal_from") or "").replace(":approach_c_signal", ""),
+            } for t in signal_markers])
+            st.dataframe(sig_df, use_container_width=True, hide_index=True)
 
 
 def _consensus_trades_table(trades: list) -> None:
