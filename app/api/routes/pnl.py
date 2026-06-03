@@ -68,10 +68,16 @@ class ClosedTradeOut(BaseModel):
     buy_strategy: Optional[str]
     sell_strategy: Optional[str]
     is_paper: bool
+    # Trailing stop audit fields — populated when the exit was via a trailing stop.
+    signal_price: Optional[float] = None    # price when SELL signal fired (from Signal row)
+    signal_at: Optional[datetime] = None    # timestamp of the SELL signal
+    trail_pct: Optional[float] = None       # trail % placed at signal time (from Order row)
+    trail_captured_pct: Optional[float] = None  # (sell_price - signal_price) / signal_price * 100
+    exit_type: Optional[str] = None         # "trailing_stop" | "market" | "stop" | "unknown"
 
-    @field_serializer("buy_at", "sell_at")
-    def _ser_ts(self, dt: datetime) -> str | None:
-        return serialize_et(dt)
+    @field_serializer("buy_at", "sell_at", "signal_at")
+    def _ser_ts(self, dt: datetime | None) -> str | None:
+        return serialize_et(dt) if dt else None
 
 
 class EquityPointOut(BaseModel):
@@ -193,7 +199,13 @@ def pnl_closed_trades(
     limit: int = 500,
     db: Session = Depends(get_db),
 ):
-    """The realized round-trip log. Most recent SELL first."""
+    """The realized round-trip log. Most recent SELL first.
+
+    For trailing-stop exits, also returns signal_price (price when the SELL
+    signal fired), signal_at (when it fired), trail_pct (the % trail placed),
+    trail_captured_pct (extra gain between signal price and actual exit), and
+    exit_type so the dashboard can render the trail stop audit.
+    """
     if limit < 1 or limit > 5000:
         raise HTTPException(400, "limit must be between 1 and 5000")
     closed, _ = _refresh(db)
@@ -204,8 +216,42 @@ def pnl_closed_trades(
     if strategy:
         rows = [t for t in rows if (t.buy_strategy or "(unattributed)") == strategy]
     rows = sorted(rows, key=lambda t: t.sell_at, reverse=True)[:limit]
-    return [
-        ClosedTradeOut(
+
+    # Build a lookup: sell_order_id → (signal_price, signal_at, trail_pct, exit_type)
+    # by joining Order → Signal for every sell order in this result set.
+    from app.models.orders import Order
+    from app.models.signals import Signal
+
+    sell_ids = [t.sell_order_id for t in rows if t.sell_order_id]
+    trail_info: dict[int, dict] = {}
+    if sell_ids:
+        sell_orders = db.query(Order).filter(Order.id.in_(sell_ids)).all()
+        order_by_id = {o.id: o for o in sell_orders}
+        sig_ids = [o.signal_id for o in sell_orders if o.signal_id]
+        signals_by_id: dict[int, Signal] = {}
+        if sig_ids:
+            for sig in db.query(Signal).filter(Signal.id.in_(sig_ids)).all():
+                signals_by_id[sig.id] = sig
+
+        for o in sell_orders:
+            sig = signals_by_id.get(o.signal_id) if o.signal_id else None
+            exit_type = (o.order_type or "unknown").lower()
+            trail_info[o.id] = {
+                "signal_price": float(sig.price_at_signal) if sig and sig.price_at_signal else None,
+                "signal_at":    sig.created_at if sig else None,
+                "trail_pct":    float(o.trail_value) if getattr(o, "trail_value", None) else None,
+                "exit_type":    exit_type,
+            }
+
+    result = []
+    for t in rows:
+        info = trail_info.get(t.sell_order_id, {})
+        sp = info.get("signal_price")
+        # trail_captured_pct: how much extra (%) the stock moved from signal → exit
+        trail_captured = None
+        if sp and sp > 0 and t.sell_price:
+            trail_captured = round((t.sell_price - sp) / sp * 100, 2)
+        result.append(ClosedTradeOut(
             symbol=t.symbol, quantity=t.quantity, buy_price=t.buy_price,
             sell_price=t.sell_price, buy_at=t.buy_at, sell_at=t.sell_at,
             realized_pnl=t.realized_pnl, realized_pct=t.realized_pct,
@@ -213,9 +259,13 @@ def pnl_closed_trades(
             buy_order_id=t.buy_order_id, sell_order_id=t.sell_order_id,
             buy_strategy=t.buy_strategy, sell_strategy=t.sell_strategy,
             is_paper=t.is_paper,
-        )
-        for t in rows
-    ]
+            signal_price=sp,
+            signal_at=info.get("signal_at"),
+            trail_pct=info.get("trail_pct"),
+            trail_captured_pct=trail_captured,
+            exit_type=info.get("exit_type"),
+        ))
+    return result
 
 
 @router.get("/equity-curve", response_model=List[EquityPointOut])
