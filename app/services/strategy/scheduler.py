@@ -546,11 +546,7 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                             )
                             continue
                 else:
-                    # SELL: only close positions we actually hold. Be strict —
-                    # require a meaningful position (>= 1 share) to avoid the
-                    # phantom-SELL burst that hit AAPL/SPY/GOOGL/AMZN/AMD on
-                    # 2026-05-19 13:49 where the broker rejected every order
-                    # as oversold/overbought.
+                    # SELL signal: only act on positions we actually hold.
                     held = current_positions.get(symbol, 0.0)
                     if held < 1.0:
                         logger.info(
@@ -559,14 +555,27 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         )
                         continue
                     qty = held
-                    # Cancel any resting STOP / TRAILING_STOP orders for this
-                    # symbol before sending the MARKET SELL. Without this, the
-                    # orphaned stop fires after the position is already flat,
-                    # producing a phantom short or broker rejection.
+
+                    # ── Strategy SELL → tight trailing stop ──────────────────
+                    # Instead of a MARKET SELL, tighten the trailing stop to 1%
+                    # below the current price. This lets the stock ride any
+                    # remaining upside (RSI/extension signals fire before the
+                    # absolute peak) and only exits once the stock pulls back
+                    # 1% from its new high. The broker manages the ratchet
+                    # continuously so we capture the exact reversal point.
+                    #
+                    # Workflow:
+                    #   1. Cancel the existing wide trailing stop (placed at BUY).
+                    #   2. Place a new TRAILING_STOP at 1% trail — GTC.
+                    #   3. Mark signal as acted_on (trail placed = action taken).
+                    #   4. Skip the MARKET SELL below by continuing the loop.
+
+                    exec_svc, exec_acct = _svc_for(asgn_broker)
+
+                    # Step 1: cancel any resting STOP/TRAILING_STOP for this symbol
                     try:
-                        _exec_svc, _exec_acct = _svc_for(asgn_broker)
                         _open = loop.run_until_complete(
-                            _exec_svc.broker.list_orders(_exec_acct, status="working")
+                            exec_svc.broker.list_orders(exec_acct, status="working")
                         )
                         for _o in _open:
                             if (getattr(_o, "symbol", "").upper() == symbol.upper()
@@ -574,17 +583,66 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                                     and getattr(_o, "order_type", "").upper() in ("STOP", "TRAILING_STOP")
                                     and getattr(_o, "broker_order_id", None)):
                                 loop.run_until_complete(
-                                    _exec_svc.broker.cancel_order(_o.broker_order_id, _exec_acct)
+                                    exec_svc.broker.cancel_order(_o.broker_order_id, exec_acct)
                                 )
                                 logger.info(
-                                    "[scheduler] Cancelled resting %s %s before MARKET SELL",
-                                    _o.order_type, symbol,
+                                    "[scheduler] SELL signal %s: cancelled resting %s",
+                                    symbol, _o.order_type,
                                 )
                     except Exception as _ce:
                         logger.warning(
-                            "[scheduler] Could not cancel resting stops for %s: %s — proceeding with SELL",
-                            symbol, _ce,
+                            "[scheduler] SELL signal %s: could not cancel resting stops (%s) "
+                            "— placing tight trail anyway", symbol, _ce,
                         )
+
+                    # Step 2: place 1% trailing stop — broker ratchets it up as
+                    # price rises, exits the moment price drops 1% from the peak.
+                    tight_trail_pct = 1.0
+                    tight_req = OrderRequest(
+                        symbol=symbol,
+                        side="SELL",
+                        order_type="TRAILING_STOP",
+                        quantity=qty,
+                        trail_type="PERCENT",
+                        trail_value=tight_trail_pct,
+                        time_in_force="GTC",
+                        source=asgn_broker if asgn_broker != "default" else "scheduler",
+                        idempotency_key=f"sell-trail-{symbol}-{int(entry * 100)}",
+                    )
+                    try:
+                        trail_resp = loop.run_until_complete(
+                            exec_svc.broker.place_order(tight_req, exec_acct)
+                        )
+                        logger.info(
+                            "[scheduler] SELL signal %s: placed 1%% trailing stop "
+                            "@ current price ~%.2f → broker_id=%s",
+                            symbol, entry, trail_resp.broker_order_id,
+                        )
+                    except Exception as _te:
+                        logger.error(
+                            "[scheduler] SELL signal %s: failed to place tight trail (%s) "
+                            "— falling back to MARKET SELL", symbol, _te,
+                        )
+                        # Fallback: if trail placement fails, do an immediate market sell
+                        fallback_req = OrderRequest(
+                            symbol=symbol, side="SELL", order_type="MARKET",
+                            quantity=qty, source="scheduler",
+                        )
+                        loop.run_until_complete(exec_svc.execute(
+                            fallback_req, account_id=exec_acct, estimated_price=entry,
+                        ))
+
+                    # Step 3: mark signal acted_on regardless of trail/fallback path
+                    sig_id = _mark_signal_acted_on(symbol, direction, label)
+                    try:
+                        from app.services.notifications.bus import notify_signal
+                        notify_signal(symbol=symbol, direction=direction, strategy=label,
+                                      source="scheduler", price=entry)
+                    except Exception:
+                        pass
+                    continue  # skip the generic order block below — trail already placed
+
+                # ── BUY order construction (SELL continues above) ────────────
                 order_req = OrderRequest(
                     symbol=symbol,
                     side=direction,  # type: ignore[arg-type]

@@ -195,8 +195,18 @@ class ExecutionService:
         fill_price = fill.fill_price or 0.0
 
         if settings.trailing_stop_enabled:
-            # Compute trail distance using chandelier ATR when possible.
-            trail_pct = settings.trail_stop_pct
+            # Volatility-aware trail: use ATR% (ATR/price × 100) scaled by a
+            # multiplier that adjusts for how volatile the symbol is.
+            #
+            # ATR% buckets (based on 22-day ATR as % of price):
+            #   < 1.5%  → low-vol  (KO, XOM, SO)   → 2× ATR trail (~2.5–3%)
+            #   1.5–3%  → mid-vol  (NVDA, BAC, COP) → 2.5× ATR trail (~4–7%)
+            #   > 3%    → high-vol (TSLA, PLTR)      → 3× ATR trail (~9–12%)
+            #
+            # This means low-vol stocks get a tighter trail (less slippage on
+            # the exit) and high-vol stocks get breathing room (normal pullbacks
+            # won't shake them out).
+            trail_pct = settings.trail_stop_pct  # fallback
             try:
                 from app.services.market_data.provider import get_ohlcv
                 from app.services.strategy.rules import _atr_raw
@@ -204,14 +214,23 @@ class ExecutionService:
                 if not df.empty and len(df) >= 22:
                     atr = float(_atr_raw(df, 22).iloc[-1])
                     if fill_price > 0 and atr > 0:
-                        # Chandelier: 3× ATR trail (same multiplier as rules.py default)
-                        trail_dollar = round(3.0 * atr, 2)
-                        trail_pct_derived = (trail_dollar / fill_price) * 100
-                        # Clamp: at least 2% trail, at most 12% (avoid runaway)
-                        trail_pct = max(2.0, min(12.0, trail_pct_derived))
+                        atr_pct = (atr / fill_price) * 100
+                        if atr_pct < 1.5:
+                            mult = 2.0     # low-vol:  KO, SO        → ~3%
+                        elif atr_pct < 3.0:
+                            mult = 2.5     # mid-vol:  XOM, BAC, COP → ~4–7%
+                        elif atr_pct < 4.5:
+                            mult = 2.0     # high-vol: NVDA, TSLA    → ~7–9%
+                        else:
+                            mult = 1.5     # very-high: TOST, PLTR   → ~7–9%
+                        trail_pct = round(atr_pct * mult, 2)
+                        # Floor 1.5% (never choke), ceiling 10% (never give
+                        # back more than a solid swing move).
+                        trail_pct = max(1.5, min(10.0, trail_pct))
                         logger.info(
-                            "[exec] Chandelier trail %s: ATR=%.2f → trail=%.2f (%.1f%%)",
-                            buy_req.symbol, atr, trail_dollar, trail_pct,
+                            "[exec] Volatility trail %s: ATR=%.2f (%.1f%% of price) "
+                            "× %.1f → trail=%.2f%%",
+                            buy_req.symbol, atr, atr_pct, mult, trail_pct,
                         )
             except Exception as exc:
                 logger.debug("[exec] ATR trail compute failed, using pct fallback: %s", exc)
