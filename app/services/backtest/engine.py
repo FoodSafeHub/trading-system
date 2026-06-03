@@ -106,6 +106,19 @@ def run_backtest(
     daily_returns: List[float] = []
     prev_equity = initial_capital
 
+    # Approach C: tight trailing stop state.
+    # When the assigned strategy fires SELL, instead of exiting immediately we
+    # switch into "tight trail" mode — the position stays open and we track a
+    # 2% trailing stop from the signal price. The position only closes when the
+    # high since the signal drops by trail_pct%.
+    # approach_c=True is set via params["approach_c"] = True.
+    _approach_c = bool(params.get("approach_c", False))
+    _tight_trail_pct = float(params.get("tight_trail_pct", 2.0))
+    _in_tight_trail = False    # True when SELL signal fired, trail is active
+    _trail_high = 0.0          # highest high seen since trail activated
+    _trail_stop = 0.0          # current stop = _trail_high * (1 - trail_pct/100)
+    _signal_price = 0.0        # close price when SELL signal fired (for audit)
+
     # Need at least 30 bars of history before we start signalling
     lookback = 35
 
@@ -164,6 +177,52 @@ def run_backtest(
                 prev_equity = equity
                 continue
 
+        # ── Approach C: tight trail active — check stop before strategy eval ──
+        if _approach_c and _in_tight_trail and position > 0:
+            bar_high = float(df["High"].iloc[i]) if "High" in df.columns else current_close
+            bar_low  = float(df["Low"].iloc[i])  if "Low"  in df.columns else current_close
+            # Ratchet the trail high upward with this bar's high
+            if bar_high > _trail_high:
+                _trail_high = bar_high
+                _trail_stop = round(_trail_high * (1 - _tight_trail_pct / 100), 2)
+            # Exit when low touches or breaches the stop
+            if bar_low <= _trail_stop:
+                sell_px = max(_trail_stop, float(opens.iloc[i])) if i < len(opens) else _trail_stop
+                if cost_model is not None:
+                    sell_px = cost_model.apply_sell(sell_px)
+                proceeds = sell_px * position
+                commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
+                pnl = proceeds - position_cost
+                capital += proceeds - commission
+                trades.append(BacktestTrade(
+                    date=today, symbol=symbol, side="SELL",
+                    price=sell_px, quantity=position, value=proceeds,
+                    signal_from=f"{strategy_name}:tight_trail_{_tight_trail_pct:.0f}pct"
+                                f"_signal@{_signal_price:.2f}",
+                ))
+                position = 0.0; position_cost = 0.0; entry_price = 0.0
+                highest_close = 0.0; bars_held = 0
+                _in_tight_trail = False; _trail_high = 0.0; _trail_stop = 0.0; _signal_price = 0.0
+                equity = capital
+                equity_curve.append({"date": today, "equity": round(equity, 2)})
+                peak_equity = max(peak_equity, equity)
+                dd = (peak_equity - equity) / peak_equity * 100
+                max_drawdown = max(max_drawdown, dd)
+                ret = (equity - prev_equity) / prev_equity if prev_equity > 0 else 0
+                daily_returns.append(ret)
+                prev_equity = equity
+                continue
+            # Trail active but not hit — skip strategy re-evaluation this bar
+            equity = capital + position * current_close
+            equity_curve.append({"date": today, "equity": round(equity, 2)})
+            peak_equity = max(peak_equity, equity)
+            dd = (peak_equity - equity) / peak_equity * 100
+            max_drawdown = max(max_drawdown, dd)
+            ret = (equity - prev_equity) / prev_equity if prev_equity > 0 else 0
+            daily_returns.append(ret)
+            prev_equity = equity
+            continue
+
         signal = evaluate_strategy(
             strategy_type, symbol, price_series, params, ohlcv=df_slice, position=pos_state
         )
@@ -195,22 +254,39 @@ def run_backtest(
                 ))
 
         elif direction == "SELL" and position > 0:
-            # Cost-adjusted fill: sells fill WORSE (lower). cost_model None => sell_px == fill_price.
-            sell_px = fill_price if cost_model is None else cost_model.apply_sell(fill_price)
-            proceeds = sell_px * position
-            commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
-            pnl = proceeds - position_cost
-            capital += proceeds - commission
-            trades.append(BacktestTrade(
-                date=today, symbol=symbol, side="SELL",
-                price=sell_px, quantity=position, value=proceeds,
-                signal_from=strategy_name,
-            ))
-            position = 0.0
-            position_cost = 0.0
-            entry_price = 0.0
-            highest_close = 0.0
-            bars_held = 0
+            if _approach_c and not _in_tight_trail:
+                # Approach C: SELL signal fires → activate 2% tight trail.
+                # Do NOT exit yet. Record signal price and start trailing
+                # from the signal bar's close. Trail checks happen at the
+                # top of the next bar's iteration.
+                _signal_price = current_close
+                _trail_high   = current_close
+                _trail_stop   = round(current_close * (1 - _tight_trail_pct / 100), 2)
+                _in_tight_trail = True
+                # Record signal in trades list as a marker (no cash change)
+                trades.append(BacktestTrade(
+                    date=today, symbol=symbol, side="SELL_SIGNAL",
+                    price=current_close, quantity=0.0, value=0.0,
+                    signal_from=f"{strategy_name}:approach_c_signal",
+                ))
+            else:
+                # Normal exit (approach_c=False, or already in trail which
+                # shouldn't reach here but guard anyway)
+                sell_px = fill_price if cost_model is None else cost_model.apply_sell(fill_price)
+                proceeds = sell_px * position
+                commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
+                pnl = proceeds - position_cost
+                capital += proceeds - commission
+                trades.append(BacktestTrade(
+                    date=today, symbol=symbol, side="SELL",
+                    price=sell_px, quantity=position, value=proceeds,
+                    signal_from=strategy_name,
+                ))
+                position = 0.0
+                position_cost = 0.0
+                entry_price = 0.0
+                highest_close = 0.0
+                bars_held = 0
 
         # Mark-to-market equity
         equity = capital + position * current_close
@@ -246,8 +322,10 @@ def run_backtest(
     final_capital = capital
 
     # P&L per round trip
+    # Exclude SELL_SIGNAL markers (approach_c signal events, qty=0) from round-trip counting
     buy_trades  = [t for t in trades if t.side == "BUY"]
-    sell_trades = [t for t in trades if "SELL" in t.side]
+    sell_trades = [t for t in trades if t.side in ("SELL", "SELL (close)") or
+                   (t.side.startswith("SELL") and t.quantity > 0)]
     round_trips = min(len(buy_trades), len(sell_trades))
 
     winning = losing = 0
@@ -280,7 +358,7 @@ def run_backtest(
         final_capital=round(final_capital, 2),
         total_return_pct=round(total_return, 2),
         total_pnl=round(total_pnl, 2),
-        total_trades=len(trades),
+        total_trades=len([t for t in trades if t.side != "SELL_SIGNAL"]),
         winning_trades=winning,
         losing_trades=losing,
         win_rate_pct=round(win_rate, 2),

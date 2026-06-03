@@ -242,7 +242,9 @@ def backtest_run_generic(
     disable_trail: bool = False,
     disable_exit_policy: bool = False,
     stop_loss_pct: float = 8.0,
-    exit_rsi: float = 0.0,   # 0 = use strategy default; >0 overrides the SELL RSI gate
+    exit_rsi: float = 0.0,
+    approach_c: bool = False,          # simulate Approach C: SELL signal → 2% tight trail
+    tight_trail_pct: float = 2.0,      # trail % for Approach C (default 2%)
 ):
     """Run a single strategy on an arbitrary symbol using factory defaults.
 
@@ -283,6 +285,11 @@ def backtest_run_generic(
     if exit_rsi > 0:
         for key in ("rsi_exit_threshold", "exit_rsi", "rsi_overbought"):
             effective_params = {**effective_params, key: exit_rsi}
+    # Approach C: SELL signal → tight trailing stop instead of immediate exit
+    if approach_c:
+        effective_params = {**effective_params,
+                            "approach_c": True,
+                            "tight_trail_pct": tight_trail_pct}
     try:
         result = run_backtest(
             strategy_name=cfg.name,
@@ -305,6 +312,8 @@ def backtest_run_generic(
             "disable_exit_policy": disable_exit_policy,
             "stop_loss_pct": stop_loss_pct,
             "exit_rsi": exit_rsi if exit_rsi > 0 else None,
+            "approach_c": approach_c,
+            "tight_trail_pct": tight_trail_pct if approach_c else None,
         },
         "period": result.period,
         "start_date": result.start_date,

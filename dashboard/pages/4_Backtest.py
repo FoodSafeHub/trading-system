@@ -829,6 +829,37 @@ if mode == "Single Strategy":
             else:
                 st.info("Using strategy default — 72 for US momentum strategies.")
 
+    with st.expander("Approach C — SELL signal → tight trailing stop", expanded=False):
+        st.caption(
+            "Simulates the live Approach C behaviour: when the assigned strategy fires "
+            "a SELL signal, instead of exiting immediately the backtest holds the position "
+            "and places a tight trailing stop from the signal price. The position only "
+            "closes when the stock drops `trail %` from its post-signal high. "
+            "Compare to the default (immediate SELL) to see how much extra the trail captures."
+        )
+        _ac1, _ac2, _ac3 = st.columns([2, 2, 3])
+        with _ac1:
+            bt_approach_c = st.checkbox(
+                "Enable Approach C", value=False, key="bt_approach_c",
+                help="SELL signal → tight trailing stop instead of immediate exit.",
+            )
+        with _ac2:
+            bt_tight_trail = st.slider(
+                "Tight trail %", min_value=1.0, max_value=5.0,
+                value=2.0, step=0.5, key="bt_tight_trail",
+                disabled=not bt_approach_c,
+                help="Trail % placed from signal price. Default 2% (live default).",
+            )
+        with _ac3:
+            if bt_approach_c:
+                st.info(
+                    f"Approach C ON — SELL signal activates a **{bt_tight_trail:.1f}% trailing stop** "
+                    f"from signal price. Position exits when price drops {bt_tight_trail:.1f}% from "
+                    f"its post-signal high. Signal markers appear in the trades table as SELL_SIGNAL."
+                )
+            else:
+                st.info("Default: SELL signal exits immediately at next-bar open.")
+
     if not run and "bt_result" not in st.session_state:
         st.info("Type a symbol, pick a strategy, then click Run Backtest.")
         st.stop()
@@ -846,6 +877,8 @@ if mode == "Single Strategy":
                     disable_exit_policy=disable_exit_policy,
                     stop_loss_pct=float(bt_stop_loss_pct),
                     exit_rsi=float(bt_exit_rsi),
+                    approach_c=bt_approach_c,
+                    tight_trail_pct=float(bt_tight_trail),
                     timeout=120,
                 )
                 st.session_state["bt_result"] = result
@@ -877,6 +910,7 @@ if mode == "Single Strategy":
         if ov.get("disable_trail"): override_notes.append("chandelier trail disabled")
         if ov.get("disable_exit_policy"): override_notes.append("exit policy disabled")
         if ov.get("exit_rsi"): override_notes.append(f"RSI sell threshold = {ov['exit_rsi']}")
+        if ov.get("approach_c"): override_notes.append(f"Approach C — {ov.get('tight_trail_pct',2)}% tight trail on SELL signal")
         if override_notes:
             st.caption("Overrides for this run: " + " · ".join(override_notes))
         exit_policy.render(_eff_stype, _eff_params)

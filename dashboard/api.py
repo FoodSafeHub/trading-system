@@ -600,6 +600,8 @@ def backtest_run_generic(symbol: str, strategy_type: str,
                          disable_exit_policy: bool = False,
                          stop_loss_pct: float = 8.0,
                          exit_rsi: float = 0.0,
+                         approach_c: bool = False,
+                         tight_trail_pct: float = 2.0,
                          timeout: int = 120):
     """Single-strategy backtest on an arbitrary symbol using factory defaults."""
     params = {"period": period, "initial_capital": initial_capital,
@@ -608,6 +610,9 @@ def backtest_run_generic(symbol: str, strategy_type: str,
               "stop_loss_pct": stop_loss_pct}
     if exit_rsi > 0:
         params["exit_rsi"] = exit_rsi
+    if approach_c:
+        params["approach_c"] = "true"
+        params["tight_trail_pct"] = tight_trail_pct
     return _get(f"/backtest/run-generic/{symbol}/{strategy_type}", params=params, timeout=timeout)
 
 
