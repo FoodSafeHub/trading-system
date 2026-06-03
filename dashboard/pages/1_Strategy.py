@@ -170,19 +170,29 @@ else:
     firing_summary = "Can fire on: " + " + ".join(firing_bits) + "."
     firing_color = "warning" if consensus_on else "info"
 
-st.markdown(f"**Next scheduler cycle ({sched.get('interval_seconds', '?')}s):**")
+_interval_s = sched.get("interval_seconds", 3600)
+_interval_label = f"{_interval_s // 60}min" if _interval_s and _interval_s % 60 == 0 else f"{_interval_s}s"
+st.markdown(f"**Next scheduler cycle (every {_interval_label}):**")
 {"info": st.info, "warning": st.warning}.get(firing_color, st.info)(firing_summary)
 
-# Compact status row underneath
-sc1, sc2, sc3, sc4 = st.columns(4)
+# Compact status row
+sc1, sc2, sc3, sc4, sc5 = st.columns(5)
 sc1.metric("Scheduler", "🟢 Running" if sched_running else "🔴 Stopped")
-sc2.metric("Interval", f"{sched.get('interval_seconds', '?')}s")
+sc2.metric("Cycle interval", _interval_label)
 sc3.metric("Assignments", f"{n_assigned_active} active / {n_assigned_paused} paused")
 sc4.metric(
     "Consensus pool",
     "ON" if consensus_on else "OFF",
     delta=("⚠ unbounded symbols" if consensus_on else "only assigned"),
     delta_color=("inverse" if consensus_on else "normal"),
+)
+sc5.metric(
+    "Exit mode",
+    "Trail → tight 1%",
+    delta="SELL signal tightens stop",
+    delta_color="normal",
+    help="On SELL signal: wide trail cancelled, 1% trailing stop placed. "
+         "Broker ratchets up as price rises, exits on 1% pullback from peak.",
 )
 
 st.divider()

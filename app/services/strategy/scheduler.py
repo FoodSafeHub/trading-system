@@ -781,13 +781,18 @@ _POSITION_SYNC_INTERVAL_SECONDS = 900   # 15 min — cheap broker read
 
 
 def _run_chandelier_trail_job() -> None:
-    """Ratchet static SELL STOP orders upward using chandelier ATR math.
+    """Upgrade legacy static SELL STOPs to the chandelier ATR level.
 
-    Runs every 15 min during market hours. For each open long position that
-    has a resting static STOP (not a broker-native trailing stop), compute the
-    current chandelier stop (highest_close - 3×ATR22) and cancel+replace the
-    old stop if the new level is meaningfully higher (>= 0.5% improvement).
-    This upgrades positions entered before trailing_stop_enabled was set.
+    Runs every 15 min during market hours.
+
+    With trailing_stop_enabled=True, new positions get a broker-native
+    TRAILING_STOP at BUY time — the broker ratchets it automatically, so
+    this job intentionally skips those symbols (no-op on TRAILING_STOP orders).
+
+    It only handles the legacy case: positions that were opened BEFORE the
+    trailing stop feature was enabled and still have a plain STOP order.
+    For those, it computes highest_close - 3×ATR22 and replaces the old
+    STOP if the new level is >= 0.5% higher.
     """
     settings = get_settings()
     if not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
@@ -800,7 +805,6 @@ def _run_chandelier_trail_job() -> None:
         from app.services.market_data.provider import get_ohlcv
         from app.services.strategy.rules import _atr_raw
         from app.schemas.orders import OrderRequest
-        from app.models.orders import Order
 
         loop = _aio.new_event_loop()
         try:
@@ -809,34 +813,51 @@ def _run_chandelier_trail_job() -> None:
             accounts = loop.run_until_complete(broker.get_accounts())
             account_id = accounts[0].account_id if accounts else ""
 
-            # Find all open positions
             positions = loop.run_until_complete(broker.get_positions(account_id))
             long_positions = {p.symbol.upper(): p.quantity for p in positions if p.quantity > 0}
             if not long_positions:
                 return
 
-            # Find resting SELL STOP orders for those symbols
             open_orders = loop.run_until_complete(broker.list_orders(account_id, status="working"))
-            stop_by_symbol: dict[str, object] = {}
-            for o in open_orders:
-                if o.side == "SELL" and o.order_type in ("STOP", "stop") and o.symbol in long_positions:
-                    stop_by_symbol[o.symbol] = o
 
+            # Bucket open SELL orders by symbol — we need to know whether each
+            # symbol already has a broker-native TRAILING_STOP (skip it) or only
+            # a plain STOP (upgrade it).
+            trailing_stop_symbols: set[str] = set()
+            static_stop_by_symbol: dict[str, object] = {}
+            for o in open_orders:
+                sym = getattr(o, "symbol", "").upper()
+                otype = getattr(o, "order_type", "").upper()
+                side = getattr(o, "side", "").upper()
+                if side != "SELL" or sym not in long_positions:
+                    continue
+                if otype == "TRAILING_STOP":
+                    # Broker manages the ratchet — nothing for us to do.
+                    trailing_stop_symbols.add(sym)
+                elif otype == "STOP":
+                    static_stop_by_symbol[sym] = o
+
+            # Only process symbols with a plain STOP and NO trailing stop.
             for symbol, qty in long_positions.items():
-                existing_stop = stop_by_symbol.get(symbol)
+                if symbol in trailing_stop_symbols:
+                    logger.debug(
+                        "[scheduler] Chandelier trail %s: TRAILING_STOP active, "
+                        "broker handles ratchet — skipping", symbol,
+                    )
+                    continue
+                existing_stop = static_stop_by_symbol.get(symbol)
                 if not existing_stop:
                     continue
+
                 old_stop = getattr(existing_stop, "stop_price", None) or 0.0
                 if not old_stop:
-                    # Try to parse from raw
                     try:
-                        old_stop = float(existing_stop.raw.get("stopPrice", 0) or 0)
+                        old_stop = float(getattr(existing_stop, "raw", {}).get("stopPrice", 0) or 0)
                     except Exception:
                         continue
                 if old_stop <= 0:
                     continue
 
-                # Compute chandelier stop
                 try:
                     df = get_ohlcv(symbol, period="3mo")
                     if df.empty or len(df) < 22:
@@ -848,15 +869,13 @@ def _run_chandelier_trail_job() -> None:
                     logger.debug("[scheduler] Chandelier trail %s failed: %s", symbol, exc)
                     continue
 
-                # Only ratchet UP and only when the improvement is >= 0.5%
                 if new_stop <= old_stop * 1.005:
                     continue
 
                 logger.info(
-                    "[scheduler] Chandelier trail %s: ratchet STOP %.2f → %.2f",
+                    "[scheduler] Chandelier trail %s: ratchet legacy STOP %.2f → %.2f",
                     symbol, old_stop, new_stop,
                 )
-                # Cancel old stop, place new one
                 try:
                     loop.run_until_complete(
                         broker.cancel_order(existing_stop.broker_order_id, account_id)
@@ -872,7 +891,7 @@ def _run_chandelier_trail_job() -> None:
                         idempotency_key=f"trail-{symbol}-{int(new_stop*100)}",
                     )
                     loop.run_until_complete(broker.place_order(new_req, account_id))
-                    logger.info("[scheduler] Chandelier trail %s: new STOP placed @ %.2f", symbol, new_stop)
+                    logger.info("[scheduler] Chandelier trail %s: legacy STOP upgraded to %.2f", symbol, new_stop)
                 except Exception as exc:
                     logger.error("[scheduler] Chandelier trail %s: cancel/replace failed: %s", symbol, exc)
         finally:

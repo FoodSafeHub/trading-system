@@ -120,11 +120,13 @@ class Settings(BaseSettings):
     backtest_costs_enabled: bool = False
 
     # ── Scheduler ────────────────────────────────────────────
-    # Interval for the daily-candle strategy cycle (Bollinger + Perplexity).
-    # Day-trading has its own intraday loop (autotrader/manager.py) and is
-    # NOT driven by this scheduler. Daily strategies don't benefit from
-    # sub-hour ticks — hourly is plenty and avoids needless yfinance calls.
-    scheduler_interval_seconds: int = 3600
+    # Interval for the strategy evaluation cycle.
+    # Reduced from 3600 (1h) to 900 (15min) so SELL signals that trigger
+    # the tight 1% trailing stop fire closer to the actual RSI/extension
+    # peak — an hourly cycle can miss a 45-min intraday reversal window.
+    # OHLCV data is daily-candle based so 15min re-evaluation uses the
+    # same bar data; the gain is catching the signal earlier in the session.
+    scheduler_interval_seconds: int = 900
     scheduler_enabled: bool = True
     # Which strategy systems participate in the auto-scheduler cycle.
     # Both can be enabled at the same time.

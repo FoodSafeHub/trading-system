@@ -62,6 +62,8 @@ class OrderOut(BaseModel):
     quantity: float
     limit_price: Optional[float]
     stop_price: Optional[float]
+    trail_type: Optional[str] = None    # PERCENT | DOLLAR — set for TRAILING_STOP orders
+    trail_value: Optional[float] = None # e.g. 3.96 (%) or 2.50 ($)
     status: str
     is_paper: bool
     signal_id: Optional[int] = None

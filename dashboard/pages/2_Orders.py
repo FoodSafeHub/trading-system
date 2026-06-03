@@ -119,11 +119,24 @@ try:
         # Show most useful columns first. Source and planned_exit go right next
         # to status so the operator can answer "where did this come from?" and
         # "what's the exit?" without scrolling.
-        priority = ["created_at", "symbol", "side", "order_type", "quantity",
+        # Synthesise a human-readable "trail" column for TRAILING_STOP orders.
+        if "order_type" in df.columns:
+            def _trail_label(row):
+                if str(row.get("order_type", "")).upper() != "TRAILING_STOP":
+                    return "—"
+                val = row.get("trail_value")
+                typ = str(row.get("trail_type", "PERCENT")).upper()
+                if val is None:
+                    return "trailing"
+                return f"{val:.1f}%" if typ == "PERCENT" else f"${val:.2f}"
+            df["trail"] = df.apply(_trail_label, axis=1)
+
+        priority = ["created_at", "symbol", "side", "order_type", "trail", "quantity",
                     "fill_price", "status", "source", "planned_exit",
                     "broker_order_id"]
-        # Hide the raw JSON / numeric ID plumbing columns — they're noise in the table.
-        hidden = {"preview_json", "signal_id", "strategy_name", "source"}
+        # Hide raw JSON / internal plumbing — noise in the table.
+        hidden = {"preview_json", "signal_id", "strategy_name", "source",
+                  "trail_type", "trail_value"}
         show_cols = [c for c in priority if c in df.columns] + \
                     [c for c in df.columns if c not in priority and c not in hidden]
         st.dataframe(df[show_cols], use_container_width=True, hide_index=True)

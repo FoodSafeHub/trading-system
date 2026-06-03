@@ -72,6 +72,7 @@ def init_db() -> None:
     _migrate_add_orders_source_column()
     _migrate_add_assignments_max_shares_column()
     _migrate_add_assignments_broker_column()
+    _migrate_add_orders_trail_columns()
 
 
 def _migrate_add_orders_source_column() -> None:
@@ -123,6 +124,27 @@ def _migrate_add_assignments_max_shares_column() -> None:
             conn.commit()
         except Exception:
             pass
+
+
+def _migrate_add_orders_trail_columns() -> None:
+    """Idempotent ALTER TABLE to add trail_type and trail_value to orders.
+
+    Needed for TRAILING_STOP orders placed after the volatility-aware trailing
+    stop feature was introduced. Existing rows keep NULL values (non-trail orders).
+    """
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql("PRAGMA table_info(orders)").fetchall()
+        except Exception:
+            return
+        cols = {r[1] for r in rows}
+        for col, typedef in [("trail_type", "TEXT"), ("trail_value", "REAL")]:
+            if col not in cols:
+                try:
+                    conn.exec_driver_sql(f"ALTER TABLE orders ADD COLUMN {col} {typedef}")
+                    conn.commit()
+                except Exception:
+                    pass
 
 
 def _migrate_add_assignments_broker_column() -> None:

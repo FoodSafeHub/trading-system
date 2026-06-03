@@ -16,10 +16,13 @@ class Order(Base):
     broker_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     symbol: Mapped[str] = mapped_column(String(16), nullable=False)
     side: Mapped[str] = mapped_column(String(8), nullable=False)      # BUY | SELL
-    order_type: Mapped[str] = mapped_column(String(16), nullable=False)  # MARKET | LIMIT | STOP
+    order_type: Mapped[str] = mapped_column(String(16), nullable=False)  # MARKET | LIMIT | STOP | TRAILING_STOP
     quantity: Mapped[float] = mapped_column(Float, nullable=False)
     limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Trailing stop fields — populated for TRAILING_STOP orders only.
+    trail_type: Mapped[str | None] = mapped_column(String(8), nullable=True)   # PERCENT | DOLLAR
+    trail_value: Mapped[float | None] = mapped_column(Float, nullable=True)     # e.g. 3.96 (%) or 2.50 ($)
     status: Mapped[str] = mapped_column(String(32), default="pending")
     # pending | previewed | submitted | filled | partial | cancelled | rejected | error
     is_paper: Mapped[bool] = mapped_column(default=True)

@@ -432,12 +432,12 @@ class ExecutionService:
                 quantity=req.quantity,
                 limit_price=req.limit_price,
                 stop_price=req.stop_price,
+                trail_type=getattr(req, "trail_type", None) if req.order_type == "TRAILING_STOP" else None,
+                trail_value=getattr(req, "trail_value", None) if req.order_type == "TRAILING_STOP" else None,
                 status=status,
                 is_paper=(self.broker.name == "paper"),
                 signal_id=signal_id,
                 idempotency_key=req.idempotency_key,
-                # source is required for downstream auditing; pydantic enforces
-                # the literal values, but default to "manual" defensively.
                 source=getattr(req, "source", "manual") or "manual",
                 created_at=datetime.now(tz=timezone.utc),
             )
