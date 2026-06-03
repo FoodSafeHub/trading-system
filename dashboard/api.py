@@ -253,6 +253,13 @@ def set_assignment_cap(symbol: str, max_capital_usd: float | None):
     r.raise_for_status()
     return r.json()
 
+def set_assignment_trail(symbol: str, tight_trail_pct: float | None):
+    r = requests.patch(f"{BASE}/assignments/{symbol}/trail",
+                       params={"tight_trail_pct": tight_trail_pct} if tight_trail_pct else {},
+                       timeout=10, verify=False, headers=_headers())
+    r.raise_for_status()
+    return r.json()
+
 def set_assignment_shares(symbol: str, max_shares: float | None):
     params = {"max_shares": max_shares} if max_shares else {}
     r = requests.patch(f"{BASE}/assignments/{symbol}/shares",

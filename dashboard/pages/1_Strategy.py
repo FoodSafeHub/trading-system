@@ -232,6 +232,7 @@ if assignments:
             "Broker":         broker_route.title(),
             "$ Cap":          f"${cap:,.0f}" if cap else "(global)",
             "Shares Cap":     f"{shares_cap:g}" if shares_cap else "—",
+            "Trail %":        f"{a.get('tight_trail_pct'):.1f}%" if a.get("tight_trail_pct") else "2.0% (default)",
             "Held":           f"{qty:g}" if qty else "—",
             "Exposure":       f"${mkt_val:,.0f}" if mkt_val else "—",
             "Notes":          a.get("notes") or "",
@@ -346,15 +347,17 @@ if assignments:
         with mc3:
             cur_cap = sel_asgn.get("max_capital_usd")
             cur_shares = sel_asgn.get("max_shares")
+            cur_trail = sel_asgn.get("tight_trail_pct")
             cap_bits = []
             if cur_cap:
                 cap_bits.append(f"${cur_cap:,.0f}")
             if cur_shares:
                 cap_bits.append(f"{cur_shares:g} shs")
             cap_label = " / ".join(cap_bits) if cap_bits else "global"
+            trail_label = f"{cur_trail:.1f}%" if cur_trail else "2.0% (default)"
             st.caption(
                 f"Current: **{sel_asgn['strategy_name'].replace('_',' ')}** "
-                f"({sel_asgn['system']})  ·  Cap: {cap_label}"
+                f"({sel_asgn['system']})  ·  Cap: {cap_label}  ·  Trail: {trail_label}"
             )
 
         # Edit caps row — dollar cap and shares cap. Dollar cap wins when both
@@ -422,6 +425,34 @@ if assignments:
                 try:
                     api.set_assignment_broker(sel_sym, edit_broker)
                     st.success(f"{sel_sym} → {BROKER_LABEL[edit_broker]}.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Update failed: {exc}")
+
+        # Approach C tight trail % update
+        tr1, tr2 = st.columns([4, 1])
+        with tr1:
+            edit_trail = st.slider(
+                "Approach C tight trail %",
+                min_value=1.0, max_value=10.0,
+                value=float(cur_trail) if cur_trail else 2.0,
+                step=0.5,
+                key=f"edit_trail_{sel_sym}",
+                help="When the assigned strategy fires a SELL signal, a trailing stop "
+                     "is placed at this % distance from the signal price. "
+                     "Low-vol stocks (KO, SO): 2–3%. High-vol (NVDA, TSLA): 3–5%. "
+                     "Run Approach C backtests to find the best value for this symbol.",
+            )
+        with tr2:
+            st.write("")
+            st.write("")
+            trail_changed = abs(edit_trail - (float(cur_trail) if cur_trail else 2.0)) > 0.01
+            if st.button("💾 Update trail", key=f"update_trail_{sel_sym}",
+                         use_container_width=True,
+                         disabled=not trail_changed):
+                try:
+                    api.set_assignment_trail(sel_sym, edit_trail)
+                    st.success(f"{sel_sym} tight trail → {edit_trail:.1f}%.")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Update failed: {exc}")
@@ -520,9 +551,20 @@ with st.expander("Add or update an assignment", expanded=not assignments):
                  "points somewhere else.",
         )
 
-    new_notes = st.text_input(
-        "Notes", placeholder="e.g. Best on 5y backtest, PF=3.26", key="new_notes",
-    )
+    trail_col, notes_col = st.columns([2, 3])
+    with trail_col:
+        new_trail = st.slider(
+            "Approach C tight trail %",
+            min_value=1.0, max_value=10.0, value=2.0, step=0.5,
+            key="new_trail",
+            help="Tight trailing stop % placed when the assigned strategy fires a SELL signal. "
+                 "Low-vol (KO, SO): 2–3%. High-vol (NVDA, TSLA): 3–5%. "
+                 "Run backtest with Approach C to find the optimal value first.",
+        )
+    with notes_col:
+        new_notes = st.text_input(
+            "Notes", placeholder="e.g. Best on 5y backtest, PF=3.26", key="new_notes",
+        )
 
     max_capital_usd = float(new_cap) if new_cap and new_cap > 0 else None
     max_shares = float(new_shares) if new_shares and new_shares > 0 else None
@@ -534,9 +576,11 @@ with st.expander("Add or update an assignment", expanded=not assignments):
                                   notes=new_notes,
                                   max_capital_usd=max_capital_usd,
                                   max_shares=max_shares,
-                                  broker=new_broker)
+                                  broker=new_broker,
+                                  tight_trail_pct=float(new_trail))
             st.success(
-                f"Assigned **{new_strat.replace('_',' ')}** to **{new_sym}**. "
+                f"Assigned **{new_strat.replace('_',' ')}** to **{new_sym}** "
+                f"with **{new_trail:.1f}% tight trail**. "
                 f"It will be evaluated on the next scheduler cycle."
             )
             st.rerun()

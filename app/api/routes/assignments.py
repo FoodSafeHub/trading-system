@@ -202,6 +202,24 @@ def set_shares(symbol: str, max_shares: float | None = None, db: Session = Depen
     return {"symbol": row.symbol, "max_shares": row.max_shares}
 
 
+@router.patch("/{symbol}/trail")
+def set_trail(symbol: str, tight_trail_pct: float | None = None, db: Session = Depends(get_db)):
+    """Update only the Approach C tight trailing stop % on an existing assignment.
+
+    Pass tight_trail_pct=0 or omit to reset to system default (2%).
+    Valid range: 1.0–10.0. Values outside this range are clamped.
+    """
+    row = db.query(SymbolStrategyAssignment).filter_by(symbol=symbol.upper()).first()
+    if not row:
+        raise HTTPException(404, f"No assignment found for {symbol.upper()}")
+    if tight_trail_pct and tight_trail_pct > 0:
+        row.tight_trail_pct = round(max(1.0, min(10.0, tight_trail_pct)), 2)
+    else:
+        row.tight_trail_pct = None  # reset to system default
+    db.commit()
+    return {"symbol": row.symbol, "tight_trail_pct": row.tight_trail_pct}
+
+
 @router.delete("/{symbol}")
 def delete_assignment(symbol: str, db: Session = Depends(get_db)):
     row = db.query(SymbolStrategyAssignment).filter_by(symbol=symbol.upper()).first()
