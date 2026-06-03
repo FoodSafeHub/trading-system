@@ -307,23 +307,29 @@ class ExecutionService:
         account_id: str,
         signal_price: float,
         *,
-        trail_pct: float = 1.0,
+        trail_pct: float = 2.0,
         source: str = "scheduler",
         idempotency_suffix: str = "",
+        signal_id: Optional[int] = None,
     ) -> bool:
         """Cancel any resting STOP/TRAILING_STOP for a symbol, then place a
-        tight 1% trailing stop in its place.
+        tight trailing stop in its place.
 
-        Called when a strategy SELL signal fires. Instead of an immediate
-        market sell, this lets the stock run its remaining upside while
-        locking in gains within `trail_pct`% of the new high.
+        Called ONLY when the ASSIGNED strategy for this symbol fires a SELL
+        signal. Other strategies signalling SELL on the same symbol are ignored
+        — the caller (scheduler._run_cycle) is already filtered to assigned-
+        strategy signals only via the signals_to_act list.
+
+        trail_pct defaults to 2.0% — wider than 1% to absorb normal intraday
+        noise before exiting, while still being tight enough to capture most of
+        the post-signal upside. 1% was too tight for mid/high-vol names (KO,
+        NVDA) and got shaken out by normal daily wicks.
+
+        signal_id: the Signal row id for this SELL signal. Linked to the trail
+        order so PnL audit can show signal_price vs actual exit price.
 
         Returns True if the tight trail was placed, False if it fell back to
         a market sell (e.g. broker unavailable).
-
-        This is the single canonical implementation — both the scheduler cycle
-        and the manual /strategy/run consensus path route through here so the
-        behaviour is identical regardless of which path fires the SELL.
         """
         # Step 1: cancel any resting sell-side stops
         try:
@@ -344,7 +350,7 @@ class ExecutionService:
                 "— placing tight trail anyway", symbol, exc,
             )
 
-        # Step 2: place tight trailing stop
+        # Step 2: place tight trailing stop, linked to the SELL signal row
         suffix = idempotency_suffix or str(int(signal_price * 100))
         trail_req = OrderRequest(
             symbol=symbol,
@@ -359,8 +365,8 @@ class ExecutionService:
         )
         try:
             resp = await self.broker.place_order(trail_req, account_id)
-            # Persist the trailing stop order so it appears in Order History
-            stop_order = self._persist_order(trail_req, None, status="submitted")
+            # Persist with signal_id so PnL audit can join signal_price → exit_price
+            stop_order = self._persist_order(trail_req, signal_id, status="submitted")
             self._update_order_status(
                 stop_order.id,
                 status="submitted",
@@ -373,12 +379,13 @@ class ExecutionService:
                 entity_id=stop_order.id,
                 description=(
                     f"SELL TRAILING_STOP {symbol} x{quantity} trail={trail_pct}% "
-                    f"(SELL signal @ {signal_price:.2f})"
+                    f"(assigned strategy SELL signal @ ${signal_price:.2f}, signal_id={signal_id})"
                 ),
             )
             logger.info(
-                "[exec] tighten_trail %s: placed %.1f%% trailing stop @ signal ~%.2f → broker_id=%s",
-                symbol, trail_pct, signal_price, resp.broker_order_id,
+                "[exec] tighten_trail %s: placed %.1f%% trailing stop @ signal ~$%.2f "
+                "signal_id=%s broker_id=%s",
+                symbol, trail_pct, signal_price, signal_id, resp.broker_order_id,
             )
             return True
         except Exception as exc:

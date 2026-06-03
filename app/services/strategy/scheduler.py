@@ -556,22 +556,29 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         continue
                     qty = held
 
-                    # ── Strategy SELL → tight trailing stop ──────────────────
-                    # Delegate to ExecutionService.tighten_trail_on_sell — the
-                    # single canonical implementation shared by all order paths.
+                    # ── Assigned strategy SELL → tight 2% trailing stop ──────
+                    # Only the ASSIGNED strategy for this symbol can trigger
+                    # the tight trail — other strategies signalling SELL on the
+                    # same symbol are ignored (they are not in signals_to_act
+                    # for this symbol since only the assigned one evaluates).
+                    # Trail is 2% (wider than 1%) to give post-signal price
+                    # action room for normal intraday noise before exiting.
                     exec_svc, exec_acct = _svc_for(asgn_broker)
+
+                    # Mark signal first so we get the signal_id to link to the trail order
+                    sig_id = _mark_signal_acted_on(symbol, direction, label)
+
                     loop.run_until_complete(exec_svc.tighten_trail_on_sell(
                         symbol=symbol,
                         quantity=qty,
                         account_id=exec_acct,
                         signal_price=entry,
-                        trail_pct=1.0,
+                        trail_pct=2.0,
                         source="scheduler",
                         idempotency_suffix=str(int(entry * 100)),
+                        signal_id=sig_id,
                     ))
 
-                    # Step 3: mark signal acted_on regardless of trail/fallback path
-                    sig_id = _mark_signal_acted_on(symbol, direction, label)
                     try:
                         from app.services.notifications.bus import notify_signal
                         notify_signal(symbol=symbol, direction=direction, strategy=label,
@@ -716,6 +723,106 @@ def _run_scanner_job() -> None:
 
 
 _POSITION_SYNC_INTERVAL_SECONDS = 900   # 15 min — cheap broker read
+
+
+def _run_gtc_fill_sync_job() -> None:
+    """Poll the broker for fills on submitted GTC orders and update the DB.
+
+    GTC trailing stops placed by tighten_trail_on_sell() sit as
+    status='submitted' in our DB until Schwab fills them. The execute()
+    path only confirms status immediately after placement — it can't know
+    about fills that happen hours or days later between scheduler cycles.
+
+    This job runs every 15 min and:
+      1. Finds all Order rows with status='submitted' and order_type='TRAILING_STOP'
+      2. Fetches the current status from Schwab via get_order()
+      3. If filled: updates fill_price, filled_at, status='filled' in the DB
+         → FIFO engine can now compute the round-trip P/L and the PnL audit
+           will show signal_price vs actual exit price correctly.
+
+    Also catches plain STOP and LIMIT orders that were submitted but not yet
+    confirmed (same gap exists for any GTC order type).
+    """
+    settings = get_settings()
+    if not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
+        return
+    try:
+        import asyncio as _aio
+        from datetime import datetime as _dt, timezone as _tz
+        from app.db import SessionLocal
+        from app.models.orders import Order
+        from app.services.brokers.factory import get_broker
+
+        with SessionLocal() as db:
+            pending = (
+                db.query(Order)
+                .filter(
+                    Order.status == "submitted",
+                    Order.broker_order_id.isnot(None),
+                )
+                .all()
+            )
+
+        if not pending:
+            return
+
+        loop = _aio.new_event_loop()
+        try:
+            broker = get_broker()
+            loop.run_until_complete(broker.authenticate())
+            accounts = loop.run_until_complete(broker.get_accounts())
+            account_id = accounts[0].account_id if accounts else ""
+
+            updated = 0
+            for order in pending:
+                try:
+                    status_resp = loop.run_until_complete(
+                        broker.get_order(order.broker_order_id, account_id)
+                    )
+                    broker_status = (status_resp.status or "").lower()
+
+                    if broker_status in ("filled", "partial"):
+                        with SessionLocal() as db:
+                            row = db.query(Order).filter_by(id=order.id).first()
+                            if row and row.status == "submitted":
+                                row.status = broker_status
+                                row.fill_price = status_resp.fill_price
+                                row.filled_at = (
+                                    status_resp.raw.get("closeTime")
+                                    or _dt.now(_tz.utc)
+                                )
+                                if isinstance(row.filled_at, str):
+                                    try:
+                                        row.filled_at = _dt.fromisoformat(
+                                            row.filled_at.replace("Z", "+00:00")
+                                        )
+                                    except Exception:
+                                        row.filled_at = _dt.now(_tz.utc)
+                                db.commit()
+                                updated += 1
+                                logger.info(
+                                    "[scheduler] GTC fill sync: %s %s %s filled @ %.4f",
+                                    order.symbol, order.order_type,
+                                    order.broker_order_id, status_resp.fill_price or 0,
+                                )
+                    elif broker_status in ("canceled", "cancelled", "rejected", "expired"):
+                        with SessionLocal() as db:
+                            row = db.query(Order).filter_by(id=order.id).first()
+                            if row and row.status == "submitted":
+                                row.status = broker_status
+                                db.commit()
+                except Exception as exc:
+                    logger.debug(
+                        "[scheduler] GTC fill sync: could not check order %s: %s",
+                        order.broker_order_id, exc,
+                    )
+
+            if updated:
+                logger.info("[scheduler] GTC fill sync: updated %d order(s)", updated)
+        finally:
+            loop.close()
+    except Exception as exc:
+        logger.error("[scheduler] GTC fill sync job failed: %s", exc)
 
 
 def _run_chandelier_trail_job() -> None:
@@ -930,11 +1037,22 @@ def start_scheduler() -> None:
     _scheduler.add_job(
         _run_chandelier_trail_job,
         trigger=IntervalTrigger(
-            seconds=_POSITION_SYNC_INTERVAL_SECONDS,   # same 15-min cadence
-            start_date=now + timedelta(minutes=3),     # stagger after position sync
+            seconds=_POSITION_SYNC_INTERVAL_SECONDS,
+            start_date=now + timedelta(minutes=3),
         ),
         id="chandelier_trail",
         name="Chandelier Trail Ratchet",
+        replace_existing=True,
+        max_instances=1,
+    )
+    _scheduler.add_job(
+        _run_gtc_fill_sync_job,
+        trigger=IntervalTrigger(
+            seconds=_POSITION_SYNC_INTERVAL_SECONDS,   # every 15 min
+            start_date=now + timedelta(minutes=5),     # stagger after chandelier job
+        ),
+        id="gtc_fill_sync",
+        name="GTC Order Fill Sync",
         replace_existing=True,
         max_instances=1,
     )

@@ -118,16 +118,35 @@ async def run_strategy_cycle():
                         next((r["price"] for r in raw_results
                               if r.get("symbol") == symbol and r.get("direction") == "SELL"), 0)
                     ) or 0.0
-                    # SELL signal → tight 1% trailing stop via the canonical helper.
-                    # Same behaviour as the scheduler path — no market sell.
+                    # Stamp a Signal row so the trail order has a signal_id
+                    # and PnL audit can show signal_price vs actual exit price.
+                    con_sig_id: int | None = None
+                    try:
+                        with SessionLocal() as db:
+                            con_sig = Signal(
+                                strategy_name=("consensus:" + "+".join(agreeing))[:128],
+                                symbol=symbol.upper(),
+                                direction="SELL",
+                                strength=1.0,
+                                price_at_signal=signal_px or None,
+                                acted_on=True,
+                            )
+                            db.add(con_sig)
+                            db.commit()
+                            db.refresh(con_sig)
+                            con_sig_id = con_sig.id
+                    except Exception:
+                        pass
+                    # SELL signal → tight 2% trailing stop via the canonical helper.
                     placed = await svc.tighten_trail_on_sell(
                         symbol=symbol,
                         quantity=qty,
                         account_id=account_id,
                         signal_price=signal_px,
-                        trail_pct=1.0,
+                        trail_pct=2.0,
                         source="scheduler",
                         idempotency_suffix=f"consensus-{symbol}",
+                        signal_id=con_sig_id,
                     )
                     orders_placed[(symbol, direction)] = "trail_placed" if placed else "market_sell_fallback"
                 else:
