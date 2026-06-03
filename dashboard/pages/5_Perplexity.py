@@ -910,7 +910,7 @@ with tab_compare:
                 "Picks the strategy/symbol pair the live scheduler should use for this ticker. "
                 "Notifications will fire on every BUY/SELL signal from this symbol once promoted."
             )
-            p1, p2, p3, p4 = st.columns([3, 2, 2, 2])
+            p1, p2, p3 = st.columns([3, 2, 2])
             with p1:
                 names = [r["strategy_name"] for r in promotable]
                 best_name = best["strategy_name"] if valid else names[0]
@@ -931,9 +931,24 @@ with tab_compare:
                 )
             with p3:
                 enabled = st.checkbox("Enabled", value=True, key=f"px_promote_en_{cmp_symbol}")
-            with p4:
-                st.write("")
-                st.write("")
+
+            pt1, pt2 = st.columns([2, 3])
+            with pt1:
+                px_tight_trail = st.slider(
+                    "Approach C tight trail %",
+                    min_value=1.0, max_value=10.0, value=2.0, step=0.5,
+                    key=f"px_promote_trail_{cmp_symbol}",
+                    help="Tight trailing stop % when the assigned strategy fires a SELL signal. "
+                         "Perplexity strategies tend to be swing-style — 2–3% is a good starting point.",
+                )
+            with pt2:
+                st.info(
+                    f"SELL signal → **{px_tight_trail:.1f}% tight trailing stop** from signal price. "
+                    "The position only exits when price drops this % from its post-signal high."
+                )
+
+            pg_col, _ = st.columns([1, 3])
+            with pg_col:
                 go_btn = st.button("Promote", type="primary",
                                     use_container_width=True,
                                     key=f"px_promote_btn_{cmp_symbol}")
@@ -947,13 +962,15 @@ with tab_compare:
                         system="perplexity",
                         strategy_name=pick,
                         enabled=enabled,
-                        notes=f"Promoted from Compare All ({cmp_period})",
+                        notes=f"Promoted from Compare All ({cmp_period}), trail={px_tight_trail:.1f}%",
                         max_capital_usd=cap_val,
+                        tight_trail_pct=px_tight_trail,
                     )
                     st.success(
                         f"Assigned **{pick}** to **{cmp_symbol}** "
+                        f"with **{px_tight_trail:.1f}% tight trail** "
                         f"(perplexity, enabled={enabled}). "
-                        "BUY/SELL signals on this symbol will now create notifications."
+                        "SELL signals will place a tight trailing stop at this distance."
                     )
                 except Exception as exc:
                     st.error(f"Promote failed: {exc}")

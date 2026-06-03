@@ -73,6 +73,7 @@ def init_db() -> None:
     _migrate_add_assignments_max_shares_column()
     _migrate_add_assignments_broker_column()
     _migrate_add_orders_trail_columns()
+    _migrate_add_assignments_tight_trail_pct()
 
 
 def _migrate_add_orders_source_column() -> None:
@@ -145,6 +146,31 @@ def _migrate_add_orders_trail_columns() -> None:
                     conn.commit()
                 except Exception:
                     pass
+
+
+def _migrate_add_assignments_tight_trail_pct() -> None:
+    """Idempotent ALTER TABLE to add symbol_strategy_assignments.tight_trail_pct.
+
+    Stores the per-assignment Approach C tight trail % selected during backtesting.
+    NULL means use the system default (2.0%). Existing assignments get NULL so
+    they continue using the default without any change.
+    """
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql(
+                "PRAGMA table_info(symbol_strategy_assignments)"
+            ).fetchall()
+        except Exception:
+            return
+        cols = {r[1] for r in rows}
+        if "tight_trail_pct" not in cols:
+            try:
+                conn.exec_driver_sql(
+                    "ALTER TABLE symbol_strategy_assignments ADD COLUMN tight_trail_pct REAL"
+                )
+                conn.commit()
+            except Exception:
+                pass
 
 
 def _migrate_add_assignments_broker_column() -> None:

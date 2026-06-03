@@ -28,6 +28,9 @@ class AssignmentIn(BaseModel):
     max_shares: float | None = None        # Fallback shares cap when no dollar cap
     broker: str = "default"                # "default" | "paper" | "schwab" | "webull"
     notes: str = ""
+    # Approach C tight trailing stop % — set during backtesting, stored per assignment.
+    # None = use system default (2.0%). Range 1.0–10.0.
+    tight_trail_pct: float | None = None
 
 
 class AssignmentOut(BaseModel):
@@ -39,6 +42,7 @@ class AssignmentOut(BaseModel):
     max_shares: float | None
     broker: str
     notes: str | None
+    tight_trail_pct: float | None = None
     assigned_at: datetime
 
     model_config = {"from_attributes": True}
@@ -70,6 +74,7 @@ def upsert_assignment(body: AssignmentIn, db: Session = Depends(get_db)):
         row.max_shares = body.max_shares
         row.broker = body.broker
         row.notes = body.notes
+        row.tight_trail_pct = body.tight_trail_pct
         row.assigned_at = datetime.now(tz=timezone.utc)
     else:
         row = SymbolStrategyAssignment(
@@ -81,6 +86,7 @@ def upsert_assignment(body: AssignmentIn, db: Session = Depends(get_db)):
             max_shares=body.max_shares,
             broker=body.broker,
             notes=body.notes,
+            tight_trail_pct=body.tight_trail_pct,
             assigned_at=datetime.now(tz=timezone.utc),
         )
         db.add(row)

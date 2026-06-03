@@ -972,6 +972,34 @@ if mode == "Single Strategy":
             key=f"single_promote_shares_{chosen_sym}_{chosen}",
             help="Shares cap. Used only when the dollar cap is empty.",
         )
+
+    # Tight trail % — pre-filled from the backtest Approach C slider if it was run
+    _bt_trail_default = float(st.session_state.get("bt_tight_trail", 2.0))
+    _approach_c_was_run = bool(st.session_state.get("bt_approach_c", False))
+    p_trail1, p_trail2 = st.columns([2, 3])
+    with p_trail1:
+        single_tight_trail = st.slider(
+            "Approach C tight trail %",
+            min_value=1.0, max_value=10.0,
+            value=_bt_trail_default,
+            step=0.5,
+            key=f"single_promote_trail_{chosen_sym}_{chosen}",
+            help="Tight trailing stop % placed when the assigned strategy fires a SELL signal. "
+                 "Pre-filled from your backtest Approach C slider. "
+                 "Low-vol stocks (KO, SO): 2–3%. High-vol (NVDA, TSLA): 3–5%.",
+        )
+    with p_trail2:
+        if _approach_c_was_run:
+            st.info(
+                f"Pre-filled from your backtest Approach C run ({_bt_trail_default:.1f}%). "
+                f"Adjust if you tested multiple trail values."
+            )
+        else:
+            st.info(
+                "Run the backtest with **Approach C enabled** first to find the best trail % "
+                "for this symbol, then promote with that value."
+            )
+
     p3, p4, p5 = st.columns([3, 1, 2])
     with p3:
         single_broker = st.selectbox(
@@ -1008,15 +1036,17 @@ if mode == "Single Strategy":
                 system="scanner",
                 strategy_name=r["strategy_name"],
                 enabled=single_enabled,
-                notes=f"Promoted from Single Strategy backtest ({period})",
+                notes=f"Promoted from Single Strategy backtest ({period}), trail={single_tight_trail:.1f}%",
                 max_capital_usd=single_cap_val,
                 max_shares=single_shares_val,
                 broker=single_broker,
+                tight_trail_pct=single_tight_trail,
             )
             st.success(
                 f"Assigned **{r['strategy_name']}** to **{chosen_sym}** "
-                f"(scanner, enabled={single_enabled}). "
-                "BUY/SELL signals on this symbol will now create notifications."
+                f"with **{single_tight_trail:.1f}% tight trail** "
+                f"(enabled={single_enabled}). "
+                "SELL signals will place a tight trailing stop at this distance."
             )
         except Exception as exc:
             st.error(f"Promote failed: {exc}")
@@ -1374,6 +1404,20 @@ elif mode == "Custom Symbol":
                 key=f"custom_promote_shares_{cmp_symbol}",
                 help="Shares cap. Used only when the dollar cap is empty.",
             )
+        ctrail1, ctrail2 = st.columns([2, 3])
+        with ctrail1:
+            custom_tight_trail = st.slider(
+                "Approach C tight trail %",
+                min_value=1.0, max_value=10.0, value=2.0, step=0.5,
+                key=f"custom_promote_trail_{cmp_symbol}",
+                help="Tight trailing stop % when SELL signal fires. "
+                     "Run Approach C in the compare table to find the best value for this symbol.",
+            )
+        with ctrail2:
+            st.info(
+                f"SELL signal → **{custom_tight_trail:.1f}% tight trailing stop** placed from signal price. "
+                "Enable Approach C in the backtest expanders above to test different values first."
+            )
         p4, p5, p6 = st.columns([3, 1, 2])
         with p4:
             custom_broker = st.selectbox(
@@ -1406,15 +1450,17 @@ elif mode == "Custom Symbol":
                     system="scanner",
                     strategy_name=pick,
                     enabled=enabled,
-                    notes=f"Promoted from Custom Symbol compare ({cmp_period})",
+                    notes=f"Promoted from Custom Symbol compare ({cmp_period}), trail={custom_tight_trail:.1f}%",
                     max_capital_usd=cap_val,
                     max_shares=shares_val,
                     broker=custom_broker,
+                    tight_trail_pct=custom_tight_trail,
                 )
                 st.success(
                     f"Assigned **{pick}** to **{cmp_symbol}** "
-                    f"(scanner, enabled={enabled}). "
-                    "BUY/SELL signals on this symbol will now create notifications."
+                    f"with **{custom_tight_trail:.1f}% tight trail** "
+                    f"(enabled={enabled}). "
+                    "SELL signals will place a tight trailing stop at this distance."
                 )
             except Exception as exc:
                 st.error(f"Promote failed: {exc}")

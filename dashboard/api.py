@@ -205,13 +205,15 @@ def list_assignments():
 def upsert_assignment(symbol: str, system: str, strategy_name: str, enabled: bool = True,
                       notes: str = "", max_capital_usd: float | None = None,
                       max_shares: float | None = None,
-                      broker: str = "default"):
+                      broker: str = "default",
+                      tight_trail_pct: float | None = None):
     return _post("/assignments", json={"symbol": symbol, "system": system,
                                        "strategy_name": strategy_name, "enabled": enabled,
                                        "notes": notes,
                                        "max_capital_usd": max_capital_usd,
                                        "max_shares": max_shares,
-                                       "broker": broker})
+                                       "broker": broker,
+                                       "tight_trail_pct": tight_trail_pct})
 
 
 def set_assignment_broker(symbol: str, broker: str):

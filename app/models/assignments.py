@@ -29,6 +29,11 @@ class SymbolStrategyAssignment(Base):
     # orders to a specific broker (e.g. "schwab", "webull", "paper").
     broker: Mapped[str] = mapped_column(String(32), nullable=False, default="default")
     notes: Mapped[str] = mapped_column(String(256), nullable=True)
+    # Per-assignment tight trailing stop % for Approach C.
+    # When a strategy SELL signal fires, the scheduler places a trailing stop
+    # at this % distance from the signal price instead of a market sell.
+    # None means use the system default (2.0%). Range 1.0–10.0.
+    tight_trail_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     assigned_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
     )

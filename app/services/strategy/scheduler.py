@@ -313,7 +313,9 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                 assignments = [
                     {"symbol": a.symbol, "system": a.system, "strategy_name": a.strategy_name,
                      "max_capital_usd": a.max_capital_usd, "max_shares": a.max_shares,
-                     "broker": a.broker or "default"}
+                     "broker": a.broker or "default",
+                     # Per-assignment Approach C trail %. None = system default (2.0%).
+                     "tight_trail_pct": a.tight_trail_pct}
                     for a in active_assignments
                 ]
 
@@ -556,24 +558,28 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         continue
                     qty = held
 
-                    # ── Assigned strategy SELL → tight 2% trailing stop ──────
+                    # ── Assigned strategy SELL → tight trailing stop ─────────
                     # Only the ASSIGNED strategy for this symbol can trigger
-                    # the tight trail — other strategies signalling SELL on the
-                    # same symbol are ignored (they are not in signals_to_act
-                    # for this symbol since only the assigned one evaluates).
-                    # Trail is 2% (wider than 1%) to give post-signal price
-                    # action room for normal intraday noise before exiting.
+                    # the tight trail. Trail % comes from the assignment row
+                    # (set during backtesting via the Promote UI). Falls back
+                    # to 2.0% when not explicitly configured.
                     exec_svc, exec_acct = _svc_for(asgn_broker)
+                    trail_pct = float(asgn.get("tight_trail_pct") or 2.0)
 
                     # Mark signal first so we get the signal_id to link to the trail order
                     sig_id = _mark_signal_acted_on(symbol, direction, label)
 
+                    logger.info(
+                        "[scheduler] SELL signal %s: placing %.1f%% tight trail "
+                        "(assignment trail_pct=%s)",
+                        symbol, trail_pct, asgn.get("tight_trail_pct"),
+                    )
                     loop.run_until_complete(exec_svc.tighten_trail_on_sell(
                         symbol=symbol,
                         quantity=qty,
                         account_id=exec_acct,
                         signal_price=entry,
-                        trail_pct=2.0,
+                        trail_pct=trail_pct,
                         source="scheduler",
                         idempotency_suffix=str(int(entry * 100)),
                         signal_id=sig_id,
