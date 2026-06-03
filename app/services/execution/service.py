@@ -300,6 +300,100 @@ class ExecutionService:
         )
         logger.info(log_msg, *log_args, status_resp.broker_order_id)
 
+    async def tighten_trail_on_sell(
+        self,
+        symbol: str,
+        quantity: float,
+        account_id: str,
+        signal_price: float,
+        *,
+        trail_pct: float = 1.0,
+        source: str = "scheduler",
+        idempotency_suffix: str = "",
+    ) -> bool:
+        """Cancel any resting STOP/TRAILING_STOP for a symbol, then place a
+        tight 1% trailing stop in its place.
+
+        Called when a strategy SELL signal fires. Instead of an immediate
+        market sell, this lets the stock run its remaining upside while
+        locking in gains within `trail_pct`% of the new high.
+
+        Returns True if the tight trail was placed, False if it fell back to
+        a market sell (e.g. broker unavailable).
+
+        This is the single canonical implementation — both the scheduler cycle
+        and the manual /strategy/run consensus path route through here so the
+        behaviour is identical regardless of which path fires the SELL.
+        """
+        # Step 1: cancel any resting sell-side stops
+        try:
+            open_orders = await self.broker.list_orders(account_id, status="working")
+            for o in open_orders:
+                if (getattr(o, "symbol", "").upper() == symbol.upper()
+                        and getattr(o, "side", "").upper() == "SELL"
+                        and getattr(o, "order_type", "").upper() in ("STOP", "TRAILING_STOP")
+                        and getattr(o, "broker_order_id", None)):
+                    await self.broker.cancel_order(o.broker_order_id, account_id)
+                    logger.info(
+                        "[exec] tighten_trail %s: cancelled resting %s",
+                        symbol, o.order_type,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "[exec] tighten_trail %s: could not cancel resting stops (%s) "
+                "— placing tight trail anyway", symbol, exc,
+            )
+
+        # Step 2: place tight trailing stop
+        suffix = idempotency_suffix or str(int(signal_price * 100))
+        trail_req = OrderRequest(
+            symbol=symbol,
+            side="SELL",
+            order_type="TRAILING_STOP",
+            quantity=quantity,
+            trail_type="PERCENT",
+            trail_value=round(trail_pct, 2),
+            time_in_force="GTC",
+            source=source,  # type: ignore[arg-type]
+            idempotency_key=f"sell-trail-{symbol}-{suffix}",
+        )
+        try:
+            resp = await self.broker.place_order(trail_req, account_id)
+            # Persist the trailing stop order so it appears in Order History
+            stop_order = self._persist_order(trail_req, None, status="submitted")
+            self._update_order_status(
+                stop_order.id,
+                status="submitted",
+                broker_order_id=resp.broker_order_id,
+                submitted_at=datetime.now(tz=timezone.utc),
+            )
+            _audit.log(
+                event_type="TIGHT_TRAIL_PLACED",
+                entity_type="order",
+                entity_id=stop_order.id,
+                description=(
+                    f"SELL TRAILING_STOP {symbol} x{quantity} trail={trail_pct}% "
+                    f"(SELL signal @ {signal_price:.2f})"
+                ),
+            )
+            logger.info(
+                "[exec] tighten_trail %s: placed %.1f%% trailing stop @ signal ~%.2f → broker_id=%s",
+                symbol, trail_pct, signal_price, resp.broker_order_id,
+            )
+            return True
+        except Exception as exc:
+            logger.error(
+                "[exec] tighten_trail %s: failed to place tight trail (%s) "
+                "— falling back to MARKET SELL", symbol, exc,
+            )
+            # Fallback: immediate market sell
+            fallback = OrderRequest(
+                symbol=symbol, side="SELL", order_type="MARKET",
+                quantity=quantity, source=source,  # type: ignore[arg-type]
+            )
+            await self.execute(fallback, account_id=account_id, estimated_price=signal_price)
+            return False
+
     async def _buying_power_preflight(
         self,
         order_req: OrderRequest,

@@ -557,80 +557,18 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                     qty = held
 
                     # ── Strategy SELL → tight trailing stop ──────────────────
-                    # Instead of a MARKET SELL, tighten the trailing stop to 1%
-                    # below the current price. This lets the stock ride any
-                    # remaining upside (RSI/extension signals fire before the
-                    # absolute peak) and only exits once the stock pulls back
-                    # 1% from its new high. The broker manages the ratchet
-                    # continuously so we capture the exact reversal point.
-                    #
-                    # Workflow:
-                    #   1. Cancel the existing wide trailing stop (placed at BUY).
-                    #   2. Place a new TRAILING_STOP at 1% trail — GTC.
-                    #   3. Mark signal as acted_on (trail placed = action taken).
-                    #   4. Skip the MARKET SELL below by continuing the loop.
-
+                    # Delegate to ExecutionService.tighten_trail_on_sell — the
+                    # single canonical implementation shared by all order paths.
                     exec_svc, exec_acct = _svc_for(asgn_broker)
-
-                    # Step 1: cancel any resting STOP/TRAILING_STOP for this symbol
-                    try:
-                        _open = loop.run_until_complete(
-                            exec_svc.broker.list_orders(exec_acct, status="working")
-                        )
-                        for _o in _open:
-                            if (getattr(_o, "symbol", "").upper() == symbol.upper()
-                                    and getattr(_o, "side", "").upper() == "SELL"
-                                    and getattr(_o, "order_type", "").upper() in ("STOP", "TRAILING_STOP")
-                                    and getattr(_o, "broker_order_id", None)):
-                                loop.run_until_complete(
-                                    exec_svc.broker.cancel_order(_o.broker_order_id, exec_acct)
-                                )
-                                logger.info(
-                                    "[scheduler] SELL signal %s: cancelled resting %s",
-                                    symbol, _o.order_type,
-                                )
-                    except Exception as _ce:
-                        logger.warning(
-                            "[scheduler] SELL signal %s: could not cancel resting stops (%s) "
-                            "— placing tight trail anyway", symbol, _ce,
-                        )
-
-                    # Step 2: place 1% trailing stop — broker ratchets it up as
-                    # price rises, exits the moment price drops 1% from the peak.
-                    tight_trail_pct = 1.0
-                    tight_req = OrderRequest(
+                    loop.run_until_complete(exec_svc.tighten_trail_on_sell(
                         symbol=symbol,
-                        side="SELL",
-                        order_type="TRAILING_STOP",
                         quantity=qty,
-                        trail_type="PERCENT",
-                        trail_value=tight_trail_pct,
-                        time_in_force="GTC",
-                        source=asgn_broker if asgn_broker != "default" else "scheduler",
-                        idempotency_key=f"sell-trail-{symbol}-{int(entry * 100)}",
-                    )
-                    try:
-                        trail_resp = loop.run_until_complete(
-                            exec_svc.broker.place_order(tight_req, exec_acct)
-                        )
-                        logger.info(
-                            "[scheduler] SELL signal %s: placed 1%% trailing stop "
-                            "@ current price ~%.2f → broker_id=%s",
-                            symbol, entry, trail_resp.broker_order_id,
-                        )
-                    except Exception as _te:
-                        logger.error(
-                            "[scheduler] SELL signal %s: failed to place tight trail (%s) "
-                            "— falling back to MARKET SELL", symbol, _te,
-                        )
-                        # Fallback: if trail placement fails, do an immediate market sell
-                        fallback_req = OrderRequest(
-                            symbol=symbol, side="SELL", order_type="MARKET",
-                            quantity=qty, source="scheduler",
-                        )
-                        loop.run_until_complete(exec_svc.execute(
-                            fallback_req, account_id=exec_acct, estimated_price=entry,
-                        ))
+                        account_id=exec_acct,
+                        signal_price=entry,
+                        trail_pct=1.0,
+                        source="scheduler",
+                        idempotency_suffix=str(int(entry * 100)),
+                    ))
 
                     # Step 3: mark signal acted_on regardless of trail/fallback path
                     sig_id = _mark_signal_acted_on(symbol, direction, label)
