@@ -911,6 +911,45 @@ if mode == "Single Strategy":
                 )
                 st.session_state["bt_result"] = result
                 st.session_state.pop("bt_consensus", None)
+
+                # When Approach C is ON, also run default and all trail % variants
+                # in one shot so the comparison table is available immediately.
+                if bt_approach_c:
+                    trail_variants = {}
+                    # Default (no Approach C)
+                    r_def = api.backtest_run_generic(
+                        chosen_sym, chosen_type,
+                        period=period, initial_capital=capital,
+                        disable_trail=disable_trail,
+                        disable_exit_policy=disable_exit_policy,
+                        stop_loss_pct=float(bt_stop_loss_pct),
+                        exit_rsi=float(bt_exit_rsi),
+                        approach_c=False,
+                        timeout=60,
+                    )
+                    trail_variants["default"] = r_def
+                    # Test a range of trail % around the chosen value
+                    tested_pcts = sorted({1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, float(bt_tight_trail)})
+                    for tp in tested_pcts:
+                        try:
+                            rv = api.backtest_run_generic(
+                                chosen_sym, chosen_type,
+                                period=period, initial_capital=capital,
+                                disable_trail=disable_trail,
+                                disable_exit_policy=disable_exit_policy,
+                                stop_loss_pct=float(bt_stop_loss_pct),
+                                exit_rsi=float(bt_exit_rsi),
+                                approach_c=True,
+                                tight_trail_pct=tp,
+                                timeout=60,
+                            )
+                            trail_variants[tp] = rv
+                        except Exception:
+                            pass
+                    st.session_state["bt_trail_variants"] = trail_variants
+                else:
+                    st.session_state.pop("bt_trail_variants", None)
+
             except Exception as e:
                 st.error(f"Backtest failed: {e}")
                 st.stop()
@@ -925,6 +964,75 @@ if mode == "Single Strategy":
     st.subheader(f"Results — {r['strategy_name']} ({r['start_date']} → {r['end_date']})")
 
     _render_backtest_metrics(r)
+
+    # ── Approach C comparison table ───────────────────────────────────────────
+    _trail_variants = st.session_state.get("bt_trail_variants")
+    if _trail_variants:
+        st.divider()
+        st.markdown("#### Approach C — Trail % Comparison")
+        st.caption(
+            "All trail % values tested in one run. **Highlighted row** = the trail % "
+            "you selected. Use this to pick the best value before promoting."
+        )
+        _selected_trail = float(st.session_state.get("bt_tight_trail", 2.0))
+        _cmp_rows = []
+        # Default row
+        _d = _trail_variants.get("default", {})
+        _cmp_rows.append({
+            "Mode": "Default (immediate SELL)",
+            "Trail %": "—",
+            "Trades": _d.get("total_trades", 0),
+            "Win Rate": f"{_d.get('win_rate_pct', 0):.1f}%",
+            "Return": f"{_d.get('total_return_pct', 0):+.2f}%",
+            "Total P/L": f"${_d.get('total_pnl', 0):+,.0f}",
+            "Max DD": f"{_d.get('max_drawdown_pct', 0):.1f}%",
+            "Sharpe": f"{_d.get('sharpe_ratio') or '—'}",
+            "_ret": _d.get("total_return_pct", 0),
+            "_selected": False,
+        })
+        # Approach C rows
+        for tp, rv in sorted((k, v) for k, v in _trail_variants.items() if k != "default"):
+            _cmp_rows.append({
+                "Mode": f"Approach C",
+                "Trail %": f"{tp:.1f}%",
+                "Trades": rv.get("total_trades", 0),
+                "Win Rate": f"{rv.get('win_rate_pct', 0):.1f}%",
+                "Return": f"{rv.get('total_return_pct', 0):+.2f}%",
+                "Total P/L": f"${rv.get('total_pnl', 0):+,.0f}",
+                "Max DD": f"{rv.get('max_drawdown_pct', 0):.1f}%",
+                "Sharpe": f"{rv.get('sharpe_ratio') or '—'}",
+                "_ret": rv.get("total_return_pct", 0),
+                "_selected": abs(tp - _selected_trail) < 0.01,
+            })
+
+        # Find best return row
+        best_ret = max(row["_ret"] for row in _cmp_rows)
+
+        import pandas as pd
+        _df_cmp = pd.DataFrame([
+            {k: v for k, v in row.items() if not k.startswith("_")}
+            for row in _cmp_rows
+        ])
+
+        def _style_row(row):
+            idx = _df_cmp.index[_df_cmp["Trail %"] == row["Trail %"]].tolist()
+            if not idx: return [""] * len(row)
+            orig = _cmp_rows[idx[0]]
+            if orig["_selected"]:
+                return ["background-color: #1a3a4a; font-weight: bold"] * len(row)
+            if abs(orig["_ret"] - best_ret) < 0.01:
+                return ["background-color: #0f3b1a"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(
+            _df_cmp.style.apply(_style_row, axis=1),
+            use_container_width=True, hide_index=True,
+        )
+        st.caption(
+            "Dark blue = your selected trail %. Dark green = best return. "
+            "Pick the trail % that balances highest return with acceptable drawdown, "
+            "then set the **Promote** slider to that value below."
+        )
 
     # Effective exit policy: shows which layers actually ran for THIS result
     # (after any override toggles were applied). Compare two runs side-by-side
