@@ -856,30 +856,37 @@ if mode == "Single Strategy":
             "a SELL signal, instead of exiting immediately the backtest holds the position "
             "and places a tight trailing stop from the signal price. The position only "
             "closes when the stock drops `trail %` from its post-signal high. "
-            "Compare to the default (immediate SELL) to see how much extra the trail captures."
+            "**Step 1:** Slide the trail % to the value you want to test. "
+            "**Step 2:** Check Enable Approach C. "
+            "**Step 3:** Run Backtest. Repeat with different trail % values to compare."
         )
-        _ac1, _ac2, _ac3 = st.columns([2, 2, 3])
+        _ac1, _ac2 = st.columns([2, 5])
         with _ac1:
             bt_approach_c = st.checkbox(
                 "Enable Approach C", value=False, key="bt_approach_c",
                 help="SELL signal → tight trailing stop instead of immediate exit.",
             )
         with _ac2:
+            # Always slidable — the slider sets which trail % to test.
+            # Enable Approach C to activate it in the backtest run.
             bt_tight_trail = st.slider(
-                "Tight trail %", min_value=1.0, max_value=5.0,
+                "Tight trail % to test",
+                min_value=1.0, max_value=10.0,
                 value=2.0, step=0.5, key="bt_tight_trail",
-                disabled=not bt_approach_c,
-                help="Trail % placed from signal price. Default 2% (live default).",
+                help="Slide to the trail % you want to test. Works independently of the checkbox — "
+                     "set the value first, then enable Approach C and run.",
             )
-        with _ac3:
-            if bt_approach_c:
-                st.info(
-                    f"Approach C ON — SELL signal activates a **{bt_tight_trail:.1f}% trailing stop** "
-                    f"from signal price. Position exits when price drops {bt_tight_trail:.1f}% from "
-                    f"its post-signal high. Signal markers appear in the trades table as SELL_SIGNAL."
-                )
-            else:
-                st.info("Default: SELL signal exits immediately at next-bar open.")
+        if bt_approach_c:
+            st.info(
+                f"Approach C **ON** — SELL signal activates a **{bt_tight_trail:.1f}% trailing stop** "
+                f"from signal price. Run the backtest and compare the result to the default (Approach C off). "
+                f"Try 1.5%, 2%, 3% to find the best value for this symbol."
+            )
+        else:
+            st.info(
+                f"Approach C **OFF** — SELL signal exits immediately (default). "
+                f"Trail % set to **{bt_tight_trail:.1f}%** — enable Approach C and run to test it."
+            )
 
     if not run and "bt_result" not in st.session_state:
         st.info("Type a symbol, pick a strategy, then click Run Backtest.")
