@@ -1613,19 +1613,30 @@ elif mode == "Walk-Forward OOS":
             key="wf_symbol",
             help="Any ticker. US: NVDA, AAPL. India: RELIANCE, TCS (NSE).",
         ).strip().upper()
-    with wc2:
-        wf_type = st.selectbox(
-            "Strategy", [t for t, _ in WF_CHOICES],
-            format_func=lambda t: _wf_label_by_type[t],
-            index=0, key="wf_type",
-        )
     with wc3:
         wf_mode = st.radio(
-            "Method", ["Simple split", "Rolling windows"],
+            "Method", ["Simple split", "Rolling windows", "Scan all strategies"],
             horizontal=True, key="wf_mode",
-            help="Simple: one IS/OOS split. Rolling: many sliding windows "
-                 "stitched into a composite OOS curve (needs long history).",
+            help="Simple: one IS/OOS split for the chosen strategy. "
+                 "Rolling: many sliding windows stitched into a composite OOS "
+                 "curve (needs long history). "
+                 "Scan all: runs the simple split for EVERY strategy in parallel "
+                 "and ranks them by WFE so you can see which strategy actually "
+                 "fits this symbol.",
         )
+    with wc2:
+        if wf_mode == "Scan all strategies":
+            st.caption(
+                f"Scanning **{len(WF_CHOICES)} strategies** in parallel on the "
+                "same symbol / period / split. WFE-ranked summary below."
+            )
+            wf_type = None
+        else:
+            wf_type = st.selectbox(
+                "Strategy", [t for t, _ in WF_CHOICES],
+                format_func=lambda t: _wf_label_by_type[t],
+                index=0, key="wf_type",
+            )
 
     if wf_mode == "Simple split":
         sc1, sc2, sc3 = st.columns([2, 2, 2])
@@ -1636,6 +1647,17 @@ elif mode == "Walk-Forward OOS":
         with sc3:
             wf_cap = st.number_input("Capital ($)", value=100000, min_value=1000,
                                      step=10000, key="wf_cap_s")
+        wf_kwargs = dict(mode="simple", period=wf_period, train_pct=wf_train_pct,
+                         initial_capital=wf_cap)
+    elif wf_mode == "Scan all strategies":
+        sc1, sc2, sc3 = st.columns([2, 2, 2])
+        with sc1:
+            wf_period = st.selectbox("Period", ["2y", "5y", "10y"], index=2, key="wf_period_scan")
+        with sc2:
+            wf_train_pct = st.slider("In-sample %", 50, 85, 70, 5, key="wf_train_pct_scan") / 100.0
+        with sc3:
+            wf_cap = st.number_input("Capital ($)", value=100000, min_value=1000,
+                                     step=10000, key="wf_cap_scan")
         wf_kwargs = dict(mode="simple", period=wf_period, train_pct=wf_train_pct,
                          initial_capital=wf_cap)
     else:
@@ -1654,7 +1676,59 @@ elif mode == "Walk-Forward OOS":
         wf_kwargs = dict(mode="rolling", period=wf_period, train_years=wf_train_y,
                          test_years=wf_test_y, step_years=wf_test_y, initial_capital=wf_cap)
 
-    if st.button("▶ Run Walk-Forward", type="primary", key="wf_run"):
+    if wf_mode == "Scan all strategies":
+        if st.button("▶ Scan all strategies", type="primary", key="wf_scan_run"):
+            if not wf_sym:
+                st.warning("Enter a symbol.")
+                st.stop()
+            import concurrent.futures
+            results: list[dict] = []
+            errors: list[tuple[str, str]] = []
+            progress = st.progress(0.0, text=f"Walk-forward scan: 0 / {len(WF_CHOICES)}")
+
+            def _run_one(item: tuple[str, str]) -> tuple[str, str, dict | Exception]:
+                stype, label = item
+                try:
+                    r = api.backtest_walkforward(wf_sym, stype, **wf_kwargs)
+                    return (stype, label, r)
+                except Exception as exc:  # noqa: BLE001
+                    return (stype, label, exc)
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(8, len(WF_CHOICES))
+            ) as ex:
+                futures = [ex.submit(_run_one, item) for item in WF_CHOICES]
+                done = 0
+                for fut in concurrent.futures.as_completed(futures):
+                    stype, label, r = fut.result()
+                    done += 1
+                    progress.progress(
+                        done / len(WF_CHOICES),
+                        text=f"Walk-forward scan: {done} / {len(WF_CHOICES)}",
+                    )
+                    if isinstance(r, Exception):
+                        errors.append((label, str(r)))
+                        continue
+                    iss, oos = r.get("is_segment", {}), r.get("oos_segment", {})
+                    results.append({
+                        "strategy_type": stype,
+                        "strategy_name": r.get("strategy_name", label),
+                        "wfe": r.get("wfe"),
+                        "wfe_label": r.get("wfe_label", ""),
+                        "is_cagr": iss.get("cagr", 0.0),
+                        "oos_cagr": oos.get("cagr", 0.0),
+                        "is_return_pct": iss.get("total_return_pct", 0.0),
+                        "oos_return_pct": oos.get("total_return_pct", 0.0),
+                        "oos_win_pct": oos.get("win_rate_pct", 0.0),
+                        "oos_trades": oos.get("trades", 0),
+                        "oos_max_dd_pct": oos.get("max_drawdown_pct", 0.0),
+                    })
+            progress.empty()
+            st.session_state["wf_scan_result"] = {
+                "symbol": wf_sym, "kwargs": wf_kwargs,
+                "results": results, "errors": errors,
+            }
+    elif st.button("▶ Run Walk-Forward", type="primary", key="wf_run"):
         if not wf_sym:
             st.warning("Enter a symbol.")
             st.stop()
@@ -1666,8 +1740,79 @@ elif mode == "Walk-Forward OOS":
                 st.stop()
         st.session_state["wf_result"] = wf
 
+    # ── Scan-all results table ──────────────────────────────────────────
+    scan = st.session_state.get("wf_scan_result")
+    if wf_mode == "Scan all strategies" and scan:
+        rows = scan.get("results", [])
+        if not rows:
+            st.error("Scan returned no results. See errors below.")
+        else:
+            st.subheader(f"Scan results — {scan['symbol']}")
+            # WFE-rank: highest WFE first; None (no IS edge) sinks to bottom.
+            def _wfe_key(r):
+                w = r.get("wfe")
+                return (w is None, -(w if w is not None else 0.0))
+            rows_sorted = sorted(rows, key=_wfe_key)
+
+            # Best fit + simple verdict bucket.
+            best = rows_sorted[0]
+            excellent = [r for r in rows_sorted
+                         if r.get("wfe") is not None and r["wfe"] >= 1.0
+                         and r["oos_cagr"] > 0]
+            acceptable = [r for r in rows_sorted
+                          if r.get("wfe") is not None and 0.7 <= r["wfe"] < 1.0
+                          and r["oos_cagr"] > 0]
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Best fit",
+                      best.get("strategy_name", "—"),
+                      f"WFE {best['wfe']:.2f}" if best.get("wfe") is not None else "WFE N/A")
+            m2.metric("Excellent (WFE ≥ 1.0)", len(excellent))
+            m3.metric("Acceptable (0.7–1.0)", len(acceptable))
+            m4.metric("Strategies scanned", f"{len(rows)} / {len(WF_CHOICES)}")
+
+            df_scan = pd.DataFrame([
+                {
+                    "Rank": i + 1,
+                    "Strategy": r["strategy_name"],
+                    "WFE": (f"{r['wfe']:.2f}" if r.get("wfe") is not None else "N/A"),
+                    "Verdict": r.get("wfe_label", ""),
+                    "IS CAGR %": round(r["is_cagr"], 2),
+                    "OOS CAGR %": round(r["oos_cagr"], 2),
+                    "OOS Return %": round(r["oos_return_pct"], 2),
+                    "OOS Win %": round(r["oos_win_pct"], 2),
+                    "OOS Trades": r["oos_trades"],
+                    "OOS Max DD %": round(r["oos_max_dd_pct"], 2),
+                }
+                for i, r in enumerate(rows_sorted)
+            ])
+
+            def _wfe_color(val: object) -> str:
+                try:
+                    v = float(val)
+                except (TypeError, ValueError):
+                    return ""
+                if v >= 1.0:
+                    return "color: #2ec4b6; font-weight: 600"
+                if v >= 0.7:
+                    return "color: #f4d35e"
+                if v >= 0.3:
+                    return "color: #f4a261"
+                return "color: #e84545"
+
+            st.dataframe(
+                # Styler.applymap was removed in pandas 2.1+; .map has the
+                # identical signature.
+                df_scan.style.map(_wfe_color, subset=["WFE"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+            if scan.get("errors"):
+                with st.expander(f"⚠ {len(scan['errors'])} strategy run(s) failed"):
+                    for label, msg in scan["errors"]:
+                        st.write(f"**{label}** — {msg}")
+
     wf = st.session_state.get("wf_result")
-    if wf:
+    if wf_mode != "Scan all strategies" and wf:
         if wf.get("mode") == "simple":
             iss, oos = wf["is_segment"], wf["oos_segment"]
             wfe = wf.get("wfe")
