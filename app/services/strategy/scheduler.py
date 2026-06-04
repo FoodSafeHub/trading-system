@@ -158,23 +158,43 @@ def _compute_quantity(
     stop: float | None,
     max_capital_usd: float | None = None,
     max_shares: float | None = None,
+    held_qty: float = 0.0,
 ) -> float:
     """
-    Return shares to buy using fixed-fractional position sizing.
+    Return shares to BUY using fixed-fractional position sizing, honouring the
+    user's per-assignment cap **inclusive of shares already held**.
 
-    max_capital_usd: per-symbol dollar cap set by the user on the assignment.
-                     When set, shares are capped so position value never exceeds it.
-    max_shares:      per-symbol shares cap. Used ONLY when max_capital_usd is
+    The cap (max_capital_usd or max_shares) defines the TOTAL allowed position,
+    not the size of a single order. If you already hold some shares of the
+    symbol, this function returns only the gap up to the cap; if you're already
+    at or over the cap, it returns 0 (the caller will then skip the BUY).
+
+    max_capital_usd: per-symbol DOLLAR cap. When set, total notional
+                     (held + new) is capped at this amount.
+    max_shares:      per-symbol SHARES cap. Used only when max_capital_usd is
                      empty — dollar cap wins whenever both are set.
-                     Falls back to 1 share if stop is missing or sizing is not viable.
+    held_qty:        current holding for this symbol (from the broker). The
+                     scheduler passes this through so caps are honoured across
+                     multiple BUY signals on the same symbol; previously a
+                     top-up could pyramid past the user's cap.
+
+    Returns 0 when adding any shares would exceed the cap.
     """
+    # Resolve TOTAL shares this assignment is allowed to hold (incl. existing).
+    total_allowed: float | None = None
+    if max_capital_usd and entry > 0:
+        total_allowed = max_capital_usd / entry
+    elif max_shares and max_shares > 0:
+        total_allowed = max_shares
+
     if stop is None or stop <= 0 or stop >= entry:
-        # No stop — cap by max_capital_usd if given, else max_shares, else 1.
-        if max_capital_usd and entry > 0:
-            return _quantize_for_broker(max_capital_usd / entry)
-        if max_shares and max_shares > 0:
-            return _quantize_for_broker(max_shares)
-        return _quantize_for_broker(1.0)
+        # No usable stop — size by the cap if there is one; otherwise 1 share.
+        if total_allowed is not None:
+            gap = max(0.0, total_allowed - max(0.0, held_qty))
+            return _quantize_for_broker(gap) if gap > 0 else 0.0
+        # No cap and no stop → default 1 share, still gap-aware.
+        gap = max(0.0, 1.0 - max(0.0, held_qty))
+        return _quantize_for_broker(gap) if gap > 0 else 0.0
 
     settings = get_settings()
     # Dollar cap wins. When it's absent and a shares cap is set, derive a
@@ -186,6 +206,17 @@ def _compute_quantity(
         effective_max = max_shares * entry
     else:
         effective_max = settings.max_position_size_usd
+    # Tighten effective_max by the dollar value of shares already held so the
+    # risk sizer can never propose a quantity that would push us past the cap.
+    held_value = max(0.0, held_qty) * entry if entry > 0 else 0.0
+    effective_max_for_new = max(0.0, effective_max - held_value)
+    if effective_max_for_new <= 0.0:
+        logger.info(
+            "[scheduler] Position size %s: already at/over cap "
+            "(held=%.4f @ $%.2f = $%.0f vs cap $%.0f) — no top-up.",
+            symbol, held_qty, entry, held_value, effective_max,
+        )
+        return 0.0
     try:
         sz = calculate_position_size(
             symbol=symbol,
@@ -193,20 +224,30 @@ def _compute_quantity(
             stop_price=stop,
             account_value=settings.account_value,
             risk_pct_per_trade=settings.risk_pct_per_trade,
-            max_position_size_usd=effective_max,
+            max_position_size_usd=effective_max_for_new,
             max_account_risk_pct=settings.max_account_risk_pct,
         )
         if sz.viable and sz.shares >= 0.001:
-            qty = _quantize_for_broker(sz.shares)
+            # Also clamp by shares cap if one exists, accounting for held.
+            qty = sz.shares
+            if total_allowed is not None:
+                gap = max(0.0, total_allowed - max(0.0, held_qty))
+                qty = min(qty, gap)
+            qty = _quantize_for_broker(qty)
             logger.info(
                 f"[scheduler] Position size {symbol}: raw={sz.shares:.4f} -> qty={qty} "
                 f"@ ${entry:.2f}, stop ${stop:.2f}, risk ${sz.risk_amount:.2f}, "
-                f"cap=${effective_max:.0f}"
+                f"cap=${effective_max:.0f}, held={held_qty:.4f}, gap_cap=${effective_max_for_new:.0f}"
             )
             return qty
     except Exception as exc:
         logger.warning(f"[scheduler] Position sizing failed for {symbol}: {exc}")
-    return _quantize_for_broker(1.0)
+    # Sizer fallback: still honour held vs total_allowed if a cap exists.
+    if total_allowed is not None:
+        gap = max(0.0, total_allowed - max(0.0, held_qty))
+        return _quantize_for_broker(gap) if gap > 0 else 0.0
+    gap = max(0.0, 1.0 - max(0.0, held_qty))
+    return _quantize_for_broker(gap) if gap > 0 else 0.0
 
 
 def set_scheduler_system_flags(run_bollinger: bool | None, run_perplexity: bool | None) -> None:
@@ -518,20 +559,20 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                     except Exception:
                         pass
                 if direction == "BUY":
-                    qty = _compute_quantity(symbol, entry, stop, asgn_cap, asgn_shares)
-                    if qty <= 0:
-                        logger.info("[scheduler] BUY %s skipped — sizing produced 0 shares (cap=%s, shares=%s, entry=%.2f)", symbol, asgn_cap, asgn_shares, entry)
-                        continue
-                    # Idempotent re-entry: an assigned BUY signal stays active for
-                    # several hourly cycles. Once we already hold at least the
-                    # target size, don't keep stacking — that would pyramid the
-                    # position far past the user's cap. Re-buy only tops up toward
-                    # the target if a partial fill left us short.
+                    # Sizing is cap-aware AND held-aware: pass the broker
+                    # quantity so a top-up can never pyramid past the user's
+                    # max_capital_usd / max_shares (which apply to the TOTAL
+                    # position, not just the new order).
                     held = current_positions.get(symbol, 0.0)
-                    if held >= qty:
+                    qty = _compute_quantity(
+                        symbol, entry, stop, asgn_cap, asgn_shares,
+                        held_qty=held,
+                    )
+                    if qty <= 0:
                         logger.info(
-                            "[scheduler] BUY %s skipped — already hold %.4f >= target %.4f",
-                            symbol, held, qty,
+                            "[scheduler] BUY %s skipped — at/over cap "
+                            "(held=%.4f, cap=%s, shares=%s, entry=%.2f).",
+                            symbol, held, asgn_cap, asgn_shares, entry,
                         )
                         continue
                     # Regime open-position cap: only blocks BUYs that would open
@@ -646,11 +687,80 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         )
                         continue
                     qty = held
+
+                    # ── Consensus SELL → tight trailing stop (Approach C) ──
+                    # Mirrors the assigned-SELL path so EVERY SELL signal
+                    # (assigned or consensus) places the tight trail rather
+                    # than dumping at market. trail_pct: use the matching
+                    # assignment's tight_trail_pct if one exists, else 2.0%.
+                    c_asgn = next((a for a in assignments if a["symbol"] == symbol), None)
+                    c_broker = (c_asgn.get("broker") if c_asgn else "default") or "default"
+                    # India auto-routing (same as the assigned path).
+                    if c_broker == "default":
+                        try:
+                            from app.services.markets import is_india_symbol
+                            if is_india_symbol(symbol):
+                                c_broker = "zerodha"
+                        except Exception:
+                            pass
+                    c_trail_pct = float(
+                        (c_asgn.get("tight_trail_pct") if c_asgn else None) or 2.0
+                    )
+                    consensus_label = (
+                        "consensus:" + "+".join(agreeing) if agreeing else "consensus"
+                    )
+                    sig_id = _persist_signal(symbol, direction, consensus_label, entry_p or None)
+                    exec_svc, exec_acct = _svc_for(c_broker)
+                    logger.info(
+                        "[scheduler] Consensus SELL %s: placing %.1f%% tight trail "
+                        "(broker=%s, trail_pct=%s)",
+                        symbol, c_trail_pct, c_broker,
+                        (c_asgn or {}).get("tight_trail_pct"),
+                    )
+                    loop.run_until_complete(exec_svc.tighten_trail_on_sell(
+                        symbol=symbol,
+                        quantity=qty,
+                        account_id=exec_acct,
+                        signal_price=entry_p,
+                        trail_pct=c_trail_pct,
+                        source="scheduler",
+                        idempotency_suffix=f"consensus-{symbol}",
+                        signal_id=sig_id,
+                    ))
+                    try:
+                        from app.services.notifications.bus import notify_signal
+                        notify_signal(
+                            symbol=symbol, direction=direction,
+                            strategy=consensus_label, source="scheduler",
+                            price=entry_p or None,
+                        )
+                    except Exception:
+                        pass
+                    continue  # SELL done via trail — skip the generic block below
                 else:
                     entry_p = live_prices.get(symbol) or 0.0
-                    qty = _compute_quantity(symbol, entry_p, None) if entry_p > 0 else _quantize_for_broker(1.0)
+                    # Consensus is "all strategies agreed" but the per-symbol
+                    # cap is per-assignment. Reuse the matching assignment's
+                    # cap (if any) so a consensus BUY honours the same
+                    # max_capital_usd / max_shares the user set.
+                    c_asgn = next((a for a in assignments if a["symbol"] == symbol), None)
+                    c_cap = c_asgn.get("max_capital_usd") if c_asgn else None
+                    c_shares = c_asgn.get("max_shares") if c_asgn else None
+                    c_held = current_positions.get(symbol, 0.0)
+                    qty = (
+                        _compute_quantity(
+                            symbol, entry_p, None, c_cap, c_shares,
+                            held_qty=c_held,
+                        )
+                        if entry_p > 0
+                        else _quantize_for_broker(1.0)
+                    )
                     if qty <= 0:
-                        logger.info("[scheduler] Consensus BUY %s skipped — sizing produced 0 shares", symbol)
+                        logger.info(
+                            "[scheduler] Consensus BUY %s skipped — at/over cap "
+                            "(held=%.4f, cap=%s, shares=%s).",
+                            symbol, c_held, c_cap, c_shares,
+                        )
                         continue
                     # Same regime open-position cap as the assigned path. Only
                     # blocks a BUY that opens a new symbol; existing holdings exempt.

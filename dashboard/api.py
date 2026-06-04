@@ -150,7 +150,18 @@ def live_quotes(symbols: str):
 def orders():
     return _get("/orders")
 
-def signals():
+def signals(limit: int | None = None, symbol: str | None = None):
+    """Recent signals. `limit` defaults to the API default (500). Pass a
+    larger number to widen the window so all assigned symbols' signals
+    from the most-recent scheduler cycle are visible at once."""
+    params: dict[str, object] = {}
+    if limit is not None:
+        params["limit"] = int(limit)
+    if symbol:
+        params["symbol"] = symbol
+    if params:
+        from urllib.parse import urlencode
+        return _get(f"/signals?{urlencode(params)}")
     return _get("/signals")
 
 def signal_runs():

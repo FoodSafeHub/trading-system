@@ -740,7 +740,13 @@ _live_pairs = {
 }
 
 try:
-    sigs = api.signals()
+    # Window large enough to cover the current assignment set across multiple
+    # recent scheduler cycles, so adding a new assignment doesn't push earlier
+    # symbols off the screen. ~12 strategies/symbol × 3 cycles per assignment,
+    # floored at 500 and capped at 5000 (matches the API's hard ceiling).
+    _assigned_count = max(1, len(_live_pairs)) or 1
+    _signals_limit = max(500, min(5000, _assigned_count * 36))
+    sigs = api.signals(limit=_signals_limit)
     if sigs:
         df = pd.DataFrame(sigs)
 
@@ -788,11 +794,43 @@ try:
                 else ("🔴 SELL" if str(v).upper() == "SELL" else "⬜ HOLD")
             )
 
-        # Filters — symbol list is built from whatever actually came back.
+        # ── Scan-coverage banner ──────────────────────────────────────────
+        # Verify that the scheduler is actually scanning every assigned
+        # symbol. The scheduler loads `enabled=True` assignments fresh each
+        # cycle (scheduler.py:308), so a missing symbol here means either
+        # (a) the symbol was added after the last cycle and the next one
+        # hasn't run yet, or (b) something is silently failing inside the
+        # cycle for that symbol.
+        _signal_syms_in_window = (
+            set(df["symbol"].dropna().str.upper().unique())
+            if "symbol" in df.columns else set()
+        )
+        _assigned_syms = {sym for (sym, _strat) in _live_pairs}
+        _missing = _assigned_syms - _signal_syms_in_window
+        if _assigned_syms:
+            if _missing:
+                st.warning(
+                    f"**Scan coverage:** {len(_assigned_syms) - len(_missing)} / "
+                    f"{len(_assigned_syms)} assigned symbols have signals in the "
+                    f"last {_signals_limit} records. Missing: "
+                    f"`{', '.join(sorted(_missing))}`. "
+                    "These will appear after the next 15-min scheduler cycle. "
+                    "If they don't show up after that, check the scheduler logs "
+                    "for per-symbol failures."
+                )
+            else:
+                st.caption(
+                    f"Scan coverage: ✅ all {len(_assigned_syms)} assigned symbol(s) "
+                    f"have signals in the last {_signals_limit} records."
+                )
+
+        # Filters — symbol dropdown is the UNION of currently-assigned symbols
+        # and symbols actually present in the response. So a newly-assigned
+        # symbol is selectable immediately, even before its first signal lands.
+        _symbol_universe = sorted(_assigned_syms | _signal_syms_in_window)
         fc1, fc2, fc3, fc4 = st.columns([2, 2, 2, 2])
         with fc1:
-            sym_options = ["All"] + sorted(df["symbol"].dropna().unique().tolist()) \
-                if "symbol" in df.columns else ["All"]
+            sym_options = ["All"] + _symbol_universe
             sym_filter = st.selectbox("Symbol", sym_options, key="sig_sym")
         with fc2:
             dir_options = ["Actionable (BUY/SELL)", "All", "🟢 BUY", "🔴 SELL", "⬜ HOLD"]
@@ -801,8 +839,12 @@ try:
             only_fire = st.checkbox("Would-fire only", value=False, key="sig_fire",
                                     help="Only signals that match a live assignment.")
         with fc4:
-            top_n = st.number_input("Show last N", min_value=10, max_value=500,
-                                    value=50, step=10, key="sig_n")
+            # The displayed table can still be trimmed for readability; the
+            # underlying query is wide enough to surface every assignment.
+            top_n = st.number_input("Show last N", min_value=10, max_value=_signals_limit,
+                                    value=min(100, _signals_limit), step=10, key="sig_n",
+                                    help=f"API window: last {_signals_limit} signals "
+                                         f"(auto-sized from {_assigned_count} assignment(s)).")
 
         if sym_filter != "All" and "symbol" in df.columns:
             df = df[df["symbol"] == sym_filter]
