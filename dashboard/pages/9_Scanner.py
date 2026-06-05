@@ -246,19 +246,19 @@ with col2:
              "the Top N window is filled exclusively with the requested direction.",
     )
     top_n = st.slider("Top N candidates to return", min_value=1, max_value=20, value=5)
-    auto_trade = st.toggle(
-        "Auto-trade top candidate",
-        value=False,
-        help="If enabled, the #1 ranked candidate matching the side filter below will be traded if risk checks pass.",
-    )
-    auto_trade_direction = st.radio(
-        "Auto-trade direction",
-        ["ANY", "BUY", "SELL"],
-        index=1,  # default to BUY — safer than ANY when toggling on for the first time
-        horizontal=True,
-        help="ANY = top candidate fires regardless of side. BUY/SELL = only fire on that side; "
-             "if the #1 candidate is the wrong side, the scanner walks down the list.",
-        disabled=not auto_trade,
+    # The Scanner is DISCOVERY ONLY. The auto-scheduler (every 15 min) is the
+    # sole execution authority. Scanner candidates write signal rows that the
+    # scheduler picks up on its next cycle if the symbol is assigned. The old
+    # "Auto-trade top candidate" toggle was removed because it placed orders
+    # in parallel with the scheduler, with a separate (and weaker) cap +
+    # SELL-policy contract -- which is how BNY got flattened by an
+    # unintended MARKET sell on 2026-06-04.
+    auto_trade = False
+    auto_trade_direction = "ANY"
+    st.caption(
+        "ℹ Scanner is discovery only. Candidates surface as signals; the "
+        "auto-scheduler (every 15 min) is the sole execution authority and "
+        "trades only on assignments you've configured."
     )
 
 run_col, _ = st.columns([1, 3])

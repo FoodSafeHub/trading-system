@@ -280,237 +280,84 @@ def run_scan(config: ScanConfig) -> ScanSummary:
 
 
 def _auto_trade_top(candidate: dict, scan_run_id: str, scanned_at: datetime) -> None:
-    """Place a paper/live order for the top-ranked scan candidate, with the
-    SAME safety contract as the scheduler's assigned-strategy path:
+    """DISCOVERY-ONLY: record the scan candidate as a Signal row and notify;
+    do NOT place any broker order.
 
-      - SELL signals go through tighten_trail_on_sell() (Approach C) -- they
-        place a GTC TRAILING_STOP rather than a MARKET sell. The strategy
-        signal means "tighten the leash", not "exit now".
-      - BUY signals honour any matching assignment's max_capital_usd /
-        max_shares cap, account for shares already held, and use the
-        assignment's broker (or auto-route India to Zerodha).
-      - SELL is refused for symbols not currently held (no shorting from
-        the scanner -- this engine doesn't model margin/borrow).
+    The scanner is for *discovery*. The scheduler (`_run_cycle`, every 15
+    minutes) is the SOLE execution authority -- it reads assignments, sizes
+    BUYs per the per-symbol cap (held-aware), and routes SELLs through the
+    tight trail. Letting the scanner also place orders meant two parallel
+    paths could fire on the same signal with different caps and different
+    SELL policies (the path that flattened BNY on 2026-06-04 14:16 ET).
 
-    The previous implementation hardcoded qty=1, ignored caps entirely,
-    placed MARKET SELLs straight to the broker, and silently shorted held=0
-    symbols. That's how the BNY position was flattened by an unintended
-    MARKET sell on 2026-06-04 14:16 ET despite the assigned SELL path being
-    correctly trail-routed.
+    What this function does now:
+      * writes a Signal row with `source='scanner'` and `acted_on=False`
+        (so it shows up in the Recent Signals feed with a clear "scanner
+        discovery only" provenance);
+      * emits a notification with the same provenance;
+      * marks the matching ScanResult as auto_traded=False -- the column
+        is kept for back-compat with the dashboard table, but it now
+        means "scanner saw this", not "the broker filled this".
+
+    It deliberately does NOT call get_broker / ExecutionService / place_order.
+    Any future MARKET/TRAIL order on this candidate will come from the
+    scheduler's next cycle, gated by the user's assignment row.
     """
-    import asyncio
-    from app.schemas.orders import OrderRequest
-    from app.services.brokers.factory import get_broker
-    from app.services.execution.service import ExecutionService
-    from app.services.risk.engine import RiskEngine
-
     symbol = candidate["symbol"]
     direction = candidate["direction"]
     price = candidate["price"] or 0.0
+    strategy_label = "scanner:" + (candidate.get("strategy_name") or "top")
 
-    # ── Look up any matching assignment for cap / broker / trail context ──
-    assignment = None
+    # Persist discovery signal -- acted_on=False because the scanner doesn't
+    # execute. The scheduler decides whether to act on its own next cycle.
     try:
-        from app.models.assignments import SymbolStrategyAssignment
+        from app.models.signals import Signal
         with SessionLocal() as db:
-            assignment = (
-                db.query(SymbolStrategyAssignment)
-                .filter_by(symbol=symbol.upper(), enabled=True)
-                .first()
+            sig = Signal(
+                strategy_name=strategy_label[:128],
+                symbol=symbol.upper(),
+                direction=direction,
+                strength=1.0,
+                price_at_signal=price or None,
+                acted_on=False,   # DISCOVERY only; scheduler is execution authority
             )
-    except Exception:
-        assignment = None
-
-    asgn_cap = getattr(assignment, "max_capital_usd", None) if assignment else None
-    asgn_shares = getattr(assignment, "max_shares", None) if assignment else None
-    asgn_trail_pct = (
-        float(getattr(assignment, "tight_trail_pct", None) or 2.0)
-        if assignment else 2.0
-    )
-    asgn_broker_name = (
-        getattr(assignment, "broker", None) or "default"
-    ) if assignment else "default"
-    # India auto-route, same as the scheduler.
-    if asgn_broker_name == "default":
-        try:
-            from app.services.markets import is_india_symbol
-            if is_india_symbol(symbol):
-                asgn_broker_name = "zerodha"
-        except Exception:
-            pass
+            db.add(sig)
+            db.commit()
+    except Exception as exc:
+        logger.warning("[scanner] Could not persist discovery signal for %s: %s", symbol, exc)
 
     try:
-        loop = asyncio.new_event_loop()
-        # Resolve broker per assignment (default = global Schwab; "zerodha"
-        # builds the India broker). Same _build_one factory the scheduler uses.
-        if asgn_broker_name == "default":
-            broker = get_broker()
-        else:
-            from app.services.brokers.factory import _build_one
-            try:
-                broker = _build_one(asgn_broker_name)
-            except Exception as exc:
-                logger.warning(
-                    "[scanner] Broker override %r failed (%s) -- falling back to default",
-                    asgn_broker_name, exc,
-                )
-                broker = get_broker()
+        from app.services.notifications.bus import notify_signal
+        notify_signal(
+            symbol=symbol, direction=direction,
+            strategy=strategy_label,
+            source="scanner",
+            price=price or None,
+            extra=(
+                f"Score: {candidate.get('score', 0):.0f} -- DISCOVERY ONLY, "
+                f"scheduler executes on its 15-min cycle if assigned."
+            ),
+        )
+    except Exception:
+        pass
 
-        loop.run_until_complete(broker.authenticate())
-        accounts = loop.run_until_complete(broker.get_accounts())
-        account_id = accounts[0].account_id if accounts else ""
-        svc = ExecutionService(broker)
-
-        # Held quantity from the broker -- needed for SELL guard AND cap-aware BUY sizing.
-        held_qty = 0.0
-        try:
-            positions = loop.run_until_complete(broker.get_positions(account_id))
-            for pos in positions:
-                if pos.symbol.upper() == symbol.upper():
-                    held_qty = float(pos.quantity)
-                    break
-        except Exception as exc:
-            logger.warning(
-                "[scanner] Could not fetch positions for %s (%s) -- "
-                "treating held=0 (SELL will be skipped if direction=SELL)",
-                symbol, exc,
-            )
-
-        # ── Compute / route per direction ─────────────────────────────────
-        if direction == "SELL":
-            if held_qty < 1.0:
-                logger.info(
-                    "[scanner] Auto-trade SELL %s skipped -- held=%.4f (no short selling from scanner)",
-                    symbol, held_qty,
-                )
-                loop.close()
-                return
-
-            # Stamp the SELL signal row with acted_on=True so PnL audit can
-            # link signal -> trail order via signal_id.
-            sig_id: int | None = None
-            try:
-                from app.models.signals import Signal
-                with SessionLocal() as db:
-                    sig = Signal(
-                        strategy_name=("scanner:" + (candidate.get("strategy_name") or "top"))[:128],
-                        symbol=symbol.upper(),
-                        direction="SELL",
-                        strength=1.0,
-                        price_at_signal=price or None,
-                        acted_on=True,
-                    )
-                    db.add(sig)
-                    db.commit()
-                    db.refresh(sig)
-                    sig_id = sig.id
-            except Exception:
-                sig_id = None
-
-            try:
-                from app.services.notifications.bus import notify_signal
-                notify_signal(
-                    symbol=symbol, direction="SELL",
-                    strategy="scanner:" + (candidate.get("strategy_name") or "top"),
-                    source="scanner", price=price or None,
-                    extra=f"Score: {candidate.get('score', 0):.0f}",
-                )
-            except Exception:
-                pass
-
-            logger.info(
-                "[scanner] Auto-trade SELL %s: placing %.1f%% tight trail "
-                "(held=%.4f, assignment trail_pct=%s)",
-                symbol, asgn_trail_pct, held_qty,
-                getattr(assignment, "tight_trail_pct", None) if assignment else None,
-            )
-            loop.run_until_complete(svc.tighten_trail_on_sell(
-                symbol=symbol,
-                quantity=held_qty,
-                account_id=account_id,
-                signal_price=price,
-                trail_pct=asgn_trail_pct,
-                source="scanner",
-                idempotency_suffix=f"scanner-{scan_run_id}",
-                signal_id=sig_id,
-            ))
-            loop.close()
-        else:
-            # BUY path: cap-aware sizing via the same helper the scheduler uses.
-            from app.services.strategy.scheduler import _compute_quantity
-            qty = _compute_quantity(
-                symbol, price, None, asgn_cap, asgn_shares, held_qty=held_qty,
-            )
-            if qty <= 0:
-                logger.info(
-                    "[scanner] Auto-trade BUY %s skipped -- at/over cap "
-                    "(held=%.4f, cap=%s, shares=%s).",
-                    symbol, held_qty, asgn_cap, asgn_shares,
-                )
-                loop.close()
-                return
-
-            order_req = OrderRequest(
-                symbol=symbol,
-                side="BUY",
-                order_type="MARKET",
-                quantity=qty,
-                source="scanner",
-            )
-            risk = RiskEngine()
-            check = risk.check(order_req, estimated_price=price)
-            if not check.passed:
-                logger.info("[scanner] Auto-trade blocked for %s: %s", symbol, check.blocked_reason)
-                loop.close()
-                return
-
-            sig_id = None
-            try:
-                from app.models.signals import Signal
-                with SessionLocal() as db:
-                    sig = Signal(
-                        strategy_name=("scanner:" + (candidate.get("strategy_name") or "top"))[:128],
-                        symbol=symbol.upper(),
-                        direction="BUY",
-                        strength=1.0,
-                        price_at_signal=price or None,
-                        acted_on=True,
-                    )
-                    db.add(sig)
-                    db.commit()
-                    db.refresh(sig)
-                    sig_id = sig.id
-            except Exception:
-                pass
-            try:
-                from app.services.notifications.bus import notify_signal
-                notify_signal(
-                    symbol=symbol, direction="BUY",
-                    strategy="scanner:" + (candidate.get("strategy_name") or "top"),
-                    source="scanner", price=price or None,
-                    extra=f"Score: {candidate.get('score', 0):.0f}",
-                )
-            except Exception:
-                pass
-            loop.run_until_complete(svc.execute(order_req, account_id=account_id, signal_id=sig_id))
-            loop.close()
-
-        # Mark as auto-traded
+    # auto_traded=False so the dashboard distinguishes discovery from a real fill.
+    try:
         with SessionLocal() as db:
             rows = db.query(ScanResult).filter_by(
                 scan_run_id=scan_run_id, symbol=symbol
             ).all()
             for r in rows:
-                r.auto_traded = True
+                r.auto_traded = False
             db.commit()
+    except Exception:
+        pass
 
-        logger.info(
-            "[scanner] Auto-traded %s %s @ ~$%.2f (score=%.1f, trail=%s)",
-            direction, symbol, price, candidate.get("score", 0),
-            f"{asgn_trail_pct}%" if direction == "SELL" else "n/a",
-        )
-    except Exception as e:
-        logger.error("[scanner] Auto-trade failed for %s: %s", symbol, e)
+    logger.info(
+        "[scanner] DISCOVERY %s %s @ ~$%.2f (score=%.1f) -- no order placed; "
+        "scheduler will act on its next cycle if symbol is assigned.",
+        direction, symbol, price, candidate.get("score", 0),
+    )
 
 
 def _make_generic_configs(symbol: str):

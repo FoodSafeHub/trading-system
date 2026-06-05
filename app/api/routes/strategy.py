@@ -10,9 +10,6 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.models.assignments import SymbolStrategyAssignment
 from app.models.signals import Signal
-from app.schemas.orders import OrderRequest
-from app.services.brokers.factory import get_broker
-from app.services.execution.service import ExecutionService
 from app.services.indicators.bollinger import compute_bollinger
 from app.services.indicators.ema import compute_ema
 from app.services.indicators.macd import compute_macd
@@ -34,24 +31,29 @@ _engine = StrategyEngine()
 @router.post("/run")
 async def run_strategy_cycle():
     """
-    Manually trigger one full strategy cycle with signal consensus filtering.
-    An order is only placed when min_signal_agreement strategies agree on the
-    same symbol + direction.
+    DISCOVERY ONLY. Manually trigger one full strategy cycle with consensus
+    counting. Writes signal rows to the DB so Recent Signals updates and the
+    "would_fire" preview is accurate. Does NOT place any broker orders.
+
+    The auto-scheduler (`_run_cycle`, every 15 min) is the SOLE execution
+    authority for the system. This endpoint is for previewing what the next
+    scheduler cycle would do; it never short-circuits that cycle.
+
+    Previously this endpoint placed real orders (tight-trail SELLs and
+    hardcoded qty=1 MARKET BUYs) on consensus. That created a second
+    execution path that didn't know about per-symbol assignment caps and
+    could fire out of band with the scheduler -- the same architectural
+    pattern that allowed scanner_service to flatten BNY by surprise. Both
+    side-paths are now closed.
     """
     settings = get_settings()
     min_agree = int(settings.min_signal_agreement)
     configs = load_strategies_from_config()
-    broker = get_broker()
-    await broker.authenticate()
-    accounts = await broker.get_accounts()
-    account_id = accounts[0].account_id if accounts else ""
-    svc = ExecutionService(broker)
 
-    # Symbols with an enabled per-symbol assignment trade ONLY on their assigned
-    # strategy — they are immune to this consensus pool. Without this guard, the
-    # manual cycle re-evaluated all of strategies.json and could sell a symbol
-    # the scheduler is managing (e.g. an NVDA assigned to RSI2 got SELL-voted by
-    # NVDA_BB_Squeeze_Breakout + NVDA_Pullback_EMA50). Mirrors scheduler.py.
+    # Symbols with an enabled per-symbol assignment are evaluated by the
+    # scheduler on its assigned-strategy path; we still surface their consensus
+    # vote here for visibility, but the scheduler is the only thing that ever
+    # turns those into orders. Mirrors scheduler.py.
     with SessionLocal() as db:
         assigned_symbols = {
             sym for (sym,) in db.query(SymbolStrategyAssignment.symbol)
@@ -83,100 +85,45 @@ async def run_strategy_cycle():
         except Exception as exc:
             raw_results.append({"strategy": config.name, "error": str(exc)})
 
-    # ── Step 2: place orders only where consensus is met ─────
-    orders_placed: dict = {}  # (symbol, direction) → order_status
+    # ── Step 2: record consensus-met signals as discovery rows ─────
+    # No broker calls. The scheduler picks these up on its next cycle if the
+    # symbol is assigned; otherwise they're observability only.
+    orders_placed: dict = {}  # (symbol, direction) → status string
     consensus_info: dict = {}  # (symbol, direction) → agreeing strategies
-
-    # Fetch current positions once so SELL consensus can size to the actual
-    # holding instead of blindly trying to sell 1 share of nothing.
-    current_positions: dict[str, float] = {}
-    try:
-        positions = await broker.get_positions(account_id)
-        for pos in positions:
-            current_positions[pos.symbol.upper()] = pos.quantity
-    except Exception as exc:
-        # Can't risk a SELL burst on stale data — log loud and continue.
-        # The SELL branch below will skip any symbol not in current_positions.
-        import logging
-        logging.getLogger(__name__).warning(
-            "Could not fetch positions for /strategy/run: %s — all SELLs will be skipped",
-            exc,
-        )
 
     for symbol, directions in votes.items():
         for direction, agreeing in directions.items():
             count = len(agreeing)
             consensus_info[(symbol, direction)] = {"count": count, "strategies": agreeing}
-            if count >= min_agree:
-                if direction == "SELL":
-                    held = current_positions.get(symbol.upper(), 0.0)
-                    if held < 1.0:
-                        orders_placed[(symbol, direction)] = f"skipped_no_position (held={held:.4f})"
-                        continue
-                    qty = held
-                    signal_px = float(
-                        next((r["price"] for r in raw_results
-                              if r.get("symbol") == symbol and r.get("direction") == "SELL"), 0)
-                    ) or 0.0
-                    # Stamp a Signal row so the trail order has a signal_id
-                    # and PnL audit can show signal_price vs actual exit price.
-                    con_sig_id: int | None = None
-                    try:
-                        with SessionLocal() as db:
-                            con_sig = Signal(
-                                strategy_name=("consensus:" + "+".join(agreeing))[:128],
-                                symbol=symbol.upper(),
-                                direction="SELL",
-                                strength=1.0,
-                                price_at_signal=signal_px or None,
-                                acted_on=True,
-                            )
-                            db.add(con_sig)
-                            db.commit()
-                            db.refresh(con_sig)
-                            con_sig_id = con_sig.id
-                    except Exception:
-                        pass
-                    # SELL signal → tight 2% trailing stop via the canonical helper.
-                    placed = await svc.tighten_trail_on_sell(
-                        symbol=symbol,
-                        quantity=qty,
-                        account_id=account_id,
-                        signal_price=signal_px,
-                        trail_pct=2.0,
-                        source="scheduler",
-                        idempotency_suffix=f"consensus-{symbol}",
-                        signal_id=con_sig_id,
+            if count < min_agree:
+                continue
+
+            signal_px = float(
+                next(
+                    (r["price"] for r in raw_results
+                     if r.get("symbol") == symbol and r.get("direction") == direction),
+                    0,
+                )
+            ) or None
+            try:
+                with SessionLocal() as db:
+                    sig = Signal(
+                        strategy_name=("consensus:" + "+".join(agreeing))[:128],
+                        symbol=symbol.upper(),
+                        direction=direction,
+                        strength=1.0,
+                        price_at_signal=signal_px,
+                        # DISCOVERY ONLY -- scheduler decides whether to execute
+                        acted_on=False,
                     )
-                    orders_placed[(symbol, direction)] = "trail_placed" if placed else "market_sell_fallback"
-                else:
-                    qty = 1.0  # manual cycle defaults to 1 share for BUYs
-                    order_req = OrderRequest(
-                        symbol=symbol,
-                        side=direction,  # type: ignore[arg-type]
-                        order_type="MARKET",
-                        quantity=qty,
-                        source="scheduler",
-                    )
-                    # Stamp a Signal row so Recent Fills can render the strategy name.
-                    sig_id: int | None = None
-                    try:
-                        with SessionLocal() as db:
-                            sig = Signal(
-                                strategy_name=("consensus:" + "+".join(agreeing))[:128],
-                                symbol=symbol.upper(),
-                                direction=direction,
-                                strength=1.0,
-                                acted_on=True,
-                            )
-                            db.add(sig)
-                            db.commit()
-                            db.refresh(sig)
-                            sig_id = sig.id
-                    except Exception:
-                        sig_id = None
-                    order = await svc.execute(order_req, account_id=account_id, signal_id=sig_id)
-                    orders_placed[(symbol, direction)] = order.status if order else "risk_blocked"
+                    db.add(sig)
+                    db.commit()
+            except Exception:
+                pass
+
+            orders_placed[(symbol, direction)] = (
+                "discovery_only - scheduler executes on next 15-min cycle"
+            )
 
     # ── Step 3: annotate results with consensus info ─────────
     results = []
@@ -205,7 +152,14 @@ async def run_strategy_cycle():
         "results": results,
         "count": len(results),
         "min_signal_agreement": min_agree,
+        # Kept for response-shape back-compat. Now means "consensus-met signals
+        # recorded as discovery rows", NOT "orders sent to broker".
         "orders_placed": len(orders_placed),
+        "execution_authority": "scheduler",
+        "note": (
+            "Discovery only -- this endpoint records signals; the auto-scheduler "
+            "(every 15 min) is the sole order-placement path."
+        ),
     }
 
 
