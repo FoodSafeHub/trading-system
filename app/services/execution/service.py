@@ -389,16 +389,24 @@ class ExecutionService:
             )
             return True
         except Exception as exc:
+            # SAFETY: if the trailing stop can't be placed (broker rejection,
+            # network blip, instrument not eligible for TRAILING_STOP, etc.)
+            # we do NOT fall back to a MARKET sell. A failed trail leaves
+            # the position alone -- the user can intervene; a silent market
+            # sell hides the failure AND closes a position the strategy may
+            # never have intended to exit immediately.
+            #
+            # The previous fallback was the second escape hatch that allowed
+            # SELL signals to become MARKET sells (the first being scanner
+            # auto-trade; both are now closed). If the trail fails repeatedly,
+            # the GTC fill-sync job will surface the absent stop and the user
+            # will see the position un-protected in the dashboard.
             logger.error(
                 "[exec] tighten_trail %s: failed to place tight trail (%s) "
-                "— falling back to MARKET SELL", symbol, exc,
+                "-- POSITION LEFT UNPROTECTED, no fallback MARKET sell. "
+                "Investigate the broker rejection and re-place manually if needed.",
+                symbol, exc,
             )
-            # Fallback: immediate market sell
-            fallback = OrderRequest(
-                symbol=symbol, side="SELL", order_type="MARKET",
-                quantity=quantity, source=source,  # type: ignore[arg-type]
-            )
-            await self.execute(fallback, account_id=account_id, estimated_price=signal_price)
             return False
 
     async def _buying_power_preflight(
