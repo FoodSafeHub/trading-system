@@ -486,6 +486,17 @@ def autotrader_flatten(symbol: str | None = None):
 def daytrading_market_status():
     return _get("/daytrading/market-status")
 
+def daytrading_walkforward(strategy: str, symbol: str, years: int = 2,
+                            step_months: int = 3, initial_capital: float = 10_000.0):
+    return _get(
+        f"/daytrading/backtest/walkforward/{strategy}/{symbol}",
+        params={"years": years, "step_months": step_months, "initial_capital": initial_capital},
+        timeout=300,
+    )
+
+def daytrading_toggle_strategy(name: str, enabled: bool):
+    return _post(f"/daytrading/strategies/{name}/toggle?enabled={str(enabled).lower()}")
+
 def daytrading_data_source_status():
     return _get("/daytrading/data-source-status")
 

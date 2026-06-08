@@ -17,10 +17,13 @@ from zoneinfo import ZoneInfo
 
 from app.services.strategy.daytrading.market_open import (
     ET,
+    IST,
     is_market_open,
     is_pre_market,
     market_status,
+    market_session,
     get_spy_regime,
+    compute_vwap,
 )
 from app.services.strategy.daytrading.brain.symbol_profiles import SymbolAnalyzer, _KNOWN_PROFILES
 from app.services.strategy.daytrading.brain.strategy_selector import StrategySelector
@@ -123,8 +126,8 @@ with tab_trade:
     tab_signals, tab_autotrader = st.tabs(["Live Signals", "Auto Trader"])
 
 with tab_research:
-    tab_backtest, tab_compare, tab_sizer, tab_watchlist = st.tabs([
-        "Backtest", "Compare All", "Position Sizer", "🔍 Watchlist Analyzer",
+    tab_backtest, tab_compare, tab_sizer, tab_watchlist, tab_wf = st.tabs([
+        "Backtest", "Compare All", "Position Sizer", "🔍 Watchlist Analyzer", "📈 Walk-Forward",
     ])
 
 with tab_settings:
@@ -149,25 +152,40 @@ def _direction_color(direction: str) -> str:
     return {"BUY": "#00d4aa", "SELL": "#ff4b4b", "HOLD": "#888888"}.get(direction, "#888888")
 
 
-def _render_signal_card(sig: dict, idx: int) -> None:
+def _render_signal_card(sig: dict, idx: int, symbol: str = "") -> None:
     direction = sig.get("direction", "HOLD")
     confidence = sig.get("confidence", 0.0)
+    rr = sig.get("r_multiple", 0)
     label = (
         f"**{sig['strategy']}** · {direction} · "
-        f"conf {confidence:.0%} · {sig.get('timeframe', '')} · "
+        f"conf {confidence:.0%} · R:R {rr:.1f} · {sig.get('timeframe', '')} · "
         f"{_regime_badge(sig.get('regime', ''))}"
     )
     with st.expander(label, expanded=idx == 0):
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Entry", f"${sig['entry_price']:.2f}")
-        c2.metric("Stop", f"${sig['stop_price']:.2f}")
-        c3.metric("Target", f"${sig['target_price']:.2f}")
-        rr = sig.get("r_multiple", 0)
-        c4.metric("R:R", f"{rr:.1f}:1")
+        entry = sig.get("entry_price", 0)
+        stop  = sig.get("stop_price", 0)
+        tgt   = sig.get("target_price", 0)
+        c1.metric("Entry",  f"${entry:.2f}")
+        c2.metric("Stop",   f"${stop:.2f}",  delta=f"-{abs(entry-stop):.2f}" if entry else None, delta_color="inverse")
+        c3.metric("Target", f"${tgt:.2f}",   delta=f"+{abs(tgt-entry):.2f}"  if entry else None, delta_color="normal")
+        c4.metric("R:R",    f"{rr:.1f}:1")
 
-        st.progress(min(confidence, 1.0))
+        st.progress(min(confidence, 1.0), text=f"Confidence: {confidence:.0%}")
         st.caption(f"Reason: {sig.get('reason', '')}")
-        st.info("⏱ **DAY ORDER — expires at close (3:45 PM ET)**")
+
+        # Market-aware expiry label
+        _sym = symbol or sig.get("symbol", "")
+        if _sym:
+            try:
+                _sess = market_session(_sym)
+                _close_str = _sess.close_time.strftime("%H:%M")
+                _tz_str = "IST" if _sess.tz is IST else "ET"
+                st.info(f"⏱ **DAY ORDER — expires at close ({_close_str} {_tz_str})**")
+            except Exception:
+                st.info("⏱ **DAY ORDER — expires at close (3:45 PM ET)**")
+        else:
+            st.info("⏱ **DAY ORDER — expires at close (3:45 PM ET)**")
 
         indicators = sig.get("indicators", {})
         if indicators:
@@ -420,7 +438,9 @@ def _metrics_row(m: dict) -> None:
     cols[4].metric("Max Drawdown", f"{m.get('max_drawdown_pct', 0):.1f}%")
     cols[5].metric("Sharpe", f"{m.get('sharpe_ratio', 0):.2f}")
     cols[6].metric("Trades", str(m.get("total_trades", 0)))
-    cols[7].metric("Avg Hold", f"{m.get('avg_hold_bars', 0):.1f} bars")
+    _hold_bars = m.get("avg_hold_bars", 0)
+    _hold_min  = _hold_bars * 5   # 5m bars → minutes
+    cols[7].metric("Avg Hold", f"{_hold_bars:.1f} bars", delta=f"≈{_hold_min:.0f} min", delta_color="off")
 
     # P&L cost breakdown — only shown when commission/slippage data is present
     gross = m.get("gross_pnl")
@@ -440,27 +460,39 @@ def _metrics_row(m: dict) -> None:
 # TAB 1 — Live Signals
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_signals:
-    col_sym, col_btn = st.columns([3, 1])
+    col_sym, col_btn, col_auto = st.columns([3, 1, 1])
     symbol_input = col_sym.text_input("Symbol", value="SPY", key="signals_symbol").upper()
     get_btn = col_btn.button("▶ Get Signals", use_container_width=True)
+    auto_refresh = col_auto.toggle("Auto-refresh", value=False, key="signals_auto_refresh",
+                                   help="Refreshes every 5 minutes while the market is open.")
 
     # Market status banner
     status = market_status()
     now_str = status.get("time_et", "")
-    if status["is_open"]:
+    _mkt_is_open = is_market_open(symbol_input)
+    if _mkt_is_open:
         st.success(f"Market OPEN — {now_str}")
-    elif is_pre_market():
-        st.info(f"PRE-MARKET — {now_str}. Live signals only generated 9:30–3:45 PM ET.")
+    elif is_pre_market(symbol_input):
+        st.info(f"PRE-MARKET — {now_str}. Live signals only generated during market hours.")
     else:
         st.warning(f"Market CLOSED — {now_str}. Showing most recent data.")
 
-    st.info(
-        "Signals based on last completed 5m bar. "
-        "Refresh every 5 minutes during market hours."
-    )
+    # Last-refreshed timestamp
+    _last_refresh = st.session_state.get("_signals_last_refresh")
+    if _last_refresh:
+        st.caption(f"Last refreshed: {_last_refresh.strftime('%H:%M:%S')} ET  ·  Signals based on last completed 5m bar.")
+
+    # Auto-refresh: clear cache and rerun every 5 min while market is open
+    if auto_refresh and _mkt_is_open:
+        import time as _time_mod
+        _last = st.session_state.get("_signals_last_refresh")
+        if _last is None or (datetime.now(ET) - _last).total_seconds() >= 300:
+            _cached_signals.clear()
+            get_btn = True   # treat as a manual click
 
     if get_btn or st.session_state.get("_dt_signals_loaded"):
         st.session_state["_dt_signals_loaded"] = True
+        st.session_state["_signals_last_refresh"] = datetime.now(ET)
         with st.spinner("Fetching intraday data and running strategies…"):
             result = _cached_signals(symbol_input)
 
@@ -485,12 +517,14 @@ with tab_signals:
                 "TREND_UP": "🟢", "TREND_DOWN": "🔴",
                 "CHOPPY": "🟡", "HIGH_VOL": "🟠", "NEWS_RISK": "🔴", "UNKNOWN": "⚪",
             }
-            b1, b2, b3, b4, b5 = st.columns(5)
+            b1, b2, b3, b4, b5, b6 = st.columns(6)
             b1.metric("Market State", f"{_STATE_EMOJI.get(ms_state, '⚪')} {ms_state}", f"conf {ms_conf:.0%}")
             b2.metric("Kill Switch", "🔴 ON" if kill else "🟢 OFF")
             b3.metric("Size Multiplier", f"{size_mult:.0%}")
             b4.metric("Trades Today", str(trades_today))
             b5.metric("Losses in a Row", str(losses_row))
+            pnl_color = "normal" if daily_pnl >= 0 else "inverse"
+            b6.metric("Daily P&L", f"{daily_pnl:+.2f}%", delta_color=pnl_color)
 
             if kill:
                 st.error(f"**KILL SWITCH ACTIVE**: {brain.get('kill_switch_reason', '')}")
@@ -537,30 +571,60 @@ with tab_signals:
         except Exception:
             intraday_df = None
         if intraday_df is not None and not intraday_df.empty:
+            # Add VWAP + EMA 9/21 overlays so traders can read context.
+            _chart_df = intraday_df.copy()
+            try:
+                _chart_df["VWAP"] = compute_vwap(_chart_df)
+            except Exception:
+                pass
+            try:
+                _chart_df["EMA9"]  = _chart_df["Close"].ewm(span=9,  adjust=False).mean()
+                _chart_df["EMA21"] = _chart_df["Close"].ewm(span=21, adjust=False).mean()
+            except Exception:
+                pass
+
             # Combine accepted + rejected signals so traders can see both on the chart.
             combined_signals = []
             for s in signals:
                 combined_signals.append({
-                    "timestamp": s.get("timestamp") or s.get("bar_time") or s.get("entry_time"),
+                    "timestamp": s.get("timestamp") or s.get("bar_time") or s.get("entry_time") or s.get("signal_time"),
                     "direction": s.get("direction"),
                     "entry_price": s.get("entry_price"),
                 })
             for s in rejected:
                 combined_signals.append({
-                    "timestamp": s.get("timestamp") or s.get("bar_time"),
-                    "direction": s.get("direction"),
+                    "timestamp": s.get("timestamp") or s.get("bar_time") or s.get("signal_time"),
+                    "direction": "HOLD",   # grey marker for rejected
                     "entry_price": s.get("entry_price"),
                 })
+
             st.markdown("### Price Action — 5m Candles")
+            _overlay_note = []
+            if "VWAP"  in _chart_df.columns: _overlay_note.append("VWAP")
+            if "EMA9"  in _chart_df.columns: _overlay_note.append("EMA 9")
+            if "EMA21" in _chart_df.columns: _overlay_note.append("EMA 21")
             st.caption(
-                "Latest 5m bars for the symbol with accepted (and rejected) signal markers anchored "
-                "to the entry price. Read each fill in context: where in the range, what the bar shape "
-                "looked like, where VWAP sat."
+                "5m bars with signal markers (green=accepted BUY, red=accepted SELL, grey=rejected). "
+                + (f"Overlays: {', '.join(_overlay_note)}." if _overlay_note else "")
             )
             fig_intraday = charts.intraday_candles(
-                intraday_df, signals=combined_signals,
+                _chart_df, signals=combined_signals,
                 title=f"{symbol_input} — 5m", height=520,
             )
+            # Add EMA9/21 traces manually (intraday_candles handles VWAP via column)
+            import plotly.graph_objects as _go
+            if "EMA9" in _chart_df.columns:
+                fig_intraday.add_trace(_go.Scatter(
+                    x=_chart_df.index, y=_chart_df["EMA9"],
+                    mode="lines", line=dict(color="#26C6DA", width=1, dash="dot"),
+                    name="EMA 9", showlegend=True,
+                ), row=1, col=1)
+            if "EMA21" in _chart_df.columns:
+                fig_intraday.add_trace(_go.Scatter(
+                    x=_chart_df.index, y=_chart_df["EMA21"],
+                    mode="lines", line=dict(color="#FF9800", width=1, dash="dot"),
+                    name="EMA 21", showlegend=True,
+                ), row=1, col=1)
             st.plotly_chart(fig_intraday, use_container_width=True, theme=None)
 
         # ── Pipeline diagnostics panel ────────────────────────────────────────
@@ -584,7 +648,7 @@ with tab_signals:
         else:
             st.markdown("### Accepted Signals")
             for i, sig in enumerate(signals):
-                _render_signal_card(sig, i)
+                _render_signal_card(sig, i, symbol=symbol_input)
                 brain_reason = sig.get("brain_reason", "")
                 brain_size = sig.get("brain_size_multiplier", 1.0)
                 if brain_reason:
@@ -599,10 +663,32 @@ with tab_signals:
                         f"Reason: {sig.get('brain_reason', 'filtered')}"
                     )
 
-        col_ref, _ = st.columns([2, 8])
+        col_ref, col_exp, _ = st.columns([2, 2, 6])
         if col_ref.button("🔄 Refresh Now"):
             _cached_signals.clear()
+            st.session_state["_signals_last_refresh"] = None
             st.rerun()
+        with col_exp.expander("Export signals"):
+            _exp_rows = [
+                {k: s.get(k) for k in ["strategy","direction","entry_price","stop_price",
+                                        "target_price","r_multiple","confidence","regime","signal_time"]}
+                for s in signals
+            ]
+            if _exp_rows:
+                st.download_button(
+                    "⬇ Download CSV",
+                    data=pd.DataFrame(_exp_rows).to_csv(index=False),
+                    file_name=f"{symbol_input}_signals_{datetime.now(ET).strftime('%Y%m%d_%H%M')}.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.caption("No accepted signals to export.")
+
+    # Auto-rerun when market is open and toggle is on (schedule next rerun)
+    if auto_refresh and _mkt_is_open and st.session_state.get("_dt_signals_loaded"):
+        import time as _t2
+        _t2.sleep(0.5)
+        st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -916,15 +1002,23 @@ with tab_backtest:
                     marker_color=colors,
                     text=[f"{c}T" for c in trade_counts],
                     textposition="outside",
+                    hovertemplate="Hour %{x}<br>Win rate: %{y:.0f}%<br>Trades: %{text}<extra></extra>",
                 ))
+                # Reference lines: market open (9) and last-entry cutoff (15)
+                for _hr, _lbl, _clr in [(9, "Open 9:30", "#26C6DA"), (15, "Cutoff 15:15", "#FF9800")]:
+                    _hr_str = f"{_hr}:00"
+                    if _hr_str in [f"{h}:00" for h in hours]:
+                        fig_h.add_vline(x=_hr_str, line_dash="dash", line_color=_clr,
+                                        annotation_text=_lbl, annotation_position="top")
                 fig_h.update_layout(
-                    template="plotly_dark", height=260,
+                    template="plotly_dark", height=280,
                     margin=dict(l=0, r=0, t=20, b=0),
-                    yaxis=dict(title="Win%", range=[0, 105]),
+                    yaxis=dict(title="Win%", range=[0, 112]),
                     xaxis=dict(title="Entry Hour (ET)"),
                     showlegend=False,
                 )
                 st.plotly_chart(fig_h, use_container_width=True)
+                st.caption("Green bars ≥55% win rate · Yellow 45–55% · Red <45% · Dashed lines: market open and last-entry cutoff")
 
             outcome_data = analysis.get("outcome_breakdown", {})
             if outcome_data:
@@ -1059,6 +1153,27 @@ with tab_sizer:
                 f"Commission breakeven: price must move {breakeven_pct:.3f}% "
                 f"(${ps_commission / shares:.4f}/share) before profiting."
             )
+
+        # PDT warning
+        if ps_account < 25_000:
+            st.warning(
+                f"⚠️ **PDT Rule**: Account (${ps_account:,.0f}) is below $25,000. "
+                "You are limited to **3 day trades per 5 rolling business days**. "
+                f"You need **${25_000 - ps_account:,.0f}** more to remove this restriction."
+            )
+
+        # Scaling plan
+        st.markdown("#### Scaling Plan (recommended)")
+        _scale_rows = []
+        for _tier_pct, _label in [(0.50, "Tier 1 (50% at 1R)"), (0.30, "Tier 2 (30% at 2R)"), (0.20, "Tier 3 (20% trail)")]:
+            _tier_shares = max(1, int(shares * _tier_pct))
+            _tier_value  = _tier_shares * ps_entry
+            _scale_rows.append({"Action": _label, "Shares": _tier_shares,
+                                 "Value ($)": f"${_tier_value:,.0f}",
+                                 "Notes": "Move stop to breakeven after this fill" if _tier_pct == 0.50 else
+                                          "Trail remaining with ATR stop" if _tier_pct == 0.20 else ""})
+        st.dataframe(pd.DataFrame(_scale_rows), use_container_width=True, hide_index=True)
+        st.caption("Scaling reduces average hold risk while letting winners run. Adjust percentages to your style.")
 
         # R multiple targets
         st.markdown("#### R-Multiple Targets")
@@ -1266,6 +1381,27 @@ with tab_watchlist:
                         if row.get("diagnostics_summary"):
                             st.caption(f"🔧 {row['diagnostics_summary']}")
 
+                        # Per-strategy breakdown
+                        all_strats = row.get("all_strategies", [])
+                        if all_strats:
+                            with st.expander("Per-strategy breakdown"):
+                                strat_rows = []
+                                for sr in all_strats:
+                                    _spf = sr.get("profit_factor", 0)
+                                    _swr = sr.get("win_rate", 0)
+                                    _st  = sr.get("trades", 0)
+                                    strat_rows.append({
+                                        "Strategy": sr.get("strategy", ""),
+                                        "Trades": _st,
+                                        "Win%": f"{_swr:.0f}%",
+                                        "PF": f"{_spf:.2f}",
+                                        "P&L ($)": f"${sr.get('total_pnl', 0):,.0f}",
+                                        "Status": "✅" if (_spf >= 1.5 and _swr >= 50) else
+                                                  ("🟡" if (_spf >= 1.0 and _swr >= 40) else
+                                                   ("⚪" if _st == 0 else "🔴")),
+                                    })
+                                st.dataframe(pd.DataFrame(strat_rows), use_container_width=True, hide_index=True)
+
                         if row["all_weak"]:
                             st.info(
                                 f"No historical edge on **{row['symbol']}** in the last {wl_period}. "
@@ -1273,6 +1409,95 @@ with tab_watchlist:
                                 "rules didn't produce tradeable setups in that window. "
                                 "Check live signals manually if it's gapping or on a mover list."
                             )
+                            # Period comparison suggestion
+                            other_period = "90d" if wl_period == "30d" else "30d"
+                            if st.button(f"Try {other_period} period for {row['symbol']}", key=f"try_period_{row['symbol']}"):
+                                st.session_state["wl_period"] = other_period
+                                st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB — Walk-Forward Validation
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_wf:
+    st.markdown("### Walk-Forward Validation")
+    st.caption(
+        "Splits the historical period into in-sample (IS) training windows and "
+        "out-of-sample (OOS) test windows to measure how well the strategy generalises. "
+        "A **Walk-Forward Efficiency (WFE) ≥ 60%** means the edge found in IS persists OOS. "
+        "WFE < 40% is a sign of overfitting."
+    )
+
+    wf1, wf2, wf3, wf4 = st.columns(4)
+    wf_symbol   = wf1.text_input("Symbol", value="SPY", key="wf_symbol").upper()
+    wf_strategy = wf2.selectbox("Strategy", [s.name for s in ALL_STRATEGIES], key="wf_strategy")
+    wf_years    = wf3.selectbox("History (years)", [1, 2], index=1, key="wf_years",
+                                 help="5m data is limited to ~60 days by most providers; longer periods use daily-bar approximation.")
+    wf_step     = wf4.selectbox("Step (months)", [1, 2, 3, 6], index=2, key="wf_step",
+                                 help="Slide the window forward by this many months each iteration.")
+    wf_capital  = st.number_input("Capital ($)", value=10_000, step=1_000, key="wf_capital")
+
+    if st.button("▶ Run Walk-Forward", key="run_wf", type="primary"):
+        with st.spinner(f"Running walk-forward for {wf_strategy} on {wf_symbol}… (may take 1–2 min)"):
+            try:
+                wf_result = api.daytrading_walkforward(
+                    strategy=wf_strategy, symbol=wf_symbol,
+                    years=int(wf_years), step_months=int(wf_step),
+                    initial_capital=float(wf_capital),
+                )
+                st.session_state["wf_result"] = wf_result
+            except Exception as e:
+                st.error(f"Walk-forward failed: {e}")
+                st.session_state["wf_result"] = None
+
+    wf_res = st.session_state.get("wf_result")
+    if wf_res:
+        if wf_res.get("error"):
+            st.error(wf_res["error"])
+        else:
+            # Top-level summary
+            wfe = wf_res.get("wfe_score", 0)
+            verdict = wf_res.get("verdict", "")
+            wfe_color = "normal" if wfe >= 60 else ("off" if wfe >= 40 else "inverse")
+            w1, w2, w3, w4 = st.columns(4)
+            w1.metric("WFE Score", f"{wfe:.0f} / 100", delta=verdict, delta_color=wfe_color)
+            w2.metric("IS Win Rate",  f"{wf_res.get('is_win_rate', 0):.1f}%")
+            w3.metric("OOS Win Rate", f"{wf_res.get('oos_win_rate', 0):.1f}%")
+            w4.metric("Windows",      str(wf_res.get("n_windows", 0)))
+
+            if wfe >= 60:
+                st.success(f"✅ **{verdict}** — Edge found in-sample generalises out-of-sample. Confidence in live use: HIGH.")
+            elif wfe >= 40:
+                st.warning(f"🟡 **{verdict}** — Partial generalisation. Reduce position size in live use.")
+            else:
+                st.error(f"🔴 **{verdict}** — Strategy is overfit to history. Do NOT use live without further tuning.")
+
+            # Per-window table
+            windows = wf_res.get("windows", [])
+            if windows:
+                st.markdown("#### Per-Window Results")
+                wf_rows = []
+                for w in windows:
+                    wf_rows.append({
+                        "Window": w.get("window", ""),
+                        "IS Period": w.get("is_period", ""),
+                        "OOS Period": w.get("oos_period", ""),
+                        "IS Trades": w.get("is_trades", 0),
+                        "IS Win%": f"{w.get('is_win_rate', 0):.1f}%",
+                        "IS PF": f"{w.get('is_profit_factor', 0):.2f}",
+                        "OOS Trades": w.get("oos_trades", 0),
+                        "OOS Win%": f"{w.get('oos_win_rate', 0):.1f}%",
+                        "OOS PF": f"{w.get('oos_profit_factor', 0):.2f}",
+                        "OOS P&L ($)": f"${w.get('oos_pnl', 0):,.0f}",
+                        "Pass": "✅" if w.get("oos_pass") else "❌",
+                    })
+                st.dataframe(pd.DataFrame(wf_rows), use_container_width=True, hide_index=True)
+
+            notes = wf_res.get("notes", [])
+            if notes:
+                with st.expander("Analysis notes"):
+                    for n in notes:
+                        st.caption(f"• {n}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1499,6 +1724,12 @@ with tab_scanner:
                 })
             df_market = pd.DataFrame(rows)
 
+            # Sort: active signals first, then by adj score descending
+            if "Signal?" in df_market.columns:
+                df_market["_sig_sort"] = df_market["Signal?"].apply(lambda v: 0 if v == "🟢" else 1)
+                df_market = df_market.sort_values(["_sig_sort", "Adj Score"], ascending=[True, False])
+                df_market = df_market.drop(columns=["_sig_sort"])
+
             # Drop the precheck columns when nothing was actually checked —
             # otherwise the four extra "—" columns just clutter the table.
             if not any_precheck_ran:
@@ -1525,9 +1756,20 @@ with tab_scanner:
             st.caption(
                 f"{len(df_market)} candidate(s)"
                 + (f" · {n_active} with active native signal" if any_precheck_ran else "")
-                + " · Click a symbol from above and paste it into the per-symbol "
-                  "scanner below to see live strategy signals."
+                + " · Signals-active candidates sorted to top."
             )
+
+            # Quick-backtest row: one button per top symbol, pre-fills Backtest tab
+            _top_syms = [r.get("symbol", "") for r in ranked[:8] if r.get("symbol")]
+            if _top_syms:
+                st.markdown("**Quick Backtest** — click a symbol to pre-fill the Backtest tab:")
+                _bt_cols = st.columns(min(len(_top_syms), 8))
+                for _ci, _sym in enumerate(_top_syms):
+                    _sig_icon = "🟢 " if any(r.get("symbol") == _sym and r.get("native_signal_active") for r in ranked) else ""
+                    if _bt_cols[_ci].button(f"{_sig_icon}{_sym}", key=f"qbt_{_sym}"):
+                        st.session_state["bt_symbol"] = _sym
+                        st.session_state["ca_symbol"] = _sym
+                        st.info(f"Pre-filled '{_sym}' in Backtest and Compare All tabs — switch to Research tab to run.")
 
     # ── Start AutoTrader from scanner ────────────────────────────────────────
     # Reuses the most-recent scan stashed in session_state. The backend
@@ -1661,13 +1903,23 @@ with tab_config:
     st.markdown("---")
     st.markdown("### Strategy Configuration")
 
+    st.caption("Toggle changes are applied immediately in-memory and reset on server restart.")
     for strategy in ALL_STRATEGIES:
         with st.expander(f"⚙️ {strategy.name}  —  {STRATEGY_DESCRIPTIONS.get(strategy.name, '')}"):
-            enabled_key = f"cfg_enabled_{strategy.name}"
-            st.toggle(f"Enable {strategy.name}", value=True, key=enabled_key)
+            enabled_key  = f"cfg_enabled_{strategy.name}"
+            _was_enabled = st.session_state.get(enabled_key, True)
+            _now_enabled = st.toggle(f"Enable {strategy.name}", value=_was_enabled, key=enabled_key)
+
+            # Wire toggle to backend when it changes
+            if _now_enabled != _was_enabled:
+                try:
+                    api.daytrading_toggle_strategy(strategy.name, _now_enabled)
+                    st.toast(f"{'Enabled' if _now_enabled else 'Disabled'} {strategy.name}", icon="✅" if _now_enabled else "🚫")
+                except Exception as _te:
+                    st.warning(f"Could not update backend: {_te}")
 
             cfg = strategy.default_config
-            st.markdown("**Parameters (defaults — editing not persisted in this view):**")
+            st.markdown("**Parameters (auto-tuned per symbol in live/backtest; defaults shown):**")
             cfg_df = pd.DataFrame(
                 [{"Parameter": k, "Default Value": v} for k, v in cfg.items()]
             )
@@ -1813,15 +2065,39 @@ with tab_autotrader:
         # ── Active trade panel ─────────────────────────────────────────────────
         if state_val in ("LONG", "SHORT", "PARTIAL_EXIT_TAKEN", "TRAILING"):
             st.markdown("#### Active Position")
-            tp1, tp2, tp3, tp4, tp5, tp6, tp7 = st.columns(7)
-            tp1.metric("Side",         status.get("side", "—"))
-            tp2.metric("Entry",        f"${status.get('entry_price', 0):.2f}")
-            tp3.metric("Stop",         f"${status.get('current_stop', 0):.2f}")
-            tp4.metric("Target",       f"${status.get('first_target', 0):.2f}")
-            r_val = status.get("r_multiple")
-            tp5.metric("R Multiple",   f"{r_val:+.2f}R" if r_val is not None else "—")
-            tp6.metric("Trail Mode",   status.get("active_trail_mode", "—"))
-            tp7.metric("Strategy",     status.get("strategy", "—"))
+            tp1, tp2, tp3, tp4, tp5, tp6, tp7, tp8 = st.columns(8)
+            entry_px = status.get("entry_price", 0)
+            curr_px  = status.get("current_price", 0) or status.get("last_price", 0)
+            stop_px  = status.get("current_stop", 0)
+            tgt_px   = status.get("first_target", 0)
+            r_val    = status.get("r_multiple")
+            tp1.metric("Side",       status.get("side", "—"))
+            tp2.metric("Entry",      f"${entry_px:.2f}")
+            tp3.metric("Current",    f"${curr_px:.2f}",
+                       delta=f"{curr_px - entry_px:+.2f}" if curr_px and entry_px else None,
+                       delta_color="normal" if (curr_px or 0) >= entry_px else "inverse")
+            tp4.metric("Stop",       f"${stop_px:.2f}",
+                       delta=f"risk {abs(curr_px - stop_px):.2f}" if curr_px and stop_px else None,
+                       delta_color="off")
+            tp5.metric("Target",     f"${tgt_px:.2f}",
+                       delta=f"reward {abs(tgt_px - curr_px):.2f}" if curr_px and tgt_px else None,
+                       delta_color="off")
+            tp6.metric("R Multiple", f"{r_val:+.2f}R" if r_val is not None else "—")
+            tp7.metric("Trail Mode", status.get("active_trail_mode", "—"))
+            tp8.metric("Strategy",   status.get("strategy", "—"))
+
+            # Time in trade
+            _entry_time = status.get("entry_time", "")
+            if _entry_time:
+                try:
+                    _et_ts = datetime.fromisoformat(_entry_time.replace("Z", "+00:00"))
+                    _elapsed = (datetime.now(ET) - _et_ts.astimezone(ET)).total_seconds()
+                    _mins = int(_elapsed // 60)
+                    st.caption(f"⏱ In trade {_mins}m  ·  Unrealized: **${status.get('unrealized_pnl', 0):+,.2f}**"
+                               f"  ·  Max profit if target hit: **${abs(tgt_px - entry_px) * status.get('qty', 0):,.0f}**"
+                               f"  ·  Max loss if stopped: **${abs(entry_px - stop_px) * status.get('qty', 0):,.0f}**")
+                except Exception:
+                    pass
 
         elif state_val == "FLAT":
             cooldown_left = status.get("cooldown_bars_remaining", 0)
@@ -1878,17 +2154,36 @@ with tab_autotrader:
         # ── Decision log ──────────────────────────────────────────────────────
         log = status.get("decision_log", [])
         if log:
-            with st.expander(f"📋 Decision Log ({len(log)} entries)"):
-                for entry in reversed(log[-30:]):
-                    icon = {
-                        "ENTRY LONG": "🟢", "ENTRY SHORT": "🔴",
-                        "EXIT": "✅", "EXIT LONG": "✅", "EXIT SHORT": "✅",
-                        "MOVE_STOP": "🔧", "PARTIAL_EXIT": "📤",
-                        "NO_TRADE": "⬜", "BLOCKED": "🚫",
-                        "TRAIL_ACTIVATED": "🔵", "RESET": "🔄",
-                    }.get(entry.get("event", ""), "ℹ️")
+            with st.expander(f"📋 Decision Log ({len(log)} entries)", expanded=False):
+                _ICONS = {
+                    "ENTRY LONG": "🟢", "ENTRY SHORT": "🔴",
+                    "EXIT": "✅", "EXIT LONG": "✅", "EXIT SHORT": "✅",
+                    "MOVE_STOP": "🔧", "PARTIAL_EXIT": "📤",
+                    "NO_TRADE": "⬜", "BLOCKED": "🚫",
+                    "TRAIL_ACTIVATED": "🔵", "RESET": "🔄", "COOLDOWN": "⏳",
+                }
+                for entry in reversed(log[-50:]):
+                    event = entry.get("event", "")
+                    icon  = _ICONS.get(event, "ℹ️")
+                    reason = entry.get("reason", "")
+                    checks = entry.get("checks", {}) or {}
+                    # Enrich ENTRY lines with strategy + confidence + RR
+                    extra = ""
+                    if "ENTRY" in event:
+                        strat = checks.get("strategy") or entry.get("strategy", "")
+                        conf  = checks.get("confidence")
+                        rr    = checks.get("rr")
+                        if strat: extra += f" · {strat}"
+                        if conf is not None: extra += f" · conf {float(conf):.0%}"
+                        if rr  is not None: extra += f" · RR {float(rr):.1f}"
+                    # Enrich NO_TRADE with top rejection reason
+                    elif event == "NO_TRADE":
+                        guard = checks.get("guard", {}) or {}
+                        guard_reason = guard.get("reason", "")
+                        if guard_reason and guard_reason not in reason:
+                            extra = f" [{guard_reason[:60]}]"
                     st.markdown(
-                        f"`{entry['time']}` {icon} **{entry['event']}** — {entry['reason']}"
+                        f"`{entry.get('time','')}` {icon} **{event}**{extra} — {reason}"
                     )
 
     # ── Auto-refresh while bot is running ─────────────────────────────────────
