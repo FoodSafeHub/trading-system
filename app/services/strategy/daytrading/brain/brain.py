@@ -395,7 +395,7 @@ class DayTradingBrain:
             )
 
         # ── 3. Execution guard ────────────────────────────────────────────────
-        guard_result = self.guard.validate(sig_dict, current_bar_time)
+        guard_result = self.guard.validate(sig_dict, current_bar_time, symbol=symbol)
         checks["guard"] = {
             "accepted": guard_result.accepted,
             "reason": guard_result.reason,

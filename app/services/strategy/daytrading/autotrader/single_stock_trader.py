@@ -38,7 +38,9 @@ from app.services.strategy.daytrading.brain.market_state import (
     MarketStateResult, classify_market_state,
 )
 from app.services.strategy.daytrading.brain.risk_governor import RiskGovernor
-from app.services.strategy.daytrading.market_open import ET, is_market_open, now_et
+from app.services.strategy.daytrading.market_open import (
+    ET, IST, is_market_open, now_et, market_session,
+)
 from app.services.strategy.daytrading.brain.symbol_policy import allows_live, get_policy
 
 logger = logging.getLogger(__name__)
@@ -114,7 +116,7 @@ class SingleStockTrader:
             partial_tp=partial_tp,
             trail_mode=trail_mode,
         )
-        self.exit_manager = ExitManager()
+        self.exit_manager = ExitManager(symbol=symbol)
         self.risk_governor = RiskGovernor(config={
             "max_daily_loss_pct": max_daily_loss_pct,
             "max_trades_per_day": max_trades_per_day,
@@ -399,7 +401,7 @@ class SingleStockTrader:
     def _run_loop(self) -> None:
         while self._running:
             try:
-                if is_market_open():
+                if is_market_open(self.symbol):
                     self._refresh_data()
                     self._evaluate_cycle()
             except Exception as e:
@@ -441,12 +443,18 @@ class SingleStockTrader:
                 return
             self._last_bar_ts_5m = last_ts
 
-            # EOD force-flatten check
-            now_t = now_et().time()
-            from app.services.strategy.daytrading.autotrader.exit_manager import _EOD_FORCE_FLAT
-            if now_t >= _EOD_FORCE_FLAT and self.tsm.has_position:
+            # EOD force-flatten check (market-aware: IST for NSE, ET for US)
+            from app.services.strategy.daytrading.autotrader.exit_manager import (
+                _EOD_FORCE_FLAT, _EOD_FORCE_FLAT_IST,
+            )
+            from datetime import datetime as _dt
+            _sess = market_session(self.symbol)
+            now_t = _dt.now(_sess.tz).time()
+            _eod_flat = _EOD_FORCE_FLAT_IST if _sess.tz is IST else _EOD_FORCE_FLAT
+            if now_t >= _eod_flat and self.tsm.has_position:
                 close = self._last_price()
-                self._execute_full_exit(close, f"EOD force flatten at {now_t.strftime('%H:%M')}")
+                _tz_label = "IST" if _sess.tz is IST else "ET"
+                self._execute_full_exit(close, f"EOD force flatten at {now_t.strftime('%H:%M')} {_tz_label}")
                 return
 
             state = self.tsm.state

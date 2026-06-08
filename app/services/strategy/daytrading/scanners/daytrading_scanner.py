@@ -281,14 +281,11 @@ class DayTradingScanner:
             )
 
         # ── Hard filter: float ────────────────────────────────────────────────
-        # When the user has set a float threshold, we have to enforce it. A
-        # symbol with shares_float == 0 means "unknown" (yfinance returned
-        # nothing for it today) — we reject those rather than let them slip
-        # through unfiltered, because passing them would silently defeat the
-        # user's filter and pollute the watchlist with mega-caps.
-        if cfg.min_float or cfg.max_float:
-            if metrics.shares_float <= 0:
-                return self._reject(metrics, "float unknown")
+        # shares_float == 0 means yfinance returned nothing (common for ETFs
+        # and thinly-covered small-caps). Skip the float check rather than
+        # reject — the liquidity and ATR filters already guard against junk.
+        # Only apply bounds when float data is actually available (> 0).
+        if (cfg.min_float or cfg.max_float) and metrics.shares_float > 0:
             if cfg.min_float and metrics.shares_float < cfg.min_float:
                 return self._reject(
                     metrics,
@@ -520,6 +517,7 @@ class DayTradingScanner:
         *,
         run_native_precheck: bool = True,
         precheck_top_k: int = 10,
+        mover_snapshot=None,   # MarketMoverSnapshot | None — from market_movers.py
     ) -> list[SymbolScanResult]:
         """
         Brain-aware wrapper around scan().
@@ -543,6 +541,10 @@ class DayTradingScanner:
         precheck_top_k : how many post-regime top candidates the pre-check
             runs on. Default 10. Set to 0 to disable equivalent to
             run_native_precheck=False.
+        mover_snapshot : optional MarketMoverSnapshot (from market_movers.py).
+            When provided, the CandidateRanker blends mover prominence (which
+            lists the symbol is on, its rank on each list) into adjusted_score
+            so pre-market movers surface above equally-scored non-movers.
         """
         candidates = self.scan(max_symbols=max_symbols * 3)  # over-fetch, then trim
         if not candidates:
@@ -554,7 +556,32 @@ class DayTradingScanner:
             state = self._resolve_market_state()
 
         if state is None:
-            # No brain / no state — still run pre-check on the raw top-K.
+            # No brain / no state — apply mover blend then pre-check on raw top-K.
+            if mover_snapshot is not None:
+                try:
+                    from app.services.strategy.daytrading.candidate_ranker import (
+                        CandidateRanker,
+                    )
+                    from app.services.strategy.daytrading.market_movers import (
+                        merge_duplicate_symbols,
+                    )
+                    mover_contexts = merge_duplicate_symbols(mover_snapshot)
+                    ranker = CandidateRanker()
+                    ranked = ranker.rank(
+                        symbols=[r.symbol for r in candidates],
+                        mover_contexts=mover_contexts,
+                        market_state="UNKNOWN",
+                    )
+                    ranked_map = {rc.symbol: rc for rc in ranked}
+                    for r in candidates:
+                        rc = ranked_map.get(r.symbol)
+                        if rc is not None:
+                            r.adjusted_score = round(
+                                0.80 * r.adjusted_score + 0.20 * rc.total_score, 4
+                            )
+                    candidates.sort(key=lambda r: r.adjusted_score, reverse=True)
+                except Exception as _e:
+                    logger.warning("Mover ranker blend failed: %s", _e)
             watchlist = candidates[:max_symbols]
             if run_native_precheck and precheck_top_k > 0:
                 self._apply_native_precheck(
@@ -573,6 +600,49 @@ class DayTradingScanner:
             r.adjusted_score = round(r.score * bucket_mult, 4)
 
         candidates.sort(key=lambda r: r.adjusted_score, reverse=True)
+
+        # ── Mover-ranker blend ────────────────────────────────────────────────
+        # If a mover snapshot was supplied, run CandidateRanker to compute a
+        # mover-prominence boost and blend it into adjusted_score (weight 20%).
+        # This brings pre-market movers to the surface without overriding the
+        # signal-quality scores the scan() step calculated.
+        if mover_snapshot is not None:
+            try:
+                from app.services.strategy.daytrading.candidate_ranker import (
+                    CandidateRanker,
+                )
+                from app.services.strategy.daytrading.market_movers import (
+                    merge_duplicate_symbols,
+                )
+                mover_contexts = merge_duplicate_symbols(mover_snapshot)
+                ranker = CandidateRanker()
+                scanner_results_map = {
+                    r.symbol: {
+                        "score": r.score,
+                        "adjusted_score": r.adjusted_score,
+                        "tags": r.tags,
+                        "recommended_strategy_bucket": r.recommended_strategy_bucket,
+                        "metrics": r.metrics.to_dict(),
+                    }
+                    for r in candidates
+                }
+                ranked = ranker.rank(
+                    symbols=[r.symbol for r in candidates],
+                    mover_contexts=mover_contexts,
+                    market_state=state or "UNKNOWN",
+                    scanner_results=scanner_results_map,
+                )
+                ranked_map = {rc.symbol: rc for rc in ranked}
+                for r in candidates:
+                    rc = ranked_map.get(r.symbol)
+                    if rc is not None:
+                        # Blend: 80% scanner adjusted_score + 20% ranker total_score.
+                        r.adjusted_score = round(
+                            0.80 * r.adjusted_score + 0.20 * rc.total_score, 4
+                        )
+                candidates.sort(key=lambda r: r.adjusted_score, reverse=True)
+            except Exception as _e:
+                logger.warning("Mover ranker blend failed, using scanner scores: %s", _e)
 
         cap = 5 if state == "NEWS_RISK" else max_symbols
         watchlist = candidates[:cap]
@@ -771,10 +841,9 @@ class DayTradingScanner:
                 pm_df = df[pm_mask]
                 if not pm_df.empty:
                     return float(pm_df["Volume"].sum())
-                # Use first two regular-session bars as proxy
-                reg = df[df.index.time >= time(9, 30)]
-                if len(reg) >= 2:
-                    return float(reg["Volume"].iloc[:2].sum())
+                # No pre-market bars from this provider — do NOT substitute
+                # regular-session bars; that inflates rel_vol scores.
+                # Fall through to yfinance prepost path instead.
 
             # Fallback: yfinance with prepost
             df = yf.download(symbol, period="1d", interval="1m", prepost=True, progress=False)
@@ -863,27 +932,13 @@ def _is_today(df: pd.DataFrame) -> bool:
 
 
 def _fallback_premarket_vol(symbol: str) -> float:
+    """Return 0.0 — no reliable pre-market volume source available.
+
+    Previous versions returned the first two regular-session 5m bars as a
+    proxy, but that is NOT pre-market volume and inflated rel_vol scores.
+    Callers treat 0.0 as "unavailable" and score it neutrally.
     """
-    Pre-market volume proxy using first two 5m bars (9:30–9:40 ET).
-    Tries Twelve Data first, falls back to yfinance.
-    """
-    from app.services.strategy.daytrading.market_open import _td_fetch, _normalise_yf
-    try:
-        df = _td_fetch(symbol, "5m", "1d")
-        if df.empty:
-            df = yf.download(symbol, period="1d", interval="5m", progress=False)
-            if df.empty:
-                return 0.0
-            df = _normalise_yf(df)
-        reg_mask = df.index.time >= time(9, 30)
-        reg_df = df[reg_mask]
-        if len(reg_df) >= 2:
-            return float(reg_df["Volume"].iloc[:2].sum())
-        elif not reg_df.empty:
-            return float(reg_df["Volume"].iloc[0])
-        return 0.0
-    except Exception:
-        return 0.0
+    return 0.0
 
 
 def _detect_catalyst(symbol: str, daily_df: pd.DataFrame) -> list[str]:

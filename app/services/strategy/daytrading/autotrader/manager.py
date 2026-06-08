@@ -27,6 +27,7 @@ from app.services.strategy.daytrading.market_open import (
     is_market_open,
     is_pre_market,
     now_et,
+    market_session,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,9 +103,16 @@ class AutoTraderManager:
                     "Auto-trader already running. Call flip_off first or use replace=True via the API."
                 )
 
-            if not force and not (is_market_open() or is_pre_market()):
+            # Allow start if ANY symbol's market is open or in pre-market.
+            # This correctly handles mixed US + India watchlists where NSE
+            # hours (09:15–15:30 IST) don't overlap with US RTH.
+            any_market_tradeable = any(
+                is_market_open(sym) or is_pre_market(sym)
+                for sym in config.symbols
+            ) if config.symbols else is_market_open() or is_pre_market()
+            if not force and not any_market_tradeable:
                 raise RuntimeError(
-                    f"Market is closed (now {now_et().strftime('%H:%M %Z')}). "
+                    f"Market is closed for all symbols (US time: {now_et().strftime('%H:%M %Z')}). "
                     f"Pass force=true to arm anyway."
                 )
 

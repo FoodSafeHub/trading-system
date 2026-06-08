@@ -322,6 +322,10 @@ def run_signals(
     strategies_run: list[str] = []
     strategies_skipped: list[str] = []
 
+    # Build symbol profile once for auto-config (mirrors backtest path so live
+    # and backtest use the same tuned parameters when no custom_config is given).
+    _live_profile = SymbolAnalyzer.analyze(df_5m, symbol) if not df_5m.empty else None
+
     for strategy in ALL_STRATEGIES:
         if enabled_strategies and strategy.name not in enabled_strategies:
             continue
@@ -334,7 +338,11 @@ def run_signals(
             continue
 
         strategies_run.append(strategy.name)
+        # Prefer explicit custom_config; fall back to auto-tuned config so live
+        # and backtest both run on symbol-profile-adjusted parameters.
         cfg = (custom_configs or {}).get(strategy.name)
+        if cfg is None and _live_profile is not None:
+            cfg = ConfigAdjuster.adjust(strategy.name, _live_profile).adjusted or None
         before = len(raw_signals)
         try:
             sigs = strategy.generate_signals(df_5m, df_15m, symbol, cfg, regime)

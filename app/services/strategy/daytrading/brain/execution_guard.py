@@ -18,10 +18,10 @@ from datetime import datetime, time
 
 import pandas as pd
 
-from app.services.strategy.daytrading.market_open import ET
+from app.services.strategy.daytrading.market_open import ET, market_session
 from app.services.strategy.daytrading.models import DayTradeSignal
 
-_NO_NEW_ENTRY_AFTER = time(15, 15)
+_NO_NEW_ENTRY_AFTER = time(15, 15)   # US ET default
 _MIN_BARS_STALE = 3   # signal older than 3 bars (15 min on 5m) is stale
 
 
@@ -48,6 +48,7 @@ class ExecutionGuard:
         self,
         signal: DayTradeSignal | dict,
         current_bar_time: datetime | None = None,
+        symbol: str = "",
     ) -> GuardDecision:
         """
         Validate a signal before allowing execution.
@@ -85,20 +86,27 @@ class ExecutionGuard:
             rejection_reason = f"Confidence {confidence:.0%} below minimum {self.config['min_confidence']:.0%}."
 
         # ── 3. Market close proximity ──────────────────────────────────────────
-        # In backtest mode use the signal's own timestamp; live mode uses now().
+        # Use the session's last_entry_time so NSE cutoff (15:15 IST) is correct
+        # instead of always using 15:15 ET. In backtest use the signal's timestamp;
+        # in live mode use the current wall clock in the market's local timezone.
+        sess = market_session(symbol) if symbol else None
+        cutoff = sess.last_entry_time if sess else _NO_NEW_ENTRY_AFTER
+        sess_tz = sess.tz if sess else ET
         if current_bar_time is not None:
             try:
                 ref_time = pd.Timestamp(current_bar_time)
                 if ref_time.tzinfo is None:
-                    ref_time = ref_time.tz_localize(ET)
+                    ref_time = ref_time.tz_localize(sess_tz)
+                else:
+                    ref_time = ref_time.tz_convert(sess_tz)
                 check_time = ref_time.time()
             except Exception:
-                check_time = datetime.now(ET).time()
+                check_time = datetime.now(sess_tz).time()
         else:
-            check_time = datetime.now(ET).time()
-        checks["not_near_close"] = check_time < _NO_NEW_ENTRY_AFTER
+            check_time = datetime.now(sess_tz).time()
+        checks["not_near_close"] = check_time < cutoff
         if not checks["not_near_close"] and not rejection_reason:
-            rejection_reason = f"Too close to market close — no new entries after {_NO_NEW_ENTRY_AFTER}."
+            rejection_reason = f"Too close to market close — no new entries after {cutoff}."
 
         # ── 4. Stop distance (slippage proxy) ────────────────────────────────
         stop_pct = risk / entry * 100 if entry > 0 else 999

@@ -215,18 +215,25 @@ def now_et() -> datetime:
     return datetime.now(ET)
 
 
-def is_market_open() -> bool:
-    t = now_et().time()
-    return MARKET_OPEN_TIME <= t <= MARKET_CLOSE_TIME
+def is_market_open(symbol: str = "") -> bool:
+    """True when the cash session for `symbol` is open. Defaults to US ET."""
+    sess = market_session(symbol) if symbol else _SESSION_US
+    t = datetime.now(sess.tz).time()
+    return sess.open_time <= t <= sess.close_time
 
 
-def is_pre_market() -> bool:
-    t = now_et().time()
-    return t < MARKET_OPEN_TIME
+def is_pre_market(symbol: str = "") -> bool:
+    """True before the cash open for `symbol`'s market."""
+    sess = market_session(symbol) if symbol else _SESSION_US
+    t = datetime.now(sess.tz).time()
+    return t < sess.open_time
 
 
-def is_past_last_entry() -> bool:
-    return now_et().time() >= LAST_ENTRY_TIME
+def is_past_last_entry(symbol: str = "") -> bool:
+    """True after the last-entry cutoff for `symbol`'s market."""
+    sess = market_session(symbol) if symbol else _SESSION_US
+    t = datetime.now(sess.tz).time()
+    return t >= sess.last_entry_time
 
 
 def market_status() -> dict:

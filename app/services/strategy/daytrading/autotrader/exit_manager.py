@@ -28,7 +28,9 @@ from typing import Any, Literal
 import pandas as pd
 
 from app.services.strategy.daytrading.autotrader.trade_state import TradeStateMachine
-from app.services.strategy.daytrading.market_open import ET, compute_vwap, now_et
+from app.services.strategy.daytrading.market_open import (
+    ET, IST, compute_vwap, now_et, market_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -165,11 +167,13 @@ class ExitManager:
         use_momentum_exit: bool = True,
         quick_profit_mode: bool = True,
         stale_bar_timeout_s: int = 600,   # 10 min = 2 missed 5m bars
+        symbol: str = "",
     ):
         self.max_hold_bars = max_hold_bars
         self.use_momentum_exit = use_momentum_exit
         self.quick_profit_mode = quick_profit_mode
         self.stale_bar_timeout_s = stale_bar_timeout_s
+        self._symbol = symbol
         self._hold_bars = 0
         self._last_bar_time: pd.Timestamp | None = None
 
@@ -240,19 +244,27 @@ class ExitManager:
             )
 
         # ── 2. EOD force-flatten ──────────────────────────────────────────────
-        now_time = now_et().time()
-        # Use ExitPlan's hard exit time if available; fall back to global default.
-        # TODO: detect IST vs ET based on symbol market — currently always ET.
-        eod_et_str = (exit_plan.hard_exit_time_et if exit_plan else None) or "15:45"
+        sess = market_session(self._symbol)
+        from datetime import datetime as _dt
+        now_local = _dt.now(sess.tz).time()
+        if exit_plan:
+            eod_str = (
+                exit_plan.hard_exit_time_ist
+                if sess.tz is IST
+                else exit_plan.hard_exit_time_et
+            ) or ("14:45" if sess.tz is IST else "15:45")
+        else:
+            eod_str = "14:45" if sess.tz is IST else "15:45"
         try:
-            eod_h, eod_m = int(eod_et_str.split(":")[0]), int(eod_et_str.split(":")[1])
+            eod_h, eod_m = int(eod_str.split(":")[0]), int(eod_str.split(":")[1])
             eod_time = time(eod_h, eod_m)
         except Exception:
-            eod_time = _EOD_FORCE_FLAT
-        if now_time >= eod_time:
+            eod_time = _EOD_FORCE_FLAT_IST if sess.tz is IST else _EOD_FORCE_FLAT
+        tz_label = "IST" if sess.tz is IST else "ET"
+        if now_local >= eod_time:
             return ExitDecision(
                 action="FULL_EXIT",
-                reason=f"EOD force flatten at {now_time.strftime('%H:%M')} ET (plan: {eod_et_str})",
+                reason=f"EOD force flatten at {now_local.strftime('%H:%M')} {tz_label} (plan: {eod_str})",
                 exit_price=close,
                 urgency="high",
             )
