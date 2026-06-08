@@ -86,9 +86,13 @@ class SingleStockTrader:
         on_trade_update: Callable[[dict], None] | None = None,
         entry_mode: str = "legacy_entry_decider",
         native_strategies: list[str] | None = None,
+        execution_service=None,   # ExecutionService | None — required for live orders
+        account_id: str = "",     # broker account ID passed to ExecutionService
     ):
         self.symbol = symbol.upper()
         self._broker = broker
+        self._execution_service = execution_service
+        self._account_id = account_id
         self.direction_mode = direction_mode
         self.initial_capital = initial_capital
         self.on_trade_update = on_trade_update  # callback for UI updates
@@ -751,40 +755,112 @@ class SingleStockTrader:
         self._notify_update()
 
     def _place_order(self, action: str, qty: float) -> float:
-        """Submit entry order. Returns fill price (0.0 on failure).
+        """Submit an entry order. Returns fill price (0.0 on failure).
 
-        NOTE: this path calls the legacy broker interface directly, which means
-        it does NOT go through ExecutionService — no DB Order row, no risk
-        engine check, no audit event. That makes any live order fired here
-        invisible in the Order History table. Until the path is rewritten to
-        route through ExecutionService, live submission is hard-blocked. Paper
-        sim mode still works.
+        Paper mode (broker is None): fills immediately at last bar close.
+        Live mode: routes through ExecutionService for full risk gating,
+        DB persistence, audit logging, and broker submission.
         """
         if self._broker is None:
-            # Paper sim: fill at last price
+            # Paper sim — fill at last price, no broker needed.
             return self._last_price()
-        logger.error(
-            "[autotrader] BLOCKED live order: %s %s qty=%s — legacy broker path "
-            "is disabled because it bypasses ExecutionService (no DB row, no "
-            "risk gate, no audit). Wire SingleStockTrader through "
-            "ExecutionService before re-enabling.",
-            action, self.symbol, qty,
-        )
-        return 0.0
+
+        if self._execution_service is None:
+            logger.error(
+                "[autotrader] BLOCKED live order: %s %s qty=%s — "
+                "no ExecutionService configured. Pass execution_service= "
+                "when constructing SingleStockTrader for live trading.",
+                action, self.symbol, qty,
+            )
+            return 0.0
+
+        return self._submit_via_execution_service(action, qty, is_exit=False)
 
     def _place_exit_order(self, action: str, qty: float) -> float:
-        """Submit exit order. Returns fill price (0.0 on failure).
+        """Submit an exit order. Returns fill price (0.0 on failure).
 
-        See _place_order for the bypass-block rationale.
+        Same routing as _place_order — paper fills at last price,
+        live goes through ExecutionService.
         """
         if self._broker is None:
             return self._last_price()
-        logger.error(
-            "[autotrader] BLOCKED live exit: %s %s qty=%s — legacy broker path "
-            "is disabled because it bypasses ExecutionService.",
-            action, self.symbol, qty,
+
+        if self._execution_service is None:
+            logger.error(
+                "[autotrader] BLOCKED live exit: %s %s qty=%s — "
+                "no ExecutionService configured.",
+                action, self.symbol, qty,
+            )
+            return 0.0
+
+        return self._submit_via_execution_service(action, qty, is_exit=True)
+
+    def _submit_via_execution_service(
+        self, action: str, qty: float, *, is_exit: bool
+    ) -> float:
+        """Route an order through ExecutionService (live mode only).
+
+        Runs the full 8-gate pipeline: risk check → buying power → persist →
+        preview → submit → confirm → fill → protective stop.
+
+        The polling loop runs in a daemon thread so we use asyncio.run() to
+        drive the coroutine to completion without touching the main event loop.
+        """
+        import asyncio
+        import uuid
+        from app.schemas.orders import OrderRequest
+
+        side = action.upper()
+        if side not in ("BUY", "SELL"):
+            logger.error("[autotrader] Unknown order action: %s", action)
+            return 0.0
+
+        idempotency_key = (
+            f"autotrader-{'exit' if is_exit else 'entry'}"
+            f"-{self.symbol}-{side}-{int(qty * 100)}"
+            f"-{int(self._last_price() * 100)}"
         )
-        return 0.0
+
+        order_req = OrderRequest(
+            symbol=self.symbol,
+            side=side,
+            order_type="MARKET",
+            quantity=qty,
+            time_in_force="DAY",
+            source="autotrader",
+            idempotency_key=idempotency_key,
+        )
+
+        try:
+            db_order = asyncio.run(
+                self._execution_service.execute(
+                    order_req,
+                    account_id=self._account_id,
+                    estimated_price=self._last_price(),
+                )
+            )
+        except Exception as exc:
+            logger.error(
+                "[autotrader] ExecutionService raised for %s %s: %s",
+                side, self.symbol, exc,
+            )
+            return 0.0
+
+        if db_order is None:
+            # Risk engine or buying-power blocked the order — already logged
+            # by ExecutionService; just return 0 so the caller treats it as
+            # a no-fill and leaves the state machine in its current state.
+            logger.warning(
+                "[autotrader] %s %s blocked by risk gate or buying power.",
+                side, self.symbol,
+            )
+            return 0.0
+
+        # Use the recorded fill_price if available, else fall back to last bar.
+        fill_price = getattr(db_order, "fill_price", None)
+        if fill_price and float(fill_price) > 0:
+            return float(fill_price)
+        return self._last_price()
 
     def _last_price(self) -> float:
         """Return the latest close from 5m data."""

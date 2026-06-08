@@ -19,6 +19,7 @@ from datetime import time as dtime
 from typing import Any
 
 from app.services.broker import BaseBroker, get_broker
+from app.services.execution.service import ExecutionService
 from app.services.strategy.daytrading.autotrader.single_stock_trader import (
     PolicyError,
     SingleStockTrader,
@@ -78,6 +79,8 @@ class AutoTraderManager:
         self._traders: dict[str, SingleStockTrader] = {}
         self._lock = threading.RLock()
         self._broker: BaseBroker | None = None
+        self._execution_service: ExecutionService | None = None
+        self._account_id: str = ""
         self._config: AutoTraderConfig | None = None
         self._eod_thread: threading.Thread | None = None
         self._eod_stop = threading.Event()
@@ -119,6 +122,32 @@ class AutoTraderManager:
             self._broker = get_broker(config.broker_name, initial_capital=config.initial_capital) \
                 if config.broker_name == "paper" else get_broker(config.broker_name)
 
+            # Build ExecutionService so live orders go through the full pipeline:
+            # risk gates → DB persistence → audit → broker submit → protective stop.
+            # Paper mode still works — PaperBroker fills immediately at last price.
+            self._execution_service = ExecutionService(self._broker)
+
+            # Resolve account_id: authenticate then fetch accounts. Silently
+            # falls back to "" which ExecutionService accepts (some brokers don't
+            # require an explicit account ID for single-account setups).
+            self._account_id = ""
+            try:
+                import asyncio as _asyncio
+                _asyncio.run(self._broker.authenticate())
+                accts = _asyncio.run(self._broker.get_accounts())
+                if accts:
+                    self._account_id = accts[0].account_id or ""
+                    logger.info(
+                        "[autotrader] resolved account_id=%s for broker=%s",
+                        self._account_id, config.broker_name,
+                    )
+            except Exception as _ae:
+                logger.warning(
+                    "[autotrader] could not resolve account_id (broker=%s): %s — "
+                    "orders will still route but account_id will be empty.",
+                    config.broker_name, _ae,
+                )
+
             started: list[str] = []
             errors: dict[str, str] = {}
             for raw_sym in config.symbols:
@@ -128,6 +157,8 @@ class AutoTraderManager:
                 trader = SingleStockTrader(
                     symbol=sym,
                     broker=self._broker,
+                    execution_service=self._execution_service,
+                    account_id=self._account_id,
                     direction_mode=config.direction_mode,
                     trail_mode=config.trail_mode,  # type: ignore[arg-type]
                     partial_tp=config.partial_tp,
@@ -193,6 +224,8 @@ class AutoTraderManager:
             self._traders.clear()
             self._stop_eod_watchdog()
             self._broker = None
+            self._execution_service = None
+            self._account_id = ""
             self._config = None
             logger.info("[autotrader] switch OFF — stopped=%s, flattened=%s", stopped, flattened)
             return {"running": False, "stopped": stopped, "flattened": flattened}
