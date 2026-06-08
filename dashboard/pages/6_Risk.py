@@ -2,35 +2,75 @@ from __future__ import annotations
 
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
-from _theme import apply_theme, section, divider, kpi_row, pill, money
-from _components import page_header
+from _theme import apply_theme, section, divider, kpi_row, pill, money, empty_state
+from _components import page_header, stat_band, eligibility_chip, risk_gauge_html, filter_cols
 
 import pandas as pd
 import streamlit as st
 
 apply_theme("Risk & Safety")
-page_header("Risk & Safety", subtitle="Kill switch, daily limits, and live-trading gates — check before going live.")
 
-# ── Status snapshot (single load, reused across the page) ────────────────
+# ── Load status once ──────────────────────────────────────────────────────────
 try:
     s = api.risk_status()
 except Exception as e:
-    st.error(f"Cannot reach risk API: {e}")
+    st.error(f"Cannot reach risk API: {e}", icon="⚠️")
     st.stop()
 
-ks_active = s["kill_switch_active"]
+ks_active  = s["kill_switch_active"]
+is_live    = s.get("is_live", False)
+mkt_open   = s.get("market_hours_active", False)
+broker     = (s.get("active_broker") or "—").upper()
+orders_t   = s.get("orders_today", 0)
+orders_max = s.get("max_orders_per_day", 1)
+loss_usd   = s.get("daily_loss_usd", 0)
+loss_max   = s.get("max_daily_loss_usd", 1)
 
+# Derive overall system readiness
+checks_data = [
+    ("Kill switch is OFF",         not ks_active),
+    ("Broker is Schwab (live)",    broker == "SCHWAB"),
+    ("LIVE_TRADING_ENABLED=true",  s.get("live_trading_enabled", False)),
+    ("LIVE_TRADING_CONFIRMED=true",s.get("live_trading_confirmed", False)),
+    ("Daily order limit not hit",  orders_t < orders_max),
+    ("Daily loss limit not hit",   loss_usd < loss_max),
+]
+all_pass = all(ok for _, ok in checks_data)
+fail_count = sum(1 for _, ok in checks_data if not ok)
 
-# ── 1. Kill switch ───────────────────────────────────────────────────────
-section("Emergency Kill Switch", "Halts all automated trading instantly. Use when the market turns or you need to pause.")
+page_header(
+    "Risk & Safety",
+    subtitle="Kill switch, daily limits, and live-trading gates — check before going live.",
+    badge="ALL CLEAR" if all_pass else f"{fail_count} FAIL{'S' if fail_count > 1 else ''}",
+    badge_color="green" if all_pass else "red",
+)
 
-ks_col, btn_col = st.columns([3, 1])
-with ks_col:
+stat_band([
+    ("Kill switch",   "ACTIVE" if ks_active else "OFF",                          "red"   if ks_active else "green"),
+    ("Mode",          "LIVE"   if is_live   else "PAPER",                         "red"   if is_live   else "blue"),
+    ("Market",        "OPEN"   if mkt_open  else "CLOSED",                        "green" if mkt_open  else "grey"),
+    ("Broker",        broker,                                                      "grey"),
+    ("Orders today",  f"{orders_t} / {orders_max}",                               "amber" if orders_t >= orders_max * 0.75 else "grey"),
+    ("Daily loss",    f"{money(abs(loss_usd))} / {money(abs(loss_max))}",         "amber" if abs(loss_usd) >= abs(loss_max) * 0.6 else "grey"),
+])
+
+# ── 1. Kill switch ─────────────────────────────────────────────────────────────
+section("Emergency Kill Switch", "Halts all automated trading instantly.")
+
+ks_left, ks_right = st.columns([4, 1])
+with ks_left:
     if ks_active:
-        st.markdown(pill("KILL SWITCH ACTIVE — all automated trading halted", "red"), unsafe_allow_html=True)
+        st.markdown(
+            "<div class='tx-kill-active'>🛑 KILL SWITCH ACTIVE — all automated trading halted</div>",
+            unsafe_allow_html=True,
+        )
     else:
-        st.markdown(pill("Kill switch off — trading allowed", "green"), unsafe_allow_html=True)
-with btn_col:
+        st.markdown(
+            f"&nbsp;{eligibility_chip('ready', 'Order paths open — trading allowed')} "
+            f"&nbsp; Kill switch is off.",
+            unsafe_allow_html=True,
+        )
+with ks_right:
     if ks_active:
         if st.button("Deactivate", type="primary", key="ks_off", use_container_width=True):
             api.set_kill_switch(False)
@@ -42,55 +82,48 @@ with btn_col:
 
 divider()
 
+# ── 2. Risk gauges ─────────────────────────────────────────────────────────────
+section("Daily Usage")
 
-# ── 2. Live status ──────────────────────────────────────────────────────
-section("Current Risk Status")
+g1, g2 = st.columns(2)
+with g1:
+    st.markdown(risk_gauge_html("Orders today", orders_t, orders_max, prefix=""), unsafe_allow_html=True)
+    st.progress(min(orders_t / max(orders_max, 1), 1.0))
+with g2:
+    st.markdown(risk_gauge_html("Daily loss used", abs(loss_usd), abs(loss_max)), unsafe_allow_html=True)
+    st.progress(min(abs(loss_usd) / max(abs(loss_max), 1), 1.0))
 
-mode_label = "LIVE" if s["is_live"] else "Paper"
 kpi_row([
-    ("Broker", s["active_broker"].upper()),
-    ("Mode", mode_label),
-    ("Market Hours", "Open" if s["market_hours_active"] else "Closed"),
-    ("Kill Switch", "Active" if ks_active else "Off"),
-])
-kpi_row([
-    ("Orders Today", f"{s['orders_today']} / {s['max_orders_per_day']}"),
-    ("Daily Loss", money(s["daily_loss_usd"]), f"limit {money(s['max_daily_loss_usd'])}"),
-    ("Live Trading Enabled", "Yes" if s["live_trading_enabled"] else "No"),
-    ("Live Confirmed in .env", "Yes" if s["live_trading_confirmed"] else "No"),
+    ("Broker",                   broker),
+    ("Mode",                     "LIVE" if is_live else "Paper"),
+    ("Live Trading Enabled",     "Yes" if s.get("live_trading_enabled") else "No"),
+    ("Live Confirmed in .env",   "Yes" if s.get("live_trading_confirmed") else "No"),
 ])
 
 divider()
 
+# ── 3. Pre-live checklist ──────────────────────────────────────────────────────
+section("Pre-live Checklist", "All six must pass before live trading on Schwab is safe.")
 
-# ── 3. Pre-live checklist ───────────────────────────────────────────────
-section("Pre-live Checklist", "All six must pass before Schwab live trading is safe.")
+for label, ok in checks_data:
+    chip = eligibility_chip("ready", label) if ok else eligibility_chip("blocked", label)
+    st.markdown(f"{chip} &nbsp; {label}", unsafe_allow_html=True)
+    st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
-checks = [
-    ("Kill switch is OFF",           not ks_active),
-    ("Broker is Schwab (not paper)", s["active_broker"] == "schwab"),
-    ("LIVE_TRADING_ENABLED=true",    s["live_trading_enabled"]),
-    ("LIVE_TRADING_CONFIRMED=true",  s["live_trading_confirmed"]),
-    ("Daily order limit not hit",    s["orders_today"] < s["max_orders_per_day"]),
-    ("Daily loss limit not hit",     s["daily_loss_usd"] < s["max_daily_loss_usd"]),
-]
-all_ok = all(ok for _, ok in checks)
-
-for label, ok in checks:
-    badge = pill("PASS", "green") if ok else pill("FAIL", "red")
-    st.markdown(f"{badge} &nbsp; {label}", unsafe_allow_html=True)
-
-if all_ok:
-    st.success("All checks passed — system is ready for live trading.")
+st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+if all_pass:
+    st.success("All checks passed — system is ready for live trading.", icon="✅")
 else:
-    st.warning("One or more checks failed. Fix them before enabling live trading on Schwab.")
+    st.warning(
+        f"{fail_count} check(s) failed. Fix them before enabling live trading on Schwab.",
+        icon="⚠️",
+    )
 
 divider()
 
-
-# ── 4. Per-symbol caps ──────────────────────────────────────────────────
+# ── 4. Per-symbol caps ─────────────────────────────────────────────────────────
 section("Per-Symbol Capital Caps",
-        "Cap how much a single signal can deploy. Example: cap ACMR at $500 → buys at most $500 worth.")
+        "Limit how much a single signal can deploy. 0 = fall back to global settings.")
 
 try:
     assignments = api.list_assignments()
@@ -99,7 +132,7 @@ except Exception as e:
     assignments = []
 
 if not assignments:
-    st.info("No assignments yet. Add them on the Strategy page first.")
+    empty_state("No assignments yet", "Add them on the Strategy page first.", icon="📋")
 else:
     rows = []
     for a in assignments:
@@ -108,7 +141,7 @@ else:
             "Symbol":   a["symbol"],
             "Strategy": a["strategy_name"].replace("_", " "),
             "System":   a["system"].title(),
-            "Cap":      money(cap, decimals=0) if cap else "— (uses global)",
+            "Cap":      f"${cap:,.0f}" if cap else "— (global)",
             "Status":   "Active" if a["enabled"] else "Paused",
         })
 
@@ -117,56 +150,60 @@ else:
         st.warning(
             f"{len(uncapped)} symbol(s) have no cap: "
             + ", ".join(a["symbol"] for a in uncapped)
-            + " — they fall back to the global max position size from .env"
+            + " — they fall back to the global max position size from .env",
+            icon="⚠️",
         )
 
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(
+        pd.DataFrame(rows),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Symbol":   st.column_config.TextColumn("Symbol",   width="small"),
+            "Strategy": st.column_config.TextColumn("Strategy", width="large"),
+            "System":   st.column_config.TextColumn("System",   width="small"),
+            "Cap":      st.column_config.TextColumn("$ Cap",    width="small"),
+            "Status":   st.column_config.TextColumn("Status",   width="small"),
+        },
+    )
 
     st.markdown("**Set or update a cap**")
-    cap_col1, cap_col2, cap_col3 = st.columns([2, 2, 1])
-    with cap_col1:
-        cap_sym = st.selectbox("Symbol", [a["symbol"] for a in assignments], key="cap_sym")
-    with cap_col2:
-        current_cap = next((a.get("max_capital_usd") or 0 for a in assignments if a["symbol"] == cap_sym), 0)
-        new_cap = st.number_input(
-            "Max capital ($)",
-            min_value=0, value=int(current_cap), step=100, key="cap_val",
-            help="0 = remove cap and fall back to global settings",
-        )
-    with cap_col3:
-        st.write("")
-        st.write("")
-        if st.button("Save cap", type="primary", key="cap_save", use_container_width=True):
-            try:
-                api.set_assignment_cap(cap_sym, float(new_cap) if new_cap > 0 else None)
-                st.success(f"Cap for {cap_sym} updated.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Failed: {e}")
+    cap_c1, cap_c2, cap_c3 = filter_cols(2, 2, 1)
+    cap_sym = cap_c1.selectbox("Symbol", [a["symbol"] for a in assignments], key="cap_sym")
+    current_cap = next((a.get("max_capital_usd") or 0 for a in assignments if a["symbol"] == cap_sym), 0)
+    new_cap = cap_c2.number_input(
+        "Max capital ($)", min_value=0, value=int(current_cap), step=100, key="cap_val",
+        help="0 = remove cap and fall back to global settings",
+    )
+    cap_c3.write("")
+    cap_c3.write("")
+    if cap_c3.button("Save cap", type="primary", key="cap_save", use_container_width=True):
+        try:
+            api.set_assignment_cap(cap_sym, float(new_cap) if new_cap > 0 else None)
+            st.success(f"Cap for {cap_sym} updated.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed: {e}")
 
 divider()
 
-
-# ── 5. Self-test ────────────────────────────────────────────────────────
-section("Kill Switch Verification", "Confirms the scheduler actually reads the flag before placing orders.")
+# ── 5. Self-test ───────────────────────────────────────────────────────────────
+section("Kill Switch Verification", "Confirms the scheduler reads the flag before placing orders.")
 
 if st.button("Run kill switch test", key="ks_test"):
-    with st.spinner("Testing..."):
+    with st.spinner("Testing…"):
         try:
             api.set_kill_switch(True)
             ks_on = api.risk_status()["kill_switch_active"]
             api.set_kill_switch(False)
             ks_off = api.risk_status()["kill_switch_active"]
-
             if ks_on and not ks_off:
                 st.success(
                     "Test passed — activate set the flag ON, deactivate cleared it. "
-                    "The scheduler reads this flag before every cycle."
+                    "The scheduler reads this flag before every cycle.",
+                    icon="✅",
                 )
             else:
-                st.error(
-                    f"Test failed — activate={ks_on}, deactivate={not ks_off}. "
-                    "Check /risk/status manually."
-                )
+                st.error(f"Test failed — activate={ks_on}, deactivate={not ks_off}. Check /risk/status manually.")
         except Exception as e:
             st.error(f"Test error: {e}")

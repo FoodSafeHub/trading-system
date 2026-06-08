@@ -179,6 +179,21 @@ section[data-testid="stSidebar"] h1 {
     padding: var(--sp-4) var(--sp-3) var(--sp-1) var(--sp-3);
     margin-top: var(--sp-2);
 }
+/* Visual breaks between nav groups via nth-child spacing.
+   The auto-generated nav list places each page as a sibling <a> element.
+   We can't inject labels between them (Streamlit owns the DOM) so we use
+   generous top-margin on specific link positions to simulate group breaks.
+   Pages order: 0=Home, 1=Strategy, 2=Orders, 3=Charts, 4=Backtest,
+   5=Perplexity, 6=Risk, 7=DayTrading, 8=Notifications, 9=Scanner,
+   10=PnL, 11=India, 12=Schwab, 13=Webull */
+section[data-testid="stSidebar"] ul li:nth-child(2) a,
+section[data-testid="stSidebar"] ul li:nth-child(7) a,
+section[data-testid="stSidebar"] ul li:nth-child(9) a,
+section[data-testid="stSidebar"] ul li:nth-child(11) a {
+    margin-top: var(--sp-4) !important;
+    border-top: 1px solid var(--line);
+    padding-top: var(--sp-3) !important;
+}
 /* Nav links */
 section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"] {
     border-radius: var(--radius);

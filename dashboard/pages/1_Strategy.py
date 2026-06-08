@@ -5,8 +5,8 @@ import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + 
 import pandas as pd
 import streamlit as st
 import api
-from _theme import apply_theme, market_status_bar
-from _components import page_header
+from _theme import apply_theme, market_status_bar, section, divider, empty_state
+from _components import page_header, stat_band, eligibility_chip, filter_cols
 from _broker_routing import render_broker_routing_toggle
 
 apply_theme("Strategy & Signals")
@@ -104,19 +104,27 @@ PERPLEXITY_STRATEGIES = _load_perplexity_strategy_names()
 # ════════════════════════════════════════════════════════════════
 # SECTION 1 — SAFETY BANNER (kill switch + what the scheduler can do)
 # ════════════════════════════════════════════════════════════════
-st.subheader("Trading safety")
-st.caption(
-    "Snapshot of every gate that controls live order firing. Read this from top to "
-    "bottom before changing assignments."
-)
-
-risk = _safe(api.risk_status, {})
-sched = _safe(api.scheduler_status, {})
+risk        = _safe(api.risk_status, {})
+sched       = _safe(api.scheduler_status, {})
 assignments = _safe(api.list_assignments, [])
-positions = _safe(api.positions, [])
+positions   = _safe(api.positions, [])
+
+kill_active     = bool(risk.get("kill_switch_active", False))
+sched_running   = bool(sched.get("running", False))
+n_active        = sum(1 for a in assignments if a.get("enabled"))
+n_paused        = sum(1 for a in assignments if not a.get("enabled"))
+
+stat_band([
+    ("Kill switch",  "ACTIVE" if kill_active else "OFF",               "red"   if kill_active else "green"),
+    ("Scheduler",    "Running" if sched_running else "Stopped",         "green" if sched_running else "red"),
+    ("Assignments",  f"{n_active} active / {n_paused} paused",          "teal"  if n_active else "grey"),
+    ("Mode",         "LIVE" if risk.get("is_live") else "PAPER",        "red"   if risk.get("is_live") else "blue"),
+    ("Market",       "OPEN" if risk.get("market_hours_active") else "CLOSED", "green" if risk.get("market_hours_active") else "grey"),
+])
+
+section("Trading Safety", "Snapshot of every gate that controls live order firing.")
 
 # Kill switch row
-kill_active = bool(risk.get("kill_switch_active", False))
 ksc1, ksc2 = st.columns([3, 1])
 with ksc1:
     if kill_active:
@@ -141,11 +149,10 @@ with ksc2:
             st.rerun()
 
 # Live-firing-path summary — the most important line on this page.
-sched_running = bool(sched.get("running", False))
-bollinger_on = bool(sched.get("run_bollinger", False))
+bollinger_on  = bool(sched.get("run_bollinger", False))
 perplexity_on = bool(sched.get("run_perplexity", False))
-n_assigned_active = sum(1 for a in assignments if a.get("enabled"))
-n_assigned_paused = sum(1 for a in assignments if not a.get("enabled"))
+n_assigned_active = n_active
+n_assigned_paused = n_paused
 consensus_on = bollinger_on or perplexity_on
 
 # Build a plain-English description of what the next cycle can fire.
@@ -201,11 +208,11 @@ st.divider()
 # ════════════════════════════════════════════════════════════════
 # SECTION 2 — WHAT IS AUTO-TRADING (assignments + live exposure)
 # ════════════════════════════════════════════════════════════════
-st.subheader("What is auto-trading")
-st.caption(
-    "Each row is a symbol the scheduler will evaluate with one specific strategy. "
-    "Live position and exposure come from the broker, not the DB — so you can see "
-    "real dollars at risk next to the cap you set."
+divider()
+section(
+    "Active Assignments",
+    "Each row is a symbol the scheduler evaluates with one strategy. "
+    "Live exposure from the broker is joined on the right so you see real dollars at risk.",
 )
 
 # Index live positions by symbol so we can join them onto assignments.
@@ -239,7 +246,24 @@ if assignments:
             "Notes":          a.get("notes") or "",
         })
     df_asgn = pd.DataFrame(rows)
-    st.dataframe(df_asgn, use_container_width=True, hide_index=True)
+    st.dataframe(
+        df_asgn,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Symbol":     st.column_config.TextColumn("Symbol",    width="small"),
+            "Strategy":   st.column_config.TextColumn("Strategy",  width="large"),
+            "System":     st.column_config.TextColumn("System",    width="small"),
+            "Auto-trade": st.column_config.TextColumn("Auto",      width="small"),
+            "Broker":     st.column_config.TextColumn("Broker",    width="small"),
+            "$ Cap":      st.column_config.TextColumn("$ Cap",     width="small"),
+            "Shares Cap": st.column_config.TextColumn("Shs Cap",   width="small"),
+            "Trail %":    st.column_config.TextColumn("Trail %",   width="small"),
+            "Held":       st.column_config.TextColumn("Held",      width="small"),
+            "Exposure":   st.column_config.TextColumn("Exposure",  width="small"),
+            "Notes":      st.column_config.TextColumn("Notes",     width="medium"),
+        },
+    )
 
     # Bulk safety action — easier than walking every row.
     if n_assigned_active > 0:
@@ -645,12 +669,7 @@ st.divider()
 # ════════════════════════════════════════════════════════════════
 # SECTION 4 — MANUAL CYCLE (with dry-run + confirm)
 # ════════════════════════════════════════════════════════════════
-st.subheader("Run a cycle now")
-st.caption(
-    "Forces a single full scheduler cycle right now — runs every assigned symbol "
-    "with its assigned strategy, plus the consensus pool. Dry run activates the "
-    "kill switch so signals are evaluated but no orders are placed."
-)
+section("Run a Cycle Now", "Forces a full scheduler cycle — dry-run activates the kill switch so signals evaluate but no orders fire.")
 
 rc1, rc2, rc3 = st.columns([2, 2, 2])
 with rc1:
@@ -703,12 +722,7 @@ st.divider()
 # ════════════════════════════════════════════════════════════════
 # SECTION 5 — RECENT SIGNALS
 # ════════════════════════════════════════════════════════════════
-st.subheader("Recent signals")
-st.caption(
-    "Most recent strategy outputs. **Would fire** = this signal matches a live "
-    "assignment, so the scheduler would actually trade it; everything else is "
-    "just an observation. Defaults to actionable BUY/SELL only — HOLDs are noise."
-)
+section("Recent Signals", "Most recent strategy outputs. **Would fire** = matches a live assignment. Defaults to BUY/SELL only — HOLDs are noise.")
 
 
 def _signal_reason(direction: str, ind: dict) -> str:
@@ -866,7 +880,21 @@ try:
             drop = {"indicators_json", "strength", "order_id", "id"}
             show_cols = [c for c in priority if c in df.columns] + \
                         [c for c in df.columns if c not in priority and c not in drop]
-            st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+            st.dataframe(
+                df[show_cols],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "created_at":      st.column_config.TextColumn("Time",       width="medium"),
+                    "symbol":          st.column_config.TextColumn("Symbol",     width="small"),
+                    "direction":       st.column_config.TextColumn("Dir",        width="small"),
+                    "would_fire":      st.column_config.TextColumn("Would fire", width="small"),
+                    "strategy_name":   st.column_config.TextColumn("Strategy",   width="large"),
+                    "price_at_signal": st.column_config.NumberColumn("Price",    format="$%.4f", width="small"),
+                    "why":             st.column_config.TextColumn("Why",        width="large"),
+                    "acted_on":        st.column_config.TextColumn("Acted",      width="small"),
+                },
+            )
     else:
         st.info(
             "No signals yet. Run a cycle above (dry run is fine) or wait for the "

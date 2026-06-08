@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
-from _theme import apply_theme
-from _components import page_header, stat_band, empty_state
+from _theme import apply_theme, section, divider as _divider
+from _components import page_header, stat_band, empty_state, regime_chip
 import _charts as charts
 
 import plotly.graph_objects as go
@@ -415,11 +415,20 @@ def _render_regime_panel(trades: list, period: str) -> None:
     bear_trades = [t for t in regime_trades if t.get("regime", "").upper() in ("BEAR", "DEEP_BEAR")]
 
     st.divider()
-    st.subheader("Market Regime Analysis")
+    section("Market Regime Analysis", level=3)
+
+    # Regime chips side by side then metrics
+    chip_html = (
+        f"{regime_chip('BULL_OPEN')} &nbsp; {len(bull_trades)} trades &nbsp;&nbsp; "
+        f"{regime_chip('BEAR_OPEN')} &nbsp; {len(bear_trades)} trades"
+    )
+    st.markdown(chip_html, unsafe_allow_html=True)
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
     c1, c2, c3 = st.columns(3)
     c1.metric("BULL Regime Trades", len(bull_trades))
     c2.metric("BEAR Regime Trades", len(bear_trades))
-    c3.metric("Total Trades", len(regime_trades))
+    c3.metric("Total Trades",       len(regime_trades))
 
 
 # ── Equity + price-action charts ───────────────────────────────────────────────
@@ -546,11 +555,13 @@ def _single_trades_table(trades: list) -> None:
     signal_markers = [t for t in trades if t.get("side") == "SELL_SIGNAL"]
     real_trades    = [t for t in trades if t.get("side") != "SELL_SIGNAL"]
 
-    st.subheader(f"All Trades ({len(real_trades)} total)"
-                 + (f"  —  {len(signal_markers)} Approach C signal(s)" if signal_markers else ""))
+    section(
+        f"All Trades — {len(real_trades)} total"
+        + (f"  ·  {len(signal_markers)} Approach C signal(s)" if signal_markers else ""),
+        level=3,
+    )
     if not real_trades:
-        st.info("No trades were generated in this period.")
-        st.caption("Try a longer period (2y) or a different strategy.")
+        empty_state("No trades generated", "Try a longer period (2y) or a different strategy.", icon="📉")
         return
 
     rows = []
@@ -574,7 +585,19 @@ def _single_trades_table(trades: list) -> None:
     for col in ["signal_from", "regime"]:
         if col in df.columns:
             df = df.drop(columns=[col])
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "date":          st.column_config.TextColumn("Date",     width="small"),
+            "side":          st.column_config.TextColumn("Side",     width="small"),
+            "price":         st.column_config.TextColumn("Price",    width="small"),
+            "quantity":      st.column_config.NumberColumn("Qty",    format="%.4f", width="small"),
+            "value":         st.column_config.TextColumn("Value",    width="small"),
+            "profit / loss": st.column_config.TextColumn("P&L",      width="small"),
+        },
+    )
 
     # Show Approach C signal markers as a separate informational table
     if signal_markers:
@@ -594,22 +617,35 @@ def _single_trades_table(trades: list) -> None:
 
 def _consensus_trades_table(trades: list) -> None:
     st.divider()
-    st.subheader(f"All Trades ({len(trades)} total)")
+    section(f"All Trades — {len(trades)} total", level=3)
     if not trades:
-        st.info("No trades were generated.")
+        empty_state("No trades generated", "Lower min_agreement or try a longer period.", icon="📉")
         return
 
     rows = [{
-        "date":         t.get("date"),
-        "side":         _side_tag(t.get("side", "")),
-        "price":        f"${t['price']:,.2f}" if t.get("price") is not None else "—",
-        "quantity":     t.get("quantity"),
-        "value":        f"${t['value']:,.2f}" if t.get("value") is not None else "—",
-        "agreed by":    ", ".join(t.get("agreeing", [])) or "—",
+        "date":          t.get("date"),
+        "side":          _side_tag(t.get("side", "")),
+        "price":         t["price"] if t.get("price") is not None else None,
+        "quantity":      t.get("quantity"),
+        "value":         t["value"] if t.get("value") is not None else None,
+        "agreed by":     ", ".join(t.get("agreeing", [])) or "—",
         "profit / loss": _pnl_tag(t.get("pnl")),
     } for t in trades]
 
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(
+        pd.DataFrame(rows),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "date":          st.column_config.TextColumn("Date",      width="small"),
+            "side":          st.column_config.TextColumn("Side",      width="small"),
+            "price":         st.column_config.NumberColumn("Price",   format="$%.2f", width="small"),
+            "quantity":      st.column_config.NumberColumn("Qty",     format="%.4f",  width="small"),
+            "value":         st.column_config.NumberColumn("Value",   format="$%.2f", width="small"),
+            "agreed by":     st.column_config.TextColumn("Agreed by", width="large"),
+            "profit / loss": st.column_config.TextColumn("P&L",       width="small"),
+        },
+    )
 
 
 # ══════════════════════════════════════════════════════════════

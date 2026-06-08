@@ -43,7 +43,10 @@ from _theme import apply_theme  # noqa: E402
 import _charts as charts  # noqa: E402
 import api  # noqa: E402
 from _broker_routing import render_broker_routing_toggle  # noqa: E402
-from _components import page_header, stat_band, filter_cols, empty_state  # noqa: E402
+from _components import (  # noqa: E402
+    page_header, stat_band, filter_cols, empty_state,
+    regime_chip, eligibility_chip,
+)
 
 apply_theme("Day Trading")
 
@@ -520,52 +523,99 @@ with tab_signals:
 
         # ── Brain Status Panel ────────────────────────────────────────────────
         if brain:
-            st.markdown("---")
-            st.markdown("### Brain Status")
-            ms_state = brain.get("market_state", "UNKNOWN")
-            ms_conf = brain.get("state_confidence", 0)
-            kill = brain.get("kill_switch", False)
-            size_mult = brain.get("size_multiplier", 1.0)
+            ms_state   = brain.get("market_state", "UNKNOWN")
+            ms_conf    = brain.get("state_confidence", 0)
+            kill       = brain.get("kill_switch", False)
+            size_mult  = brain.get("size_multiplier", 1.0)
             trades_today = brain.get("trades_today", 0)
-            losses_row = brain.get("losses_in_a_row", 0)
-            daily_pnl = brain.get("daily_pnl_pct", 0.0)
+            losses_row   = brain.get("losses_in_a_row", 0)
+            daily_pnl    = brain.get("daily_pnl_pct", 0.0)
+            enabled      = brain.get("enabled_strategies", [])
+            disabled     = brain.get("disabled_strategies", [])
 
-            _STATE_EMOJI = {
-                "TREND_UP": "🟢", "TREND_DOWN": "🔴",
-                "CHOPPY": "🟡", "HIGH_VOL": "🟠", "NEWS_RISK": "🔴", "UNKNOWN": "⚪",
-            }
-            b1, b2, b3, b4, b5, b6 = st.columns(6)
-            b1.metric("Market State", f"{_STATE_EMOJI.get(ms_state, '⚪')} {ms_state}", f"conf {ms_conf:.0%}")
-            b2.metric("Kill Switch", "🔴 ON" if kill else "🟢 OFF")
-            b3.metric("Size Multiplier", f"{size_mult:.0%}")
-            b4.metric("Trades Today", str(trades_today))
-            b5.metric("Losses in a Row", str(losses_row))
-            pnl_color = "normal" if daily_pnl >= 0 else "inverse"
-            b6.metric("Daily P&L", f"{daily_pnl:+.2f}%", delta_color=pnl_color)
+            # Derive an eligibility state for this symbol right now
+            if kill:
+                _elig_state, _elig_reason = "blocked", brain.get("kill_switch_reason", "Kill switch active")
+            elif size_mult == 0.0:
+                _elig_state, _elig_reason = "blocked", "Size multiplier is 0 — risk gate blocking"
+            elif size_mult < 0.6:
+                _elig_state, _elig_reason = "watch", f"Reduced size {size_mult:.0%} — risk governor throttling"
+            elif ms_state in ("NEWS_RISK",):
+                _elig_state, _elig_reason = "blocked", "NEWS_RISK regime — brain blocks new entries"
+            elif ms_state in ("CHOPPY", "HIGH_VOL"):
+                _elig_state, _elig_reason = "watch", f"{ms_state} regime — tighter entry criteria"
+            else:
+                _elig_state, _elig_reason = "ready", "Market conditions acceptable for entries"
+
+            st.markdown("---")
+
+            # Header row: regime chip + eligibility chip prominently side by side
+            hdr_left, hdr_right = st.columns([5, 5])
+            with hdr_left:
+                st.markdown(
+                    f"**Brain** &nbsp; {regime_chip(ms_state)} &nbsp;"
+                    f"<span style='color:var(--text-3);font-size:0.78rem'>conf {ms_conf:.0%}</span>",
+                    unsafe_allow_html=True,
+                )
+            with hdr_right:
+                st.markdown(
+                    f"**Eligibility** &nbsp; {eligibility_chip(_elig_state, _elig_reason)}",
+                    unsafe_allow_html=True,
+                )
 
             if kill:
-                st.error(f"**KILL SWITCH ACTIVE**: {brain.get('kill_switch_reason', '')}")
+                st.error(f"🛑 **KILL SWITCH ACTIVE** — {brain.get('kill_switch_reason', 'all entries blocked')}", icon="🛑")
 
-            enabled = brain.get("enabled_strategies", [])
-            disabled = brain.get("disabled_strategies", [])
+            # Compact metrics row
+            b1, b2, b3, b4, b5 = st.columns(5)
+            b1.metric("Kill Switch",      "🔴 ON" if kill else "🟢 OFF")
+            b2.metric("Size Multiplier",  f"{size_mult:.0%}")
+            b3.metric("Trades Today",     str(trades_today))
+            b4.metric("Losses in a Row",  str(losses_row))
+            pnl_color = "normal" if daily_pnl >= 0 else "inverse"
+            b5.metric("Daily P&L",        f"{daily_pnl:+.2f}%", delta_color=pnl_color)
+
+            # Strategy routing — compact two-column layout with pills
             if enabled or disabled:
-                brow1, brow2 = st.columns(2)
-                with brow1:
-                    st.markdown("**Allowed strategies:**")
-                    for s in enabled:
-                        st.success(s)
-                with brow2:
-                    st.markdown("**Blocked strategies:**")
-                    for s in disabled:
-                        st.error(s)
+                with st.expander(
+                    f"Strategy routing — {len(enabled)} allowed · {len(disabled)} blocked",
+                    expanded=False,
+                ):
+                    col_on, col_off = st.columns(2)
+                    with col_on:
+                        st.markdown(
+                            "<div style='font-size:0.72rem;font-weight:700;text-transform:uppercase;"
+                            "letter-spacing:0.08em;color:var(--text-3);margin-bottom:6px'>Allowed</div>",
+                            unsafe_allow_html=True,
+                        )
+                        for s in enabled:
+                            st.markdown(
+                                f"<span class='tx-pill green' style='margin-bottom:4px;display:inline-block'>{s}</span>",
+                                unsafe_allow_html=True,
+                            )
+                    with col_off:
+                        st.markdown(
+                            "<div style='font-size:0.72rem;font-weight:700;text-transform:uppercase;"
+                            "letter-spacing:0.08em;color:var(--text-3);margin-bottom:6px'>Blocked</div>",
+                            unsafe_allow_html=True,
+                        )
+                        for s in disabled:
+                            reason = brain.get("disabled_strategies_reasons", {}).get(s, "")
+                            st.markdown(
+                                f"<span class='tx-pill red' style='margin-bottom:4px;display:inline-block'"
+                                f" title='{reason}'>{s}</span>",
+                                unsafe_allow_html=True,
+                            )
+                    routing_summary = brain.get("routing_summary", "")
+                    if routing_summary:
+                        st.caption(routing_summary)
 
             reasons = brain.get("state_reasons", [])
             if reasons:
-                with st.expander("Why this market state?"):
+                with st.expander("Why this market state?", expanded=False):
                     for r in reasons:
                         st.caption(f"• {r}")
 
-            st.caption(brain.get("routing_summary", ""))
             st.markdown("---")
 
         # ── Signal counts (raw AND post-brain) ───────────────────────────────
@@ -574,13 +624,16 @@ with tab_signals:
         sells = [s for s in signals if s.get("direction") in ("SELL", "SELL_SHORT")]
         holds = [s for s in signals if s.get("direction") == "HOLD"]
 
-        m1, m2, m3, m4, m5, m6 = st.columns(6)
-        m1.metric("Raw Signals",        raw_count)
-        m2.metric("Brain Accepted",     len(signals))
-        m3.metric("Brain Rejected",     len(rejected))
-        m4.metric("Raw BUY",            result.get("diagnostics", {}).get("signals", {}).get("raw_buy_signals", 0))
-        m5.metric("Raw SELL",           result.get("diagnostics", {}).get("signals", {}).get("raw_sell_signals", 0))
-        m6.metric("Regime",             _regime_badge(regime))
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Raw Signals",    raw_count)
+        m2.metric("Accepted",       len(signals))
+        m3.metric("Rejected",       len(rejected))
+        m4.metric("Raw BUY",        result.get("diagnostics", {}).get("signals", {}).get("raw_buy_signals", 0))
+        m5.metric("Raw SELL",       result.get("diagnostics", {}).get("signals", {}).get("raw_sell_signals", 0))
+        st.markdown(
+            f"&nbsp; Regime: {regime_chip(regime)}",
+            unsafe_allow_html=True,
+        )
 
         # ── Intraday candlestick with signal markers ─────────────────────────
         try:
@@ -2057,21 +2110,42 @@ with tab_autotrader:
 
     # ── Status panels ─────────────────────────────────────────────────────────
     if not status:
-        st.info("Start the bot to see live status.")
+        from _components import empty_state as _es
+        _es("Bot not started", "Configure a symbol and click Start Bot above.", icon="🤖")
     else:
-        # ── Summary row ────────────────────────────────────────────────────────
-        s1, s2, s3, s4, s5 = st.columns(5)
-        _state_emoji = {
-            "FLAT": "⬜", "LONG": "🟢", "SHORT": "🔴",
-            "PARTIAL_EXIT_TAKEN": "🟡", "TRAILING": "🔵",
-            "EXITED": "✅", "BLOCKED": "🚫", "PENDING_ENTRY": "⏳",
+        state_val   = status.get("state", "UNKNOWN")
+        at_regime   = status.get("market_state", "UNKNOWN")
+        at_sym      = status.get("symbol", "—")
+        unreal_pnl  = status.get("unrealized_pnl", 0)
+        real_pnl    = status.get("realized_pnl", 0)
+
+        # Map bot state → eligibility chip
+        _at_elig_map = {
+            "FLAT":               ("idle",    "Flat — waiting for entry signal"),
+            "LONG":               ("ready",   "Long position open"),
+            "SHORT":              ("ready",   "Short position open"),
+            "PARTIAL_EXIT_TAKEN": ("watch",   "Partial exit taken — managing remainder"),
+            "TRAILING":           ("watch",   "Trailing stop active"),
+            "EXITED":             ("idle",    "Trade exited — cooldown"),
+            "BLOCKED":            ("blocked", status.get("block_reason", "Risk limit hit")),
+            "PENDING_ENTRY":      ("watch",   "Pending entry order"),
         }
-        state_val = status.get("state", "UNKNOWN")
-        s1.metric("Status", f"{_state_emoji.get(state_val, '❓')} {state_val}")
-        s2.metric("Symbol", status.get("symbol", "—"))
-        s3.metric("Market Regime", status.get("market_state", "—"))
-        s4.metric("Unrealized P&L", f"${status.get('unrealized_pnl', 0):+,.2f}")
-        s5.metric("Realized P&L", f"${status.get('realized_pnl', 0):+,.2f}")
+        _at_elig, _at_reason = _at_elig_map.get(state_val, ("idle", state_val))
+
+        # Header chips
+        st.markdown(
+            f"**{at_sym}** &nbsp;&nbsp;"
+            f"{regime_chip(at_regime)} &nbsp;"
+            f"{eligibility_chip(_at_elig, _at_reason)}",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Bot State",       state_val)
+        s2.metric("Unrealized P&L",  f"${unreal_pnl:+,.2f}")
+        s3.metric("Realized P&L",    f"${real_pnl:+,.2f}")
+        s4.metric("Symbol",          at_sym)
 
         # ── Management profile (always visible) ───────────────────────────────
         mgmt_profile = status.get("management_profile", "")
