@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 import api
 from _theme import apply_theme, market_status_bar, section, divider, empty_state
-from _components import page_header, stat_band, eligibility_chip, filter_cols
+from _components import page_header, stat_band, eligibility_chip, blocker_chip, blocker_label, filter_cols
 from _broker_routing import render_broker_routing_toggle
 
 apply_theme("Strategy & Signals")
@@ -124,27 +124,29 @@ stat_band([
 
 section("Trading Safety", "Snapshot of every gate that controls live order firing.")
 
-# Kill switch row
-ksc1, ksc2 = st.columns([3, 1])
+# Kill switch row — use shared blocker_chip vocabulary
+ksc1, ksc2 = st.columns([4, 1])
 with ksc1:
     if kill_active:
-        st.error(
-            "🛑 **KILL SWITCH ON** — every order path is blocked. Manual orders, "
-            "scheduler, scanner, autotrader all rejected at the risk gate."
+        st.markdown(
+            f"{blocker_chip('KILL_SWITCH')} &nbsp; "
+            "<span style='color:var(--neg)'>Every order path blocked — manual, scheduler, scanner, autotrader.</span>",
+            unsafe_allow_html=True,
         )
     else:
-        st.success(
-            "✅ Kill switch OFF — order paths follow their normal gates. "
-            "Turn it on if you see anything unexpected below."
+        st.markdown(
+            f"{eligibility_chip('ready', 'Kill switch off — order paths open')} &nbsp; "
+            "<span style='color:var(--text-3);font-size:0.82rem'>Order paths follow their normal gates.</span>",
+            unsafe_allow_html=True,
         )
 with ksc2:
     if kill_active:
-        if st.button("Deactivate kill switch", key="kill_off", help="Re-enable order firing."):
+        if st.button("Deactivate", key="kill_off", use_container_width=True, help="Re-enable order firing."):
             api.set_kill_switch(False)
             st.rerun()
     else:
-        if st.button("🛑 Activate kill switch", key="kill_on", type="primary",
-                     help="Immediately blocks every order path at the risk gate."):
+        if st.button("🛑 Activate", key="kill_on", type="primary", use_container_width=True,
+                     help="Immediately blocks every order path."):
             api.set_kill_switch(True)
             st.rerun()
 
@@ -236,7 +238,7 @@ if assignments:
             "Symbol":         sym,
             "Strategy":       a["strategy_name"].replace("_", " "),
             "System":         a["system"].title(),
-            "Auto-trade":     "✅ Active" if a["enabled"] else "⏸ Paused",
+            "Auto-trade":     "ACTIVE" if a["enabled"] else "PAUSED",
             "Broker":         broker_route.title(),
             "$ Cap":          f"${cap:,.0f}" if cap else "(global)",
             "Shares Cap":     f"{shares_cap:g}" if shares_cap else "—",

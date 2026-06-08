@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
 from _theme import apply_theme, section, divider, kpi_row, pill, money, empty_state
-from _components import page_header, stat_band, eligibility_chip, risk_gauge_html, filter_cols
+from _components import page_header, stat_band, eligibility_chip, blocker_chip, risk_gauge_html, filter_cols
 
 import pandas as pd
 import streamlit as st
@@ -105,9 +105,21 @@ divider()
 # ── 3. Pre-live checklist ──────────────────────────────────────────────────────
 section("Pre-live Checklist", "All six must pass before live trading on Schwab is safe.")
 
-for label, ok in checks_data:
-    chip = eligibility_chip("ready", label) if ok else eligibility_chip("blocked", label)
-    st.markdown(f"{chip} &nbsp; {label}", unsafe_allow_html=True)
+# Map each check to an internal blocker key so we can use blocker_chip
+_CHECK_BLOCKER_KEYS = [
+    "KILL_SWITCH",
+    "NOT_CONFIGURED",    # broker not Schwab
+    "NOT_CONFIGURED",    # LIVE_TRADING_ENABLED
+    "NOT_CONFIGURED",    # LIVE_TRADING_CONFIRMED
+    "ORDER_LIMIT",
+    "DAILY_LOSS_LIMIT",
+]
+for (check_label, ok), blocker_key in zip(checks_data, _CHECK_BLOCKER_KEYS):
+    if ok:
+        chip = eligibility_chip("ready")
+    else:
+        chip = blocker_chip(blocker_key)
+    st.markdown(f"{chip} &nbsp; {check_label}", unsafe_allow_html=True)
     st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)

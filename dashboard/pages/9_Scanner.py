@@ -5,7 +5,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
 from _theme import apply_theme, section, divider, pill, empty_state
-from _components import page_header, stat_band, filter_cols
+from _components import (
+    page_header, stat_band, filter_cols,
+    eligibility_chip, regime_badge, candidate_state,
+)
 import _charts as charts
 
 import pandas as pd
@@ -13,6 +16,9 @@ import streamlit as st
 from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
+
+# ── Eligibility sort priority (lower = higher in table) ──────────────────────
+_ELIG_SORT = {"active": 0, "ready": 1, "watch": 2, "idle": 3, "blocked": 4}
 
 
 def _fmt_et(ts) -> str:
@@ -33,8 +39,10 @@ def _parse_strategies_from_reason(reason: str | None) -> list[str]:
     return [s.strip() for s in tail.split(",") if s.strip()]
 
 
-def _show_candidates(candidates, *, key_prefix: str = "cands"):
-    dir_col, _ = st.columns([2, 6])
+def _show_candidates(candidates: list, *, key_prefix: str = "cands") -> None:
+    """Render scanner candidates table with eligibility chips and priority ordering."""
+    # ── Direction filter ──────────────────────────────────────────────────────
+    dir_col, _ = st.columns([3, 7])
     direction_pick = dir_col.radio(
         "Direction filter", ["All", "BUY", "SELL"],
         index=0, horizontal=True, key=f"{key_prefix}_dirfilter",
@@ -49,84 +57,120 @@ def _show_candidates(candidates, *, key_prefix: str = "cands"):
             )
             return
 
+    # ── Load cached recommendations ───────────────────────────────────────────
     try:
         recs = {r["symbol"]: r for r in (api.recommendations_list() or [])}
     except Exception:
         recs = {}
 
+    # ── Build rows ────────────────────────────────────────────────────────────
     rows = []
     for c in candidates:
-        direction = c.get("direction", "")
-        sym = c.get("symbol", "")
-        rec = recs.get(sym)
+        sym        = c.get("symbol", "")
+        direction  = (c.get("direction") or "").upper()
+        score      = int(c.get("score") or 0)
+        auto_traded = bool(c.get("auto_traded"))
+        rec        = recs.get(sym)
         firing_strats = _parse_strategies_from_reason(c.get("reason"))
-        is_match = bool(rec) and any(s == rec["strategy_name"] for s in firing_strats)
+        is_match   = bool(rec) and any(s == rec["strategy_name"] for s in firing_strats)
 
-        dir_icon = "🟢" if direction == "BUY" else ("🔴" if direction == "SELL" else "")
-        match_icon = "⭐ " if is_match else ""
-        reason_label = c.get("reason", "—") or "—"
-        if is_match:
-            reason_label = f"★ matches recommended — {reason_label}"
+        # Eligibility — the primary triage column
+        elig_state, elig_reason = candidate_state(score, direction, auto_traded, is_match)
 
+        # Direction display
+        dir_text = {"BUY": "▲ BUY", "SELL": "▼ SELL"}.get(direction, direction or "—")
+
+        # Best historical strategy compact
         if rec:
             wr = rec.get("win_rate_pct")
             pf = rec.get("profit_factor")
-            tr = rec.get("total_return_pct")
-            best_label = rec["strategy_name"].replace("_", " ")
+            strat_name = rec["strategy_name"].replace("_", " ")
             bits = []
-            if wr is not None: bits.append(f"WR {wr:.0f}%")
-            if pf is not None: bits.append(f"PF {pf:.2f}")
-            if tr is not None: bits.append(f"{tr:+.0f}%")
-            best_full = best_label + (f" ({', '.join(bits)})" if bits else "")
+            if wr is not None: bits.append(f"{wr:.0f}%WR")
+            if pf is not None: bits.append(f"{pf:.2f}PF")
+            best_short = strat_name[:22] + ("…" if len(strat_name) > 22 else "")
+            best_str   = best_short + (f" ({', '.join(bits)})" if bits else "")
+            match_flag = "⭐ " if is_match else ""
         else:
-            best_full = "—"
+            best_str   = "—"
+            match_flag = ""
+
+        # Reason: strip verbose prefix, keep signal core
+        raw_reason = c.get("reason") or "—"
+        if raw_reason.startswith("N strategies agree:"):
+            # "N strategies agree: A, B, C" → just the strategy names
+            raw_reason = raw_reason.split(":", 1)[-1].strip()
+        reason_short = raw_reason[:60] + ("…" if len(raw_reason) > 60 else "")
 
         rows.append({
-            "Symbol":       f"{match_icon}{sym}",
-            "Dir":          f"{dir_icon} {direction}",
-            "Score":        c.get("score", 0),
-            "Strategies":   c.get("strategies_agreeing", 0),
-            "Price":        c.get("price") or None,
-            "Avg Vol":      c.get("avg_volume") or None,
-            "Universe":     c.get("universe", "—"),
-            "Reason":       reason_label,
-            "Best (hist.)": best_full,
-            "Auto-Traded":  "yes" if c.get("auto_traded") else "—",
-            "Scanned":      _fmt_et(c.get("scanned_at")),
+            "_elig_sort": _ELIG_SORT.get(elig_state, 9),
+            "_elig_html": eligibility_chip(elig_state, elig_reason),
+            "Symbol":     f"{match_flag}{sym}",
+            "State":      elig_state.upper(),       # plain text for column_config sorting
+            "Dir":        dir_text,
+            "Score":      score,
+            "Agree":      c.get("strategies_agreeing") or 0,
+            "Price":      c.get("price") or None,
+            "Avg Vol M":  (c.get("avg_volume") or 0) / 1_000_000,   # shown as xM
+            "Best strategy": best_str,
+            "Signal":     reason_short,
+            "Scanned":    _fmt_et(c.get("scanned_at")),
         })
 
-    df = pd.DataFrame(rows)
+    # Sort: ACTIVE first, then READY, WATCH, IDLE, then by score desc within tier
+    rows.sort(key=lambda r: (r["_elig_sort"], -r["Score"]))
+
+    # ── Summary header bar ────────────────────────────────────────────────────
+    n_ready   = sum(1 for r in rows if r["State"] in ("READY", "ACTIVE"))
+    n_watch   = sum(1 for r in rows if r["State"] == "WATCH")
+    n_idle    = sum(1 for r in rows if r["State"] == "IDLE")
+    st.markdown(
+        f"<div style='display:flex;gap:var(--sp-4);margin-bottom:var(--sp-3);align-items:center'>"
+        f"{pill(f'{n_ready} READY', 'green') if n_ready else ''}"
+        f"{pill(f'{n_watch} WATCH', 'amber') if n_watch else ''}"
+        f"{pill(f'{n_idle} IDLE',  'grey')  if n_idle  else ''}"
+        f"<span style='color:var(--text-3);font-size:0.78rem;margin-left:auto'>"
+        f"{len(rows)} total · sorted by eligibility then score</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Table ─────────────────────────────────────────────────────────────────
+    # Drop internal sort/html columns before display
+    df = pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in rows])
+
     st.dataframe(
         df,
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Symbol":       st.column_config.TextColumn("Symbol",       width="small"),
-            "Dir":          st.column_config.TextColumn("Dir",          width="small"),
-            "Score":        st.column_config.NumberColumn("Score",      format="%d / 100", width="small"),
-            "Strategies":   st.column_config.NumberColumn("Agree",      format="%d", width="small"),
-            "Price":        st.column_config.NumberColumn("Price",      format="$%.2f", width="small"),
-            "Avg Vol":      st.column_config.NumberColumn("Avg Vol",    format="%d", width="medium"),
-            "Universe":     st.column_config.TextColumn("Universe",     width="small"),
-            "Reason":       st.column_config.TextColumn("Reason",       width="large"),
-            "Best (hist.)": st.column_config.TextColumn("Best (hist.)", width="large"),
-            "Auto-Traded":  st.column_config.TextColumn("Auto",        width="small"),
-            "Scanned":      st.column_config.TextColumn("Scanned",     width="small"),
+            "Symbol":        st.column_config.TextColumn("Symbol",      width="small"),
+            "State":         st.column_config.TextColumn("State",       width="small"),
+            "Dir":           st.column_config.TextColumn("Dir",         width="small"),
+            "Score":         st.column_config.NumberColumn("Score /100", format="%d",    width="small"),
+            "Agree":         st.column_config.NumberColumn("Agree",      format="%d",    width="small"),
+            "Price":         st.column_config.NumberColumn("Price",      format="$%.2f", width="small"),
+            "Avg Vol M":     st.column_config.NumberColumn("Vol (M)",    format="%.1f",  width="small"),
+            "Best strategy": st.column_config.TextColumn("Best (hist.)", width="medium"),
+            "Signal":        st.column_config.TextColumn("Signal",       width="large"),
+            "Scanned":       st.column_config.TextColumn("Scanned",      width="small"),
         },
     )
 
-    # Recompute recommendations for on-screen symbols
+    # ── Recommendations recompute ─────────────────────────────────────────────
     cand_symbols = sorted({c["symbol"] for c in candidates if c.get("symbol")})
-    missing = [s for s in cand_symbols if s not in recs]
+    missing      = [s for s in cand_symbols if s not in recs]
     rc1, rc2, rc3 = st.columns([4, 2, 2])
     rc1.caption(
-        f"{len(recs)} cached · {len(missing)} of {len(cand_symbols)} on-screen missing recommendation"
+        f"{len(recs)} historical recs cached · "
+        f"{len(missing)} of {len(cand_symbols)} on-screen symbols missing"
     )
     period_pick = rc2.selectbox(
         "Backtest period", ["2y", "5y", "1y"], index=1, key=f"{key_prefix}_rec_period",
     )
     if missing and rc3.button(
-        f"⚙ Compute {len(missing)} missing", key=f"{key_prefix}_rec_missing", use_container_width=True,
+        f"⚙ Compute {len(missing)} missing", key=f"{key_prefix}_rec_missing",
+        use_container_width=True,
     ):
         with st.spinner(f"Running Compare All on {len(missing)} symbol(s)…"):
             try:
@@ -136,7 +180,7 @@ def _show_candidates(candidates, *, key_prefix: str = "cands"):
             except Exception as exc:
                 st.error(f"Recompute failed: {exc}")
 
-    # Inline candle drill-in
+    # ── Inline candle drill-in ────────────────────────────────────────────────
     symbols = sorted({c["symbol"] for c in candidates if c.get("symbol")})
     if not symbols:
         return
@@ -174,27 +218,28 @@ def _show_candidates(candidates, *, key_prefix: str = "cands"):
         )
 
 
-# ── Page header ───────────────────────────────────────────────────────────────
+# ── Page setup ────────────────────────────────────────────────────────────────
 apply_theme("Market Scanner")
 
 page_header(
     "Market Scanner",
     subtitle=(
-        "Scans a universe of stocks for strategy signals, scores them 0–100, "
-        "and shows the top candidates. Discovery only — the auto-scheduler executes."
+        "Scans a universe of stocks for strategy signals, scores 0–100, "
+        "and ranks candidates by eligibility. Discovery only — the scheduler executes."
     ),
 )
 
-# ── Scanner status stat band ──────────────────────────────────────────────────
+# ── Status stat band ──────────────────────────────────────────────────────────
 try:
-    sc_status = api._get("/scanner/status")
+    sc_status  = api._get("/scanner/status")
     _running   = sc_status.get("running", False)
     _last_scan = _fmt_et(sc_status.get("last_scan")) if sc_status.get("last_scan") else "Never"
     _matches   = str(sc_status.get("last_matches") or 0)
     stat_band([
-        ("Status",      "Scanning…" if _running else "Ready",   "amber" if _running else "green"),
-        ("Last scan",   _last_scan,                              "grey"),
-        ("Last matches", _matches,                               "teal" if int(_matches) > 0 else "grey"),
+        ("Status",       "Scanning…" if _running else "Ready",                   "amber" if _running else "green"),
+        ("Last scan",    _last_scan,                                               "grey"),
+        ("Last matches", _matches,                                                 "teal" if int(_matches) > 0 else "grey"),
+        ("Execution",    "Scheduler only",                                        "grey"),
     ])
 except Exception:
     pass
@@ -209,20 +254,18 @@ universe = row1_cols[0].selectbox(
     "Universe",
     ["watchlist", "sp500", "nasdaq100", "nifty50", "custom"],
     format_func=lambda v: "nifty50 (India)" if v == "nifty50" else v,
-    help="watchlist = your assigned symbols. sp500/nasdaq100 = full US index (~2–5 min). nifty50 = NSE top-50.",
+    help="watchlist = assigned symbols. sp500/nasdaq100 = full US index (~2–5 min). nifty50 = NSE top-50.",
 )
-_is_india = universe == "nifty50"
+_is_india  = universe == "nifty50"
 min_price  = row1_cols[1].number_input(
     "Min price (₹)" if _is_india else "Min price ($)",
     min_value=1.0, value=50.0 if _is_india else 5.0, step=1.0,
 )
-min_volume = row1_cols[2].number_input(
-    "Min avg vol", min_value=0, value=500_000, step=100_000,
-)
-top_n = row1_cols[3].number_input("Top N", min_value=1, max_value=20, value=5, step=1)
+min_volume = row1_cols[2].number_input("Min avg vol", min_value=0, value=500_000, step=100_000)
+top_n      = row1_cols[3].number_input("Top N", min_value=1, max_value=20, value=5, step=1)
 scan_direction = row1_cols[4].radio(
     "Direction", ["ANY", "BUY", "SELL"], horizontal=True,
-    help="ANY returns both sides. BUY or SELL filters the top-N window.",
+    help="ANY returns both sides. BUY or SELL fills Top N from that side only.",
 )
 
 custom_input = ""
@@ -232,11 +275,10 @@ if universe == "custom":
         placeholder="AAPL\nTSLA\nNVDA",
     )
 
-# Discovery-only notice (auto_trade removed — see comment in original file)
 auto_trade, auto_trade_direction = False, "ANY"
 st.caption(
-    "ℹ Scanner is **discovery only**. Candidates surface as signals; "
-    "the auto-scheduler (every 15 min) is the sole execution authority."
+    "ℹ Scanner is **discovery only** — candidates become signals. "
+    "The auto-scheduler (every 15 min) is the sole execution authority."
 )
 
 run_col, _ = st.columns([2, 8])
@@ -260,22 +302,24 @@ if run_btn:
     }
     is_large = universe in ("sp500", "nasdaq100", "nifty50") or len(custom_symbols) > 20
 
-    with st.spinner(f"Scanning {universe}…{'(large universe, running in background)' if is_large else ''}"):
+    with st.spinner(f"Scanning {universe}…" + (" (large — background)" if is_large else "")):
         try:
             result = api._post("/scanner/run", json=config_payload)
             if result.get("scan_run_id") == "pending":
                 st.info(
-                    "Large universe scan is running in the background. "
+                    "Large universe scan running in the background. "
                     "Refresh in 2–5 minutes to see results."
                 )
             else:
+                dur  = result.get("duration_seconds", "?")
+                tot  = result.get("total_scanned", 0)
+                passed = result.get("total_passed_filters", 0)
+                matches = result.get("total_matches", 0)
                 st.success(
-                    f"Scan complete in {result['duration_seconds']}s — "
-                    f"{result['total_scanned']} symbols · "
-                    f"{result['total_passed_filters']} passed filters · "
-                    f"{result['total_matches']} matches."
+                    f"Scan complete in {dur}s — "
+                    f"{tot:,} scanned · {passed:,} passed filters · {matches} matches."
                 )
-                if result["top_candidates"]:
+                if result.get("top_candidates"):
                     section(f"Top {len(result['top_candidates'])} Candidates", level=3)
                     _show_candidates(result["top_candidates"], key_prefix="run_cands")
                 else:
@@ -302,7 +346,7 @@ try:
     else:
         empty_state(
             "No scan results yet",
-            "Run a scan above or wait for the auto-scheduler "
+            "Run a scan above, or wait for the auto-scheduler "
             "(watchlist every 15 min, S&P 500 + NASDAQ 100 every 4 h, market hours only).",
             icon="📡",
         )
@@ -316,24 +360,24 @@ with st.expander("How the scanner works"):
     st.markdown("""
 **Scoring system (0–100):**
 
-| Factor | Points |
-|---|---|
-| Each strategy agreeing (up to 3) | 20 pts each |
-| Perplexity strategy agreement | 15 pts |
-| Avg volume > 2M | 10 pts |
-| Price above 50-day SMA (uptrend) | 10 pts |
+| Factor | Points | Eligibility threshold |
+|---|---|---|
+| Each strategy agreeing (up to 3) | 20 pts each | ≥60 → READY, 35–59 → WATCH |
+| Perplexity strategy agreement | 15 pts | |
+| Avg volume > 2M | 10 pts | |
+| Price above 50-day SMA (uptrend) | 10 pts | |
+
+**Row states:**
+- **ACTIVE** — symbol is currently auto-traded by the bot
+- **READY** — score ≥ 60; conditions met for entry (especially if it matches the historically best strategy ⭐)
+- **WATCH** — score 35–59; marginal signal, monitor closely
+- **IDLE** — score < 35; surfaced by scanner but signal is weak
 
 **Scan flow:**
-1. Build symbol universe (watchlist / S&P 500 / NASDAQ 100 / custom)
+1. Build universe (watchlist / S&P 500 / NASDAQ 100 / custom)
 2. Apply liquidity filters: min price, min avg volume, min history
-3. Run all 5 Bollinger strategy types + 5 Perplexity strategies per symbol
-4. Symbols where 1+ strategies agree on BUY or SELL become candidates
-5. Score and rank — top N returned, saved to database
+3. Run all 5 Bollinger + 5 Perplexity strategies per symbol
+4. Score and rank — top N returned, saved to database
 
-**Auto-scan schedule (market hours only):**
-- Watchlist every 15 minutes
-- NASDAQ 100 every 4 hours
-- S&P 500 every 4 hours (staggered 10 min after NASDAQ 100)
-
-Large universe scans (S&P 500 ≈ 500 stocks) take 2–5 minutes and run in the background.
+**Auto-scan (market hours only):** watchlist every 15 min · NASDAQ 100 every 4 h · S&P 500 every 4 h
     """)

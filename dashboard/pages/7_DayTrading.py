@@ -45,7 +45,7 @@ import api  # noqa: E402
 from _broker_routing import render_broker_routing_toggle  # noqa: E402
 from _components import (  # noqa: E402
     page_header, stat_band, filter_cols, empty_state,
-    regime_chip, eligibility_chip,
+    regime_chip, eligibility_chip, bot_state_chip, blocker_chip, blocker_label,
 )
 
 apply_theme("Day Trading")
@@ -523,92 +523,100 @@ with tab_signals:
 
         # ── Brain Status Panel ────────────────────────────────────────────────
         if brain:
-            ms_state   = brain.get("market_state", "UNKNOWN")
-            ms_conf    = brain.get("state_confidence", 0)
-            kill       = brain.get("kill_switch", False)
-            size_mult  = brain.get("size_multiplier", 1.0)
+            ms_state     = brain.get("market_state", "UNKNOWN")
+            ms_conf      = brain.get("state_confidence", 0)
+            kill         = brain.get("kill_switch", False)
+            size_mult    = brain.get("size_multiplier", 1.0)
             trades_today = brain.get("trades_today", 0)
             losses_row   = brain.get("losses_in_a_row", 0)
             daily_pnl    = brain.get("daily_pnl_pct", 0.0)
             enabled      = brain.get("enabled_strategies", [])
             disabled     = brain.get("disabled_strategies", [])
 
-            # Derive an eligibility state for this symbol right now
+            # Derive eligibility using shared vocabulary
             if kill:
-                _elig_state, _elig_reason = "blocked", brain.get("kill_switch_reason", "Kill switch active")
+                _elig_state  = "blocked"
+                _elig_chip   = blocker_chip("KILL_SWITCH")
             elif size_mult == 0.0:
-                _elig_state, _elig_reason = "blocked", "Size multiplier is 0 — risk gate blocking"
+                _elig_state  = "blocked"
+                _elig_chip   = blocker_chip("POSITION_LIMIT")
+            elif ms_state == "NEWS_RISK":
+                _elig_state  = "blocked"
+                _elig_chip   = blocker_chip("NEWS_RISK")
             elif size_mult < 0.6:
-                _elig_state, _elig_reason = "watch", f"Reduced size {size_mult:.0%} — risk governor throttling"
-            elif ms_state in ("NEWS_RISK",):
-                _elig_state, _elig_reason = "blocked", "NEWS_RISK regime — brain blocks new entries"
+                _elig_state  = "watch"
+                _elig_chip   = eligibility_chip("watch", blocker_label("SIZE_REDUCED", detail=True))
             elif ms_state in ("CHOPPY", "HIGH_VOL"):
-                _elig_state, _elig_reason = "watch", f"{ms_state} regime — tighter entry criteria"
+                _elig_state  = "watch"
+                _elig_chip   = eligibility_chip("watch", blocker_label(ms_state, detail=True))
             else:
-                _elig_state, _elig_reason = "ready", "Market conditions acceptable for entries"
+                _elig_state  = "ready"
+                _elig_chip   = eligibility_chip("ready", "Market conditions acceptable for entries")
 
             st.markdown("---")
 
-            # Header row: regime chip + eligibility chip prominently side by side
-            hdr_left, hdr_right = st.columns([5, 5])
-            with hdr_left:
-                st.markdown(
-                    f"**Brain** &nbsp; {regime_chip(ms_state)} &nbsp;"
-                    f"<span style='color:var(--text-3);font-size:0.78rem'>conf {ms_conf:.0%}</span>",
-                    unsafe_allow_html=True,
-                )
-            with hdr_right:
-                st.markdown(
-                    f"**Eligibility** &nbsp; {eligibility_chip(_elig_state, _elig_reason)}",
-                    unsafe_allow_html=True,
-                )
+            # Compact header: regime + eligibility + confidence on one line
+            st.markdown(
+                f"**Brain** &nbsp;"
+                f"{regime_chip(ms_state)} &nbsp;"
+                f"<span style='color:var(--text-3);font-size:0.78rem'>conf {ms_conf:.0%}</span>"
+                f" &nbsp;&nbsp; {_elig_chip}",
+                unsafe_allow_html=True,
+            )
+            st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
             if kill:
-                st.error(f"🛑 **KILL SWITCH ACTIVE** — {brain.get('kill_switch_reason', 'all entries blocked')}", icon="🛑")
+                st.error(
+                    f"🛑 **KILL SWITCH** — {brain.get('kill_switch_reason', 'all entries blocked')}",
+                    icon="🛑",
+                )
 
-            # Compact metrics row
+            # Metrics row — only what a trader needs at a glance
             b1, b2, b3, b4, b5 = st.columns(5)
-            b1.metric("Kill Switch",      "🔴 ON" if kill else "🟢 OFF")
-            b2.metric("Size Multiplier",  f"{size_mult:.0%}")
-            b3.metric("Trades Today",     str(trades_today))
-            b4.metric("Losses in a Row",  str(losses_row))
+            b1.metric("Kill Switch",     "🔴 ON" if kill else "🟢 OFF")
+            b2.metric("Size Multiplier", f"{size_mult:.0%}")
+            b3.metric("Trades Today",    str(trades_today))
+            b4.metric("Losses in a Row", str(losses_row))
             pnl_color = "normal" if daily_pnl >= 0 else "inverse"
-            b5.metric("Daily P&L",        f"{daily_pnl:+.2f}%", delta_color=pnl_color)
+            b5.metric("Daily P&L",       f"{daily_pnl:+.2f}%", delta_color=pnl_color)
 
-            # Strategy routing — compact two-column layout with pills
+            # Strategy routing — one line per strategy, compact
             if enabled or disabled:
-                with st.expander(
-                    f"Strategy routing — {len(enabled)} allowed · {len(disabled)} blocked",
-                    expanded=False,
-                ):
+                _strat_summary = (
+                    f"{len(enabled)} allowed · {len(disabled)} blocked"
+                    + (f" · {', '.join(disabled[:3])}" if disabled else "")
+                    + ("…" if len(disabled) > 3 else "")
+                )
+                with st.expander(f"Strategy routing — {_strat_summary}", expanded=False):
                     col_on, col_off = st.columns(2)
                     with col_on:
                         st.markdown(
-                            "<div style='font-size:0.72rem;font-weight:700;text-transform:uppercase;"
-                            "letter-spacing:0.08em;color:var(--text-3);margin-bottom:6px'>Allowed</div>",
+                            "<div style='font-size:0.69rem;font-weight:700;text-transform:uppercase;"
+                            "letter-spacing:0.08em;color:var(--text-3);margin-bottom:4px'>Allowed</div>",
                             unsafe_allow_html=True,
                         )
                         for s in enabled:
                             st.markdown(
-                                f"<span class='tx-pill green' style='margin-bottom:4px;display:inline-block'>{s}</span>",
+                                f"<span class='tx-pill green' "
+                                f"style='margin-bottom:3px;display:inline-block'>{s}</span>",
                                 unsafe_allow_html=True,
                             )
                     with col_off:
                         st.markdown(
-                            "<div style='font-size:0.72rem;font-weight:700;text-transform:uppercase;"
-                            "letter-spacing:0.08em;color:var(--text-3);margin-bottom:6px'>Blocked</div>",
+                            "<div style='font-size:0.69rem;font-weight:700;text-transform:uppercase;"
+                            "letter-spacing:0.08em;color:var(--text-3);margin-bottom:4px'>Blocked</div>",
                             unsafe_allow_html=True,
                         )
+                        _dis_reasons = brain.get("disabled_strategies_reasons", {}) or {}
                         for s in disabled:
-                            reason = brain.get("disabled_strategies_reasons", {}).get(s, "")
+                            _reason = _dis_reasons.get(s, "Blocked by regime routing")
                             st.markdown(
-                                f"<span class='tx-pill red' style='margin-bottom:4px;display:inline-block'"
-                                f" title='{reason}'>{s}</span>",
+                                f"<span class='tx-pill red' title='{_reason}' "
+                                f"style='margin-bottom:3px;display:inline-block'>{s}</span>",
                                 unsafe_allow_html=True,
                             )
-                    routing_summary = brain.get("routing_summary", "")
-                    if routing_summary:
-                        st.caption(routing_summary)
+                    if brain.get("routing_summary"):
+                        st.caption(brain["routing_summary"])
 
             reasons = brain.get("state_reasons", [])
             if reasons:
@@ -2113,39 +2121,29 @@ with tab_autotrader:
         from _components import empty_state as _es
         _es("Bot not started", "Configure a symbol and click Start Bot above.", icon="🤖")
     else:
-        state_val   = status.get("state", "UNKNOWN")
-        at_regime   = status.get("market_state", "UNKNOWN")
-        at_sym      = status.get("symbol", "—")
-        unreal_pnl  = status.get("unrealized_pnl", 0)
-        real_pnl    = status.get("realized_pnl", 0)
+        state_val  = status.get("state", "UNKNOWN")
+        at_regime  = status.get("market_state", "UNKNOWN")
+        at_sym     = status.get("symbol", "—")
+        unreal_pnl = status.get("unrealized_pnl", 0)
+        real_pnl   = status.get("realized_pnl", 0)
+        block_rsn  = status.get("block_reason", "")
 
-        # Map bot state → eligibility chip
-        _at_elig_map = {
-            "FLAT":               ("idle",    "Flat — waiting for entry signal"),
-            "LONG":               ("ready",   "Long position open"),
-            "SHORT":              ("ready",   "Short position open"),
-            "PARTIAL_EXIT_TAKEN": ("watch",   "Partial exit taken — managing remainder"),
-            "TRAILING":           ("watch",   "Trailing stop active"),
-            "EXITED":             ("idle",    "Trade exited — cooldown"),
-            "BLOCKED":            ("blocked", status.get("block_reason", "Risk limit hit")),
-            "PENDING_ENTRY":      ("watch",   "Pending entry order"),
-        }
-        _at_elig, _at_reason = _at_elig_map.get(state_val, ("idle", state_val))
+        # Use shared bot_state_chip for consistent vocabulary
+        _state_chip = bot_state_chip(state_val, block_rsn)
 
-        # Header chips
+        # Header: symbol + regime + state all on one line
         st.markdown(
             f"**{at_sym}** &nbsp;&nbsp;"
             f"{regime_chip(at_regime)} &nbsp;"
-            f"{eligibility_chip(_at_elig, _at_reason)}",
+            f"{_state_chip}",
             unsafe_allow_html=True,
         )
-        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
-        s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Bot State",       state_val)
-        s2.metric("Unrealized P&L",  f"${unreal_pnl:+,.2f}")
-        s3.metric("Realized P&L",    f"${real_pnl:+,.2f}")
-        s4.metric("Symbol",          at_sym)
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Unrealized P&L", f"${unreal_pnl:+,.2f}")
+        s2.metric("Realized P&L",   f"${real_pnl:+,.2f}")
+        s3.metric("State",          state_val)
 
         # ── Management profile (always visible) ───────────────────────────────
         mgmt_profile = status.get("management_profile", "")
@@ -2190,16 +2188,28 @@ with tab_autotrader:
                     pass
 
         elif state_val == "FLAT":
-            cooldown_left = status.get("cooldown_bars_remaining", 0)
+            cooldown_left   = status.get("cooldown_bars_remaining", 0)
+            no_trade_reason = status.get("last_no_trade_reason", "")
             if cooldown_left > 0:
-                st.info(f"**Cooldown:** {cooldown_left} bar(s) remaining before next entry")
-            else:
-                no_trade_reason = status.get("last_no_trade_reason", "")
-                if no_trade_reason:
-                    st.info(f"**Why no trade?** {no_trade_reason}")
+                st.markdown(
+                    f"{eligibility_chip('cooldown', f'Waiting {cooldown_left} bar(s) before next entry')}"
+                    f" &nbsp; {cooldown_left} bar(s) remaining",
+                    unsafe_allow_html=True,
+                )
+            elif no_trade_reason:
+                st.markdown(
+                    f"{eligibility_chip('idle', no_trade_reason)} &nbsp; "
+                    f"<span style='color:var(--text-3);font-size:0.82rem'>{no_trade_reason}</span>",
+                    unsafe_allow_html=True,
+                )
 
         elif state_val == "BLOCKED":
-            st.error(f"**Trading BLOCKED:** {status.get('block_reason', 'Risk limit hit')}")
+            _block_rsn = status.get("block_reason", "Risk limit hit")
+            st.markdown(
+                f"{blocker_chip(_block_rsn.upper().replace(' ','_'))} &nbsp; "
+                f"<span style='color:var(--neg);font-size:0.82rem'>{_block_rsn}</span>",
+                unsafe_allow_html=True,
+            )
 
         # ── Session stats ──────────────────────────────────────────────────────
         st.markdown("#### Session Summary")
