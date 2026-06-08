@@ -453,7 +453,7 @@ else:
         )
 
     # ── Per-trade audit table ────────────────────────────────────────────────
-    st.subheader("Per-trade breakdown")
+    section("Per-trade breakdown")
 
     def _trail_row_fmt(row):
         sym = row.get("symbol", "")

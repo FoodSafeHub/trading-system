@@ -177,7 +177,7 @@ def _render_filter_summary(symbol: str) -> None:
     rec = get_symbol_recommendation(symbol)
     if not rec:
         return
-    st.subheader("Recommended Filters for This Symbol")
+    section("Recommended Filters for This Symbol")
     for item in rec["key_filters"]:
         st.markdown(f"- {item}")
 
@@ -457,7 +457,7 @@ def _equity_chart(r: dict, *, symbol: str | None = None, period: str = "1y") -> 
     if not r.get("equity_curve"):
         return
     st.divider()
-    st.subheader("Equity Curve — OHLC view")
+    section("Equity Curve — OHLC view")
     st.caption(
         "Equity track resampled into weekly OHLC candles with the daily mark-to-market line "
         "behind it. Green/red triangles mark BUY/SELL fills; the lower ribbon shows running drawdown."
@@ -491,7 +491,7 @@ def _price_action_chart(r: dict, symbol: str | None, period: str,
         return
 
     st.divider()
-    st.subheader(f"Price Action — {symbol} with Trade Markers")
+    section(f"Price Action — {symbol} with Trade Markers")
     st.caption(
         "Candlesticks show daily OHLC for the backtest window. BUY triangles sit at the fill price; "
         "the lower panes show RSI(14) and MACD so you can read each entry in context."
@@ -1000,7 +1000,7 @@ if mode == "Single Strategy":
     if not r:
         st.stop()
 
-    st.subheader(f"Results — {r['strategy_name']} ({r['start_date']} → {r['end_date']})")
+    section(f"Results — {r['strategy_name']} ({r['start_date']} → {r['end_date']})")
 
     _render_backtest_metrics(r)
 
@@ -1292,7 +1292,7 @@ elif mode == "Consensus Mode":
         st.stop()
 
     st.divider()
-    st.subheader(
+    section(
         f"Consensus Results — {r['symbol']}  |  "
         f"Min Agreement: {r['min_agreement']}  |  "
         f"{r['start_date']} → {r['end_date']}"
@@ -1786,7 +1786,7 @@ elif mode == "Walk-Forward OOS":
         if not rows:
             st.error("Scan returned no results. See errors below.")
         else:
-            st.subheader(f"Scan results — {scan['symbol']}")
+            section(f"Scan results — {scan['symbol']}")
             # WFE-rank: highest WFE first; None (no IS edge) sinks to bottom.
             def _wfe_key(r):
                 w = r.get("wfe")
@@ -1855,7 +1855,7 @@ elif mode == "Walk-Forward OOS":
         if wf.get("mode") == "simple":
             iss, oos = wf["is_segment"], wf["oos_segment"]
             wfe = wf.get("wfe")
-            st.subheader(f"{wf.get('strategy_name', wf_type)} — {wf['symbol']}")
+            section(f"{wf.get('strategy_name', wf_type)} — {wf['symbol']}")
             m1, m2, m3 = st.columns(3)
             m1.metric("WFE (OOS/IS)", f"{wfe:.2f}" if wfe is not None else "N/A",
                       help="OOS CAGR ÷ IS CAGR. ~1.0 excellent, <0.5 likely overfit.")
@@ -1875,7 +1875,7 @@ elif mode == "Walk-Forward OOS":
             ]), use_container_width=True, hide_index=True)
 
             if oos.get("equity_curve"):
-                st.subheader("Out-of-Sample Equity Curve")
+                section("Out-of-Sample Equity Curve")
                 charts.render_equity_chart(
                     oos["equity_curve"], trades=[],
                     initial_capital=wf_cap,
@@ -1883,7 +1883,7 @@ elif mode == "Walk-Forward OOS":
                 )
         else:  # rolling
             gwfe = wf.get("global_wfe")
-            st.subheader(f"{wf.get('strategy_name', wf_type)} — {wf['symbol']} (rolling)")
+            section(f"{wf.get('strategy_name', wf_type)} — {wf['symbol']} (rolling)")
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Global WFE", f"{gwfe:.2f}" if gwfe is not None else "N/A")
             m2.metric("OOS CAGR (composite)", f"{wf['global_oos_cagr']:.1f}%")
@@ -1903,7 +1903,7 @@ elif mode == "Walk-Forward OOS":
                 ]), use_container_width=True, hide_index=True)
 
             if wf.get("oos_composite_curve"):
-                st.subheader("Composite Out-of-Sample Equity Curve")
+                section("Composite Out-of-Sample Equity Curve")
                 charts.render_equity_chart(
                     wf["oos_composite_curve"], trades=[],
                     initial_capital=wf_cap,

@@ -4,7 +4,7 @@ import streamlit as st
 
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
-from _theme import apply_theme
+from _theme import apply_theme, section
 import _charts as charts
 import _lightweight_chart as lwc
 
@@ -368,7 +368,7 @@ def _val(v, fmt=None):
 name     = fund.get("company_name") or symbol
 sector   = fund.get("sector")   or "—"
 industry = fund.get("industry") or "—"
-st.subheader(f"{name}  ({symbol})")
+section(f"{name}  ({symbol})")
 st.caption(f"**Sector:** {sector}  ·  **Industry:** {industry}")
 
 st.markdown("#### Valuation")

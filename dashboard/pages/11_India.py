@@ -19,7 +19,7 @@ import pandas as pd
 import streamlit as st
 
 import api
-from _theme import apply_theme, section, kpi_row, money, market_status_bar, empty_state
+from _theme import apply_theme, section, divider, kpi_row, money, market_status_bar, empty_state
 from _components import page_header, stat_band
 
 apply_theme("India (Zerodha)")
@@ -485,7 +485,7 @@ with tab_bt:
                         "Max DD":      (f"{_num(r, 'max_drawdown_pct', 'max_drawdown'):.1f}%"
                                         if _num(r, 'max_drawdown_pct', 'max_drawdown') is not None else "—"),
                     })
-                st.subheader(f"Compare All — {bt_symbol} ({bt_period})")
+                section(f"Compare All — {bt_symbol} ({bt_period})")
                 st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
                 if errored:
                     st.caption("⚠️ Did not run: " + ", ".join(
@@ -509,7 +509,7 @@ with tab_bt:
         # ── Single strategy: metrics + full trade-by-trade details ─────────
         else:
             m = res if isinstance(res, dict) else {}
-            st.subheader(f"{m.get('strategy_name', single_strategy)} — {bt_symbol} ({bt_period})")
+            section(f"{m.get('strategy_name', single_strategy)} — {bt_symbol} ({bt_period})")
             if m.get("start_date") and m.get("end_date"):
                 st.caption(f"{m['start_date']} → {m['end_date']}")
             _render_bt_metrics(m)

@@ -17,8 +17,8 @@ import pandas as pd
 
 from app.config import get_settings
 
-from _theme import apply_theme  # noqa: E402
-from _components import page_header  # noqa: E402
+from _theme import apply_theme, section, divider  # noqa: E402
+from _components import page_header, stat_band  # noqa: E402
 
 apply_theme("Perplexity Strategies")
 
@@ -188,7 +188,7 @@ tab_signals, tab_scanner, tab_sizer, tab_backtest, tab_compare, tab_portfolio, t
 # TAB 1 — LIVE SIGNALS
 # ══════════════════════════════════════════════════════════════
 with tab_signals:
-    st.subheader("Current Signals")
+    section("Current Signals")
     st.caption("Runs all 12 strategies on the latest market data — no trade is placed, just analysis.")
 
     col1, col2 = st.columns([2, 1])
@@ -285,7 +285,7 @@ from app.services.strategy.perplexity.runner import PERPLEXITY_STRATEGIES as _AL
 _STRATEGY_NAMES = [s.name for s in _ALL_STRATEGIES]
 
 with tab_scanner:
-    st.subheader("Market Scanner")
+    section("Market Scanner")
     st.caption(
         "Enter any tickers you want to scan. Live prices are fetched from Schwab; "
         "historical bars (indicators) come from yfinance. Results show actionable signals ready for auto-trading."
@@ -435,7 +435,7 @@ with tab_scanner:
 # TAB 3 — POSITION SIZER
 # ══════════════════════════════════════════════════════════════
 with tab_sizer:
-    st.subheader("Position Sizer")
+    section("Position Sizer")
     st.caption(
         "Enter a symbol to auto-load the current price and ATR-based stop suggestions. "
         "The system calculates shares so you risk a fixed % of your account — no guessing."
@@ -645,7 +645,7 @@ If the stop is hit you lose ~1% of your account. If the target is hit you typica
 # TAB 3 — BACKTEST SINGLE STRATEGY
 # ══════════════════════════════════════════════════════════════
 with tab_backtest:
-    st.subheader("Backtest a Single Strategy")
+    section("Backtest a Single Strategy")
 
     try:
         strat_list = api.perplexity_strategies()
@@ -699,7 +699,7 @@ with tab_backtest:
     r = st.session_state.get("px_bt_result")
     if r and not r.get("error"):
         st.divider()
-        st.subheader(f"{r['strategy_name']} on {r['symbol']}  —  {r['start_date']} → {r['end_date']}")
+        section(f"{r['strategy_name']} on {r['symbol']}  —  {r['start_date']} → {r['end_date']}")
 
         pnl = r["total_pnl"]
         cap_emp = r.get("capital_employed", 0)
@@ -726,7 +726,7 @@ with tab_backtest:
         # Trade log
         if r.get("trades"):
             st.divider()
-            st.subheader(f"Trade Log ({r['total_trades']} trades)")
+            section(f"Trade Log ({r['total_trades']} trades)")
             rows = []
             cumulative_pnl = 0.0
             for t in r["trades"]:
@@ -768,7 +768,7 @@ with tab_backtest:
 # TAB 3 — COMPARE ALL STRATEGIES ON ONE SYMBOL
 # ══════════════════════════════════════════════════════════════
 with tab_compare:
-    st.subheader("Compare All 5 Strategies")
+    section("Compare All 5 Strategies")
     st.caption("Runs all strategies on the same symbol and period — easy to see which works best.")
 
     col1, col2, col3 = st.columns([2, 2, 2])
@@ -899,7 +899,24 @@ with tab_compare:
                 "Max Drawdown":  f"{r['max_drawdown_pct']:.1f}%",
                 "Sharpe":        r["sharpe_ratio"] if r["sharpe_ratio"] else "—",
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(
+            pd.DataFrame(rows),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Strategy":      st.column_config.TextColumn("Strategy",      width="large"),
+                "Trades":        st.column_config.NumberColumn("Trades",      format="%d",    width="small"),
+                "Win Rate":      st.column_config.TextColumn("Win %",         width="small"),
+                "Profit Factor": st.column_config.TextColumn("PF",            width="small"),
+                "Avg Win":       st.column_config.TextColumn("Avg Win",       width="small"),
+                "Expectancy":    st.column_config.TextColumn("Expectancy",    width="small"),
+                "Total Return":  st.column_config.TextColumn("Return",        width="small"),
+                "CAGR":          st.column_config.TextColumn("CAGR",          width="small"),
+                "Total P&L":     st.column_config.TextColumn("Total P&L",     width="small"),
+                "Max Drawdown":  st.column_config.TextColumn("Max DD",        width="small"),
+                "Sharpe":        st.column_config.TextColumn("Sharpe",        width="small"),
+            },
+        )
 
         # ── Promote to autotrade ───────────────────────────────────────────
         # Any strategy in this comparison can be promoted to the assignments
@@ -1007,7 +1024,7 @@ with tab_compare:
     wf_cmp = st.session_state.get("px_wf_compare")
     if wf_cmp:
         st.divider()
-        st.subheader(f"Walk-Forward Strategy Comparison — {wf_cmp['symbol']}  |  10y  |  3y IS / 1y OOS")
+        section(f"Walk-Forward Strategy Comparison — {wf_cmp['symbol']}  |  10y  |  3y IS / 1y OOS")
         st.caption(
             "**How to read this:** Latest IS CAGR = what the strategy earned in its most recent training window. "
             "Latest OOS CAGR = how it performed in the immediately following held-out period. "
@@ -1123,7 +1140,7 @@ with tab_compare:
 # TAB 5 — PORTFOLIO BACKTEST
 # ══════════════════════════════════════════════════════════════
 with tab_portfolio:
-    st.subheader("Portfolio Backtest")
+    section("Portfolio Backtest")
     st.caption(
         "Run one strategy across multiple symbols simultaneously with a shared capital pool. "
         "Positions are sized as a fixed % of portfolio equity — capital stays deployed."
@@ -1159,7 +1176,7 @@ with tab_portfolio:
     pr = st.session_state.get("px_portfolio")
     if pr and not pr.get("error"):
         st.divider()
-        st.subheader(f"{pr['strategy_name']} — {', '.join(pr['symbols'])}  |  {pr['start_date']} → {pr['end_date']}")
+        section(f"{pr['strategy_name']} — {', '.join(pr['symbols'])}  |  {pr['start_date']} → {pr['end_date']}")
 
         pnl = pr["total_pnl"]
         pp1, pp2, pp3, pp4, pp5, pp6, pp7, pp8 = st.columns(8)
@@ -1178,7 +1195,7 @@ with tab_portfolio:
 
         # Trades table
         if pr.get("trades"):
-            st.subheader("Trade Log")
+            section("Trade Log")
             sell_only = [t for t in pr["trades"] if "SELL" in t["side"] and t.get("pnl") is not None]
             if sell_only:
                 df_trades = pd.DataFrame(sell_only)[["date", "symbol", "side", "price", "quantity", "value", "pnl", "reason"]]
@@ -1190,7 +1207,7 @@ with tab_portfolio:
 # TAB 6 — WALK-FORWARD VALIDATION
 # ══════════════════════════════════════════════════════════════
 with tab_walkforward:
-    st.subheader("Walk-Forward Validation")
+    section("Walk-Forward Validation")
     st.caption(
         "Tests whether a strategy's in-sample edge holds out-of-sample. "
         "**Simple**: one 70/30 split. **Rolling**: multiple IS/OOS windows slide across full history — "
@@ -1309,7 +1326,7 @@ with tab_walkforward:
             oos_pf_ratio = wfr.get("oos_pf_ratio")
             wfe_label = wfr.get("wfe_label", "")
 
-            st.subheader(f"{wfr['strategy_name']} on {wfr['symbol']}  |  "
+            section(f"{wfr['strategy_name']} on {wfr['symbol']}  |  "
                          f"{wfr['full_period']}  |  "
                          f"Split {int(wfr.get('train_pct', 0.7)*100)}/{int((1-wfr.get('train_pct',0.7))*100)}")
 
@@ -1364,7 +1381,7 @@ with tab_walkforward:
             g_wfe  = wfr.get("global_wfe")
             g_label= wfr.get("global_wfe_label", "")
 
-            st.subheader(f"{wfr['strategy_name']} on {wfr['symbol']}  |  "
+            section(f"{wfr['strategy_name']} on {wfr['symbol']}  |  "
                          f"{wfr['full_period']}  |  "
                          f"{len(segs)} windows  "
                          f"({wfr.get('train_years',3)}y IS / {wfr.get('test_years',1)}y OOS "
@@ -1395,7 +1412,7 @@ with tab_walkforward:
 
             # Per-segment table
             if segs:
-                st.subheader("Per-Window Results")
+                section("Per-Window Results")
                 tbl_rows = []
                 for s in segs:
                     wfe_s = s.get("wfe")
@@ -1644,7 +1661,7 @@ with tab_walkforward:
             bef_segs = bef.get("segments", [])
             aft_segs = aft.get("segments", [])
             if bef_segs and aft_segs:
-                st.subheader("Per-Window WFE: Before vs After")
+                section("Per-Window WFE: Before vs After")
                 cmp_rows = []
                 for i, (bs, as_) in enumerate(zip(bef_segs, aft_segs)):
                     bwfe = bs.get("wfe")
@@ -1665,7 +1682,7 @@ with tab_walkforward:
 # TAB 7 — SYMBOL PROFILES
 # ══════════════════════════════════════════════════════════════
 with tab_profiles:
-    st.subheader("Per-Symbol Filter Profiles")
+    section("Per-Symbol Filter Profiles")
     st.caption(
         "Each symbol gets its own calibrated entry filters for EMA Mean Reversion. "
         "Run **Auto-Calibrate** on any symbol — it analyzes winning vs losing trades, "
@@ -1903,7 +1920,7 @@ with tab_profiles:
 # TAB 8 — TRADE ANALYSIS
 # ══════════════════════════════════════════════════════════════
 with tab_analysis:
-    st.subheader("Trade Analysis — Winner vs Loser Breakdown")
+    section("Trade Analysis — Winner vs Loser Breakdown")
     st.caption(
         "Runs a backtest then compares entry-bar indicators between winning and losing trades. "
         "High Cohen's d features are the strongest filters — use them to tighten entry conditions "
@@ -2213,7 +2230,7 @@ with tab_analysis:
 # TAB 9 — CONFIG
 # ══════════════════════════════════════════════════════════════
 with tab_config:
-    st.subheader("Strategy Configuration")
+    section("Strategy Configuration")
     st.caption(
         "Enable/disable strategies and tune their parameters. "
         "Parameter changes take effect on the next Live Signals or Backtest run — no restart needed."
