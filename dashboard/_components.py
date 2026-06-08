@@ -256,3 +256,61 @@ def direction_badge(direction: str) -> str:
     }
     text, color = _map.get(direction.upper(), (direction, "grey"))
     return pill(text, color)
+
+
+# ── Trading workflow components ───────────────────────────────────────────────
+
+
+def regime_chip(regime: str) -> str:
+    """Return an HTML `.tx-regime` chip for a market regime string.
+
+    Wider than a pill — meant for display inside a card header or stat band.
+    """
+    _map = {
+        "BULL_OPEN":  ("BULL OPEN",  "bull"),
+        "BEAR_OPEN":  ("BEAR OPEN",  "bear"),
+        "CHOPPY":     ("CHOPPY",     "chop"),
+        "PRE_MARKET": ("PRE-MARKET", "pre"),
+        "TREND_UP":   ("TREND UP",   "bull"),
+        "TREND_DOWN": ("TREND DOWN", "bear"),
+        "HIGH_VOL":   ("HIGH VOL",   "chop"),
+        "NEWS_RISK":  ("NEWS RISK",  "bear"),
+        "UNKNOWN":    ("UNKNOWN",    "unkn"),
+    }
+    text, cls = _map.get(regime, (regime, "unkn"))
+    return f"<span class='tx-regime {cls}'>{text}</span>"
+
+
+def eligibility_chip(state: str, reason: str = "") -> str:
+    """Return an HTML `.tx-chip` for a symbol's trading eligibility state.
+
+    States: 'ready' | 'watch' | 'blocked' | 'idle'.
+    """
+    _map = {
+        "ready":   ("● READY",   "ready"),
+        "watch":   ("◐ WATCH",   "watch"),
+        "blocked": ("✕ BLOCKED", "blocked"),
+        "idle":    ("○ IDLE",    "idle"),
+    }
+    text, cls = _map.get(state.lower(), (state.upper(), "idle"))
+    title = f' title="{reason}"' if reason else ""
+    return f"<span class='tx-chip {cls}'{title}>{text}</span>"
+
+
+def risk_gauge_html(label: str, used: float, maximum: float, *, prefix: str = "$") -> str:
+    """Return an HTML string for a labelled risk gauge row (no Streamlit widgets).
+
+    Use before ``st.progress()`` to get a styled label row above the bar::
+
+        st.markdown(risk_gauge_html("Daily loss", 320, 1000), unsafe_allow_html=True)
+        st.progress(320 / 1000)
+    """
+    pct = used / max(maximum, 1)
+    cls = "danger" if pct >= 0.85 else ("warn" if pct >= 0.60 else "ok")
+    val_str = f"{prefix}{abs(used):,.0f} / {prefix}{abs(maximum):,.0f}"
+    return (
+        f"<div class='tx-gauge-row'>"
+        f"<span>{label}</span>"
+        f"<span class='tx-gauge-val {cls}'>{val_str}</span>"
+        f"</div>"
+    )

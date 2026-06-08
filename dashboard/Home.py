@@ -12,9 +12,9 @@ import sys, os; sys.path.insert(0, os.path.dirname(__file__))
 import api
 from _theme import (
     apply_theme, section, divider, kpi_row, pill,
-    money, currency_symbol, empty_state,
+    money, currency_symbol, empty_state, nav_group,
 )
-from _components import page_header, stat_band, metric_band
+from _components import page_header, stat_band, metric_band, risk_gauge_html
 
 from collections import defaultdict
 from datetime import datetime
@@ -26,6 +26,19 @@ import streamlit as st
 ET = ZoneInfo("America/New_York")
 
 apply_theme("Trading System")
+
+# ── Sidebar nav grouping ──────────────────────────────────────────────────────
+# Inject section labels into the sidebar so the 14 pages feel organised rather
+# than a flat list. Group labels use the .tx-nav-group CSS class from _theme.py.
+with st.sidebar:
+    nav_group("Overview")
+    # (Home, P/L sit in this group — auto-ordered by Streamlit page numbering)
+    nav_group("Research")
+    # Strategy, Charts, Backtest, Perplexity
+    nav_group("Trading")
+    # Scanner, Day Trading, India
+    nav_group("Risk & Ops")
+    # Risk, Notifications, Schwab, Webull
 
 # ── Load everything once ─────────────────────────────────────────────────────
 def _safe(call, default):
@@ -194,28 +207,12 @@ with right:
         loss_pct    = min(abs(loss_used) / max(abs(loss_max), 1), 1.0)
 
         # Orders gauge
-        _ord_color = "var(--warn)" if order_pct > 0.75 else "var(--teal)"
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;font-size:0.8rem;"
-            f"color:var(--text-2);margin-bottom:4px'>"
-            f"<span>Orders today</span>"
-            f"<span style='color:{_ord_color};font-weight:600'>{orders_used} / {orders_max}</span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown(risk_gauge_html("Orders today", orders_used, orders_max, prefix=""), unsafe_allow_html=True)
         st.progress(order_pct)
 
         # Loss gauge
-        _loss_color = "var(--neg)" if loss_pct > 0.75 else ("var(--warn)" if loss_pct > 0.50 else "var(--teal)")
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;font-size:0.8rem;"
-            f"color:var(--text-2);margin-top:var(--sp-3);margin-bottom:4px'>"
-            f"<span>Daily loss used</span>"
-            f"<span style='color:{_loss_color};font-weight:600'>"
-            f"{money(abs(loss_used))} / {money(abs(loss_max))}</span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown("<div style='margin-top:var(--sp-3)'></div>", unsafe_allow_html=True)
+        st.markdown(risk_gauge_html("Daily loss used", abs(loss_used), abs(loss_max)), unsafe_allow_html=True)
         st.progress(loss_pct)
 
         st.markdown("") # spacing

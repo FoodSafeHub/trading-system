@@ -19,13 +19,16 @@ import pandas as pd
 import streamlit as st
 
 import api
-from _theme import apply_theme, section, kpi_row, money, market_status_bar
+from _theme import apply_theme, section, kpi_row, money, market_status_bar, empty_state
+from _components import page_header, stat_band
 
 apply_theme("India (Zerodha)")
-st.title("🇮🇳 India — Zerodha")
-st.caption(
-    "India-only cockpit. Orders route to Zerodha; market data comes from Upstox "
-    "(or yfinance .NS as a free fallback). All values shown in ₹."
+
+page_header(
+    "India — Zerodha",
+    subtitle="India-only cockpit · Orders via Zerodha · Market data via Upstox · All values in ₹",
+    badge="🇮🇳 NSE/BSE",
+    badge_color="teal",
 )
 
 market_status_bar()
@@ -240,10 +243,10 @@ if india_accts:
     if acct_ids:
         st.caption(f"Account {acct_ids}")
 else:
-    st.info(
-        "No Zerodha account data yet. Log in above, then ensure the API has been "
-        "restarted since the India integration. Cash/positions appear once "
-        "Zerodha authenticates."
+    empty_state(
+        "No Zerodha account data",
+        "Log in above, then restart the API. Cash/positions appear once Zerodha authenticates.",
+        icon="🔌",
     )
 
 if india_positions:

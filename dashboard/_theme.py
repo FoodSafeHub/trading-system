@@ -152,30 +152,40 @@ section[data-testid="stSidebar"] {
     background: #080b10;
     border-right: 1px solid var(--line);
     min-width: 220px !important;
-    max-width: 240px !important;
+    max-width: 244px !important;
 }
 section[data-testid="stSidebar"] .block-container {
-    padding-top: 1rem;
+    padding-top: 0.75rem;
     padding-left: 0.75rem;
     padding-right: 0.75rem;
 }
-/* Logo / app name at top of sidebar */
+/* App name at top */
 section[data-testid="stSidebar"] h1 {
-    font-size: 1rem !important;
+    font-size: 0.95rem !important;
     font-weight: 700 !important;
     letter-spacing: 0.01em;
-    color: var(--text) !important;
-    margin-bottom: var(--sp-4) !important;
+    color: var(--teal) !important;
+    margin-bottom: var(--sp-3) !important;
     padding-bottom: var(--sp-3);
     border-bottom: 1px solid var(--line);
+}
+/* Nav group labels injected via .tx-nav-group markdown divs */
+.tx-nav-group {
+    font-size: 0.62rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.10em;
+    color: var(--text-3);
+    padding: var(--sp-4) var(--sp-3) var(--sp-1) var(--sp-3);
+    margin-top: var(--sp-2);
 }
 /* Nav links */
 section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"] {
     border-radius: var(--radius);
-    padding: 7px var(--sp-3);
+    padding: 6px var(--sp-3);
     margin: 1px 0;
     color: var(--text-2);
-    font-size: 0.83rem;
+    font-size: 0.82rem;
     font-weight: 500;
     letter-spacing: 0.01em;
     transition: background 0.10s ease, color 0.10s ease;
@@ -193,6 +203,75 @@ section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"][aria-current=
     font-weight: 600;
     box-shadow: inset 3px 0 0 var(--teal);
 }
+
+/* ── Trading workflow — risk / alert emphasis ─────────────────────────── */
+/* Kill switch active: full-width danger banner */
+.tx-kill-active {
+    background: var(--neg-bg);
+    border: 1px solid var(--neg-bd);
+    border-radius: var(--radius);
+    padding: var(--sp-3) var(--sp-4);
+    color: var(--neg);
+    font-weight: 600;
+    font-size: 0.88rem;
+    margin-bottom: var(--sp-3);
+}
+/* Open position card */
+.tx-position-card {
+    background: var(--panel-2);
+    border: 1px solid var(--line-2);
+    border-radius: var(--radius);
+    padding: var(--sp-3) var(--sp-4);
+    margin-bottom: var(--sp-2);
+}
+.tx-position-card.long  { border-left: 3px solid var(--pos); }
+.tx-position-card.short { border-left: 3px solid var(--neg); }
+/* Risk gauge label row */
+.tx-gauge-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 0.8rem;
+    color: var(--text-2);
+    margin-bottom: 4px;
+}
+.tx-gauge-val { font-weight: 600; font-variant-numeric: tabular-nums; }
+.tx-gauge-val.ok     { color: var(--teal); }
+.tx-gauge-val.warn   { color: var(--warn); }
+.tx-gauge-val.danger { color: var(--neg); }
+/* Eligibility / signal state chips */
+.tx-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: 20px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    border: 1px solid transparent;
+}
+.tx-chip.ready   { background: var(--pos-bg);  color: var(--pos);  border-color: var(--pos-bd); }
+.tx-chip.watch   { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-bd); }
+.tx-chip.blocked { background: var(--neg-bg);  color: var(--neg);  border-color: var(--neg-bd); }
+.tx-chip.idle    { background: rgba(90,99,115,0.14); color: var(--text-3); border-color: rgba(90,99,115,0.28); }
+/* Regime / direction display chip (wider, not a pill) */
+.tx-regime {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.tx-regime.bull  { background: var(--pos-bg);  color: var(--pos);  border: 1px solid var(--pos-bd); }
+.tx-regime.bear  { background: var(--neg-bg);  color: var(--neg);  border: 1px solid var(--neg-bd); }
+.tx-regime.chop  { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-bd); }
+.tx-regime.pre   { background: var(--info-bg); color: var(--info); border: 1px solid var(--info-bd); }
+.tx-regime.unkn  { background: rgba(90,99,115,0.12); color: var(--text-3); border: 1px solid rgba(90,99,115,0.24); }
 
 /* ── Headings — strict 3-step hierarchy ──────────────────────────────── */
 h1 {
@@ -734,6 +813,19 @@ code, pre {
 }
 </style>
 """
+
+
+def nav_group(label: str) -> None:
+    """Render a nav section label inside the sidebar (call from any page top-level).
+
+    Usage (inside ``with st.sidebar:`` or at top of page before content)::
+
+        nav_group("TRADING")
+    """
+    st.sidebar.markdown(
+        f"<div class='tx-nav-group'>{label}</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def apply_theme(page_title: str, *, page_icon: str | None = None) -> None:

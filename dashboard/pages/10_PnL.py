@@ -10,8 +10,8 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
-from _theme import apply_theme, section, kpi_row, money, pct, divider, currency_symbol, market_status_bar
-from _components import page_header, stat_band, empty_state
+from _theme import apply_theme, section, kpi_row, money, pct, divider, currency_symbol, market_status_bar, empty_state
+from _components import page_header, stat_band
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -188,7 +188,7 @@ except Exception as exc:
     opens = []
 
 if not opens:
-    st.info("No open positions.")
+    empty_state("No open positions", "Open lots appear here once you have live or paper trades.", icon="📊")
 else:
     df_open = pd.DataFrame(opens)
     # Per-row currency: format money columns to strings prefixed with the row's

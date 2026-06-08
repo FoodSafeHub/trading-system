@@ -18,14 +18,17 @@ import pandas as pd
 from app.config import get_settings
 
 from _theme import apply_theme  # noqa: E402
+from _components import page_header  # noqa: E402
 
 apply_theme("Perplexity Strategies")
-st.title("Perplexity Swing Strategies")
-st.caption(
-    "12 swing & momentum strategies — EMA mean reversion, MA crossover, consolidation breakout, "
-    "BB mean reversion, Fibonacci pullback, RSI swing reversal, Supertrend, BB breakout, plus four "
-    "daily-candle momentum setups (engulfing/volume surge, NR7 breakout, 3-bar push, hammer/star). "
-    "Daily bars, 3–20 day holds. Scan the full market or analyse a single symbol."
+
+page_header(
+    "Perplexity Swing Strategies",
+    subtitle=(
+        "12 swing & momentum strategies — EMA reversion, MA crossover, BB breakout, Fibonacci, "
+        "RSI reversal, Supertrend, plus four candle-pattern setups. "
+        "Daily bars · 3–20 day holds."
+    ),
 )
 
 STRATEGY_DESCRIPTIONS = {

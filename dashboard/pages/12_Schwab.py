@@ -1,23 +1,6 @@
 from __future__ import annotations
 
-"""Schwab connection cockpit — connect / re-authorize and see token health.
-
-Why this page exists: the Home dashboard builds broker tabs *dynamically* from
-whatever account data the API returns. When Schwab's OAuth token expires (the
-access token lasts ~30 min and the refresh token ~7 days), get_accounts() raises
-and the Home page's _safe() wrapper swallows it — so Schwab silently disappears
-with no explanation. This page makes the connection state visible and gives a
-one-click re-authorize so getting Schwab back doesn't require curling the API.
-
-OAuth flow (differs from Zerodha's redirect-based login):
-  1. Click "Connect / Re-authorize" → calls /schwab/auth, which returns an
-     authorization_url.
-  2. Open that URL, log in to Schwab, approve. Schwab redirects to the
-     configured redirect_uri (default https://127.0.0.1:8182/schwab/callback),
-     which exchanges the code and stores fresh tokens in the DB.
-  3. Return here and click "Refresh status" — Schwab should now read "connected"
-     and reappear on the Home dashboard.
-"""
+"""Schwab connection cockpit — connect / re-authorize and see token health."""
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -29,15 +12,8 @@ import pandas as pd
 import streamlit as st
 
 import api
-from _theme import apply_theme, section, kpi_row, pill, money
-
-apply_theme("Schwab")
-st.title("Charles Schwab")
-st.caption(
-    "Connect and monitor the Schwab brokerage link. Schwab OAuth tokens expire "
-    "(access ~30 min, refresh ~7 days), so this is where you re-authorize when "
-    "Schwab drops off the Home dashboard."
-)
+from _theme import apply_theme, section, kpi_row, pill, money, divider, empty_state
+from _components import page_header, stat_band
 
 
 def _safe(call, default):
@@ -51,25 +27,27 @@ def _usd(v) -> str:
     return money(v, currency="$") if v is not None else "—"
 
 
-# ── Connection status ─────────────────────────────────────────────────────────
-section("Connection status")
+apply_theme("Schwab")
 
-status = _safe(api.schwab_status, {"state": "error"})
-state = status.get("state", "error")
+# ── Status data ────────────────────────────────────────────────────────────────
+status   = _safe(api.schwab_status, {"state": "error"})
+state    = status.get("state", "error")
+accts    = _safe(lambda: api.broker_account_summary("schwab"), []) or []
+positions = _safe(lambda: api.broker_positions("schwab"), []) or []
 
 _PILL = {
-    "connected":      ("CONNECTED", "green"),
+    "connected":      ("CONNECTED",              "green"),
     "expiring":       ("EXPIRING — auto-refresh", "blue"),
-    "expired":        ("EXPIRED — reconnect", "red"),
-    "disconnected":   ("NOT CONNECTED", "grey"),
-    "not_configured": ("NOT CONFIGURED", "red"),
-    "error":          ("STATUS UNAVAILABLE", "red"),
+    "expired":        ("EXPIRED",                 "red"),
+    "disconnected":   ("NOT CONNECTED",           "grey"),
+    "not_configured": ("NOT CONFIGURED",          "red"),
+    "error":          ("UNAVAILABLE",             "red"),
 }
-label, color = _PILL.get(state, ("UNKNOWN", "grey"))
-st.markdown(pill(label, color), unsafe_allow_html=True)
+conn_label, conn_color = _PILL.get(state, ("UNKNOWN", "grey"))
 
-# Human-readable expiry + time-left so you can tell *when* it'll break.
-expires_at = status.get("expires_at")
+# Token expiry detail
+_expiry_str = "—"
+expires_at   = status.get("expires_at")
 seconds_left = status.get("seconds_left")
 if expires_at:
     try:
@@ -77,57 +55,58 @@ if expires_at:
         if exp_dt.tzinfo is None:
             exp_dt = exp_dt.replace(tzinfo=timezone.utc)
         local = exp_dt.astimezone()
-        when = local.strftime("%Y-%m-%d %H:%M %Z")
+        _expiry_str = local.strftime("%H:%M %Z")
+        if seconds_left is not None and seconds_left > 0:
+            mins = int(seconds_left // 60)
+            _expiry_str += f" (~{mins}m left)" if mins < 120 else f" (~{mins // 60}h left)"
     except Exception:
-        when = expires_at
-    if seconds_left is not None and seconds_left > 0:
-        mins = int(seconds_left // 60)
-        rel = f"{mins} min" if mins < 120 else f"{mins // 60} hr"
-        st.caption(f"Access token expires at **{when}** (~{rel} left).")
-    elif seconds_left is not None:
-        st.caption(f"Access token expired at **{when}**.")
-    else:
-        st.caption(f"Token expiry: **{when}**.")
+        _expiry_str = str(expires_at)[:16]
 
-if status.get("account_number"):
-    st.caption(f"Configured account: {status['account_number']}")
+page_header(
+    "Charles Schwab",
+    subtitle="OAuth brokerage connection — access token ~30 min, refresh token ~7 days.",
+    badge=conn_label,
+    badge_color=conn_color,
+)
 
-# State-specific guidance.
+stat_band([
+    ("Connection",  conn_label,                                      conn_color),
+    ("Token expiry", _expiry_str,                                    "amber" if state == "expiring" else "grey"),
+    ("Account",      status.get("account_number", "—") or "—",      "grey"),
+    ("Positions",    str(len(positions)),                            "teal" if positions else "grey"),
+])
+
+# ── State-specific guidance ────────────────────────────────────────────────────
 if state == "not_configured":
     st.error(
-        "SCHWAB_CLIENT_ID is not set in `.env`. Add your Schwab app credentials "
-        "(SCHWAB_CLIENT_ID, SCHWAB_CLIENT_SECRET, SCHWAB_REDIRECT_URI) and restart "
-        "the API before connecting."
+        "**SCHWAB_CLIENT_ID is not set in `.env`.**  "
+        "Add your Schwab app credentials (SCHWAB_CLIENT_ID, SCHWAB_CLIENT_SECRET, "
+        "SCHWAB_REDIRECT_URI) and restart the API.",
+        icon="🔧",
     )
 elif state == "expired":
-    if status.get("has_refresh_token"):
-        st.warning(
-            "The access token expired and the refresh token is no longer valid "
-            "(Schwab refresh tokens last ~7 days). Re-authorize below to restore "
-            "Schwab on the Home dashboard."
-        )
-    else:
-        st.warning(
-            "The access token expired and there is no refresh token to renew it. "
-            "Re-authorize below."
-        )
-elif state == "disconnected":
-    st.info("Schwab has never been authorized on this machine. Connect below to begin.")
-elif state == "expiring":
-    st.info("Token is within the refresh window — the next API call should auto-refresh it.")
-elif state == "error":
-    st.error(
-        "Couldn't read Schwab status from the API. Is the backend running on "
-        f"{api.BASE}? Restart it if you just added the /schwab/status route."
+    msg = (
+        "The access token expired and the refresh token is no longer valid — "
+        "Schwab refresh tokens last ~7 days. Re-authorize below."
+        if not status.get("has_refresh_token") else
+        "The access token expired and there is no refresh token. Re-authorize below."
     )
+    st.warning(msg, icon="⏰")
+elif state == "disconnected":
+    st.info("Schwab has never been authorized on this machine. Connect below.", icon="🔌")
+elif state == "expiring":
+    st.info("Token is within the auto-refresh window — the next API call should renew it.", icon="♻️")
+elif state == "error":
+    st.error(f"Couldn't read Schwab status from the API at {api.BASE}. Is the backend running?", icon="⚠️")
 
+divider()
 
 # ── Connect / re-authorize ─────────────────────────────────────────────────────
 section("Connect / Re-authorize")
 st.caption(
-    "Step 1: get the authorization link. Step 2: open it, log in to Schwab, and "
-    "approve — Schwab redirects to the callback which stores fresh tokens. "
-    "Step 3: come back and refresh status."
+    "Step 1: get the authorization link. "
+    "Step 2: open it, log in to Schwab, approve — Schwab redirects to the callback which stores fresh tokens. "
+    "Step 3: come back and click Refresh status."
 )
 
 c1, c2 = st.columns([1, 1])
@@ -149,24 +128,19 @@ auth_url = st.session_state.get("schwab_auth_url")
 if auth_url:
     st.link_button("Open Schwab login →", auth_url, use_container_width=True)
     st.caption(
-        "Opens Schwab's login in a new tab. After approving you'll land on the "
-        "callback page (a small JSON 'success' message) — that's expected. Return "
-        "here and click **Refresh status**."
+        "Opens Schwab's login in a new tab. After approving you'll see a small JSON 'success' "
+        "message — that's expected. Return here and click **Refresh status**."
     )
 
+divider()
 
-# ── Account snapshot ────────────────────────────────────────────────────────────
-# Query Schwab directly (not the global-routing endpoints) so its account shows
-# regardless of where the Home routing toggle points. Both degrade to [] on
-# failure, so an unauthenticated broker reads as 'no data' rather than a 500.
-section("Account snapshot")
-accts = _safe(lambda: api.broker_account_summary("schwab"), []) or []
-positions = _safe(lambda: api.broker_positions("schwab"), []) or []
+# ── Account snapshot ───────────────────────────────────────────────────────────
+section("Account Snapshot")
 
 if accts:
-    eq = sum(a.get("equity") or 0 for a in accts) or None
-    cash = sum(a.get("cash") or 0 for a in accts) or None
-    bp = sum(a.get("buying_power") or 0 for a in accts) or None
+    eq   = sum(a.get("equity")       or 0 for a in accts) or None
+    cash = sum(a.get("cash")         or 0 for a in accts) or None
+    bp   = sum(a.get("buying_power") or 0 for a in accts) or None
     kpi_row([
         ("Equity",         _usd(eq)),
         ("Cash",           _usd(cash)),
@@ -177,25 +151,34 @@ if accts:
     if acct_ids:
         st.caption(f"Account {acct_ids}")
 else:
-    st.info(
-        "No Schwab account data — the broker is unauthenticated or the token "
-        "expired. Re-authorize above, then click Refresh status."
+    empty_state(
+        "No account data",
+        "Schwab is unauthenticated or the token expired. Re-authorize above, then click Refresh status.",
+        icon="🔌",
     )
 
 if positions:
     df = pd.DataFrame(positions)
     keep = [c for c in ["symbol", "quantity", "average_cost", "current_price",
-                        "market_value", "unrealized_pnl"] if c in df.columns]
+                         "market_value", "unrealized_pnl"] if c in df.columns]
     if keep:
-        df = df[keep]
-        for col in ("average_cost", "current_price", "market_value", "unrealized_pnl"):
-            if col in df.columns:
-                df[col] = df[col].apply(_usd)
-        df = df.rename(columns={
-            "symbol": "Symbol", "quantity": "Qty", "average_cost": "Avg cost",
+        df = df[keep].rename(columns={
+            "symbol": "Symbol", "quantity": "Qty", "average_cost": "Avg Cost",
             "current_price": "Last", "market_value": "Value",
             "unrealized_pnl": "Unrealised P&L",
         })
-    st.dataframe(df, use_container_width=True, hide_index=True)
-else:
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Symbol":        st.column_config.TextColumn("Symbol",       width="small"),
+            "Qty":           st.column_config.NumberColumn("Qty",        format="%.2f", width="small"),
+            "Avg Cost":      st.column_config.TextColumn("Avg Cost",     width="small"),
+            "Last":          st.column_config.TextColumn("Last",         width="small"),
+            "Value":         st.column_config.TextColumn("Value",        width="small"),
+            "Unrealised P&L":st.column_config.TextColumn("Unrealised P&L", width="medium"),
+        },
+    )
+elif state == "connected":
     st.caption("No open Schwab positions.")

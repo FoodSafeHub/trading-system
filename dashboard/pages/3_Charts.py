@@ -39,19 +39,21 @@ def is_india_symbol(symbol: str) -> bool:
         return True
     return _normalize_sym(s) in _NIFTY_50
 
-apply_theme("Charts")
-st.title("Price Charts")
+from _components import page_header, filter_cols  # noqa: E402
 
-col1, col2 = st.columns([2, 6])
-with col1:
-    symbol = st.text_input("Symbol", value="SPY", placeholder="AAPL, NVDA, SPY …").upper().strip() or "SPY"
-with col2:
-    st.write("")
-    st.caption(
-        "TradingView-style candlesticks powered by **your** market data — Schwab/yfinance for US, "
-        "**Upstox** (→ yfinance .NS fallback) for India — so every chart carries our indicator "
-        "overlays and ▲/▼ strategy-signal markers. India symbols render in ₹."
-    )
+apply_theme("Charts")
+
+page_header(
+    "Price Charts",
+    subtitle=(
+        "Candlesticks powered by your market data — Schwab/yfinance for US, "
+        "Upstox for India — with indicator overlays and strategy-signal markers. "
+        "India symbols render in ₹."
+    ),
+)
+
+sym_col, _ = st.columns([3, 7])
+symbol = sym_col.text_input("Symbol", value="SPY", placeholder="AAPL, NVDA, SPY …").upper().strip() or "SPY"
 
 chart_tab, live_tab, tv_tab = st.tabs(
     ["Chart (daily + signals)", "Strategy Live (intraday)", "TradingView (full UI)"]
