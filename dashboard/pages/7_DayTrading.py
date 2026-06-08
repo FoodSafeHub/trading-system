@@ -43,38 +43,56 @@ from _theme import apply_theme  # noqa: E402
 import _charts as charts  # noqa: E402
 import api  # noqa: E402
 from _broker_routing import render_broker_routing_toggle  # noqa: E402
+from _components import page_header, stat_band, filter_cols, empty_state  # noqa: E402
 
 apply_theme("Day Trading")
-st.title("Day Trading")
-st.caption(
-    f"{len(ALL_STRATEGIES)} intraday strategies on 5m and 15m bars. "
-    "All signals expire at market close. No overnight holds."
-)
 
-# Provider-health badge: shows which market-data provider has served the most
-# bar requests in this API session. Helps spot when TD has been exhausted and
-# the fallback chain (Webull -> yfinance) is doing the work.
+# ── Page header + data-source status ─────────────────────────────────────────
+_ds_label, _ds_color = "unknown", "grey"
+_ds_detail = ""
 try:
     _ds = api.daytrading_data_source_status() or {}
-    _status = _ds.get("status", "idle")
-    _label = _ds.get("label", "unknown")
-    _counters = _ds.get("counters", {}) or {}
-    _color = {"ok": "green", "degraded": "orange", "idle": "gray"}.get(_status, "gray")
-    _detail = (
-        f"TD: {_counters.get('twelvedata', 0)} · "
-        f"Webull: {_counters.get('webull', 0)} · "
-        f"yfinance: {_counters.get('yfinance', 0)}"
-    )
-    st.markdown(
-        f":{_color}-background[**Data: {_label}**] &nbsp; "
-        f"<span style='color:#888;font-size:0.85em;'>{_detail}</span>",
-        unsafe_allow_html=True,
+    _ds_status = _ds.get("status", "idle")
+    _ds_label  = _ds.get("label", "unknown")
+    _ctr       = _ds.get("counters", {}) or {}
+    _ds_color  = {"ok": "green", "degraded": "amber", "idle": "grey"}.get(_ds_status, "grey")
+    _ds_detail = (
+        f"TD: {_ctr.get('twelvedata', 0)}  "
+        f"Webull: {_ctr.get('webull', 0)}  "
+        f"yfinance: {_ctr.get('yfinance', 0)}"
     )
 except Exception:
     pass
 
-# Broker-routing toggle: where live orders get sent. "Both" fans out to
-# Schwab + Webull. Webull execution is scaffolded (not yet implemented).
+page_header(
+    "Day Trading",
+    subtitle=(
+        f"{len(ALL_STRATEGIES)} intraday strategies · 5m and 15m bars · "
+        "All signals expire at market close · No overnight holds"
+    ),
+)
+
+# Compact stat band: market session clocks + data provider health
+_mkt_status_bits = []
+from app.services.strategy.daytrading.market_open import now_et as _now_et
+_now_str = _now_et().strftime("%H:%M ET")
+_mkt_bits: list[tuple[str,str,str]] = [
+    ("Data", _ds_label, _ds_color),
+]
+if _ds_detail:
+    _mkt_bits.append(("Providers", _ds_detail, "grey"))
+from _theme import pill as _pill
+_mkt_html = "".join(
+    f"<span class='tx-stat'><span class='tx-stat-label'>{l}</span>{_pill(v, c)}</span>"
+    for l, v, c in _mkt_bits
+)
+st.markdown(
+    f"<div class='tx-statband' style='margin-top:var(--sp-2)'>{_mkt_html}"
+    f"<span style='margin-left:auto;font-size:0.75rem;color:var(--text-3)'>{_now_str}</span>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
 render_broker_routing_toggle(key_suffix="daytrading")
 
 STRATEGY_DESCRIPTIONS = {
@@ -466,21 +484,20 @@ with tab_signals:
     auto_refresh = col_auto.toggle("Auto-refresh", value=False, key="signals_auto_refresh",
                                    help="Refreshes every 5 minutes while the market is open.")
 
-    # Market status banner
-    status = market_status()
-    now_str = status.get("time_et", "")
+    # Market status inline band
+    _mkt_status_obj = market_status()
+    _now_str2 = _mkt_status_obj.get("time_et", "")
     _mkt_is_open = is_market_open(symbol_input)
-    if _mkt_is_open:
-        st.success(f"Market OPEN — {now_str}")
-    elif is_pre_market(symbol_input):
-        st.info(f"PRE-MARKET — {now_str}. Live signals only generated during market hours.")
-    else:
-        st.warning(f"Market CLOSED — {now_str}. Showing most recent data.")
-
-    # Last-refreshed timestamp
+    _mkt_pre     = is_pre_market(symbol_input)
+    _mkt_state   = "OPEN" if _mkt_is_open else ("PRE-MARKET" if _mkt_pre else "CLOSED")
+    _mkt_clr     = "green" if _mkt_is_open else ("blue" if _mkt_pre else "grey")
     _last_refresh = st.session_state.get("_signals_last_refresh")
-    if _last_refresh:
-        st.caption(f"Last refreshed: {_last_refresh.strftime('%H:%M:%S')} ET  ·  Signals based on last completed 5m bar.")
+    _refresh_str  = _last_refresh.strftime("%H:%M:%S") if _last_refresh else "—"
+    stat_band([
+        ("Session",   _mkt_state, _mkt_clr),
+        ("Clock",     _now_str2,  "grey"),
+        ("Last refresh", _refresh_str, "grey"),
+    ])
 
     # Auto-refresh: clear cache and rerun every 5 min while market is open
     if auto_refresh and _mkt_is_open:
@@ -1505,13 +1522,12 @@ with tab_wf:
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_scanner:
     import api as _api
+    from _theme import section as _section
 
-    st.markdown("### Market Scanner — Ranked Day-Trade Candidates")
-    st.caption(
-        "Scans the full US-listed common-stock universe (~5,800 names from NASDAQ "
-        "Trader, refreshed daily) and ranks tickers by volume, volatility, relative "
-        "volume, gap size, and catalyst presence. Use the filters to focus on the "
-        "price and float range you actually want to trade."
+    _section(
+        "Market Scanner",
+        "Full US universe (~5,800 names) ranked by volume, volatility, RVOL, gap, and catalyst. "
+        "Filters narrow to your exact price/float band. Native pre-check flags setups firing right now.",
     )
 
     # ── Presets: pre-fill the filters with sensible day-trade profiles ───────

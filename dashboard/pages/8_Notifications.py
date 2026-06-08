@@ -6,16 +6,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
 from _theme import apply_theme
+from _components import page_header
 
 import pandas as pd
 import streamlit as st
 
 apply_theme("Notifications")
-st.title("Notifications")
-st.caption(
-    "Alerts fired whenever an active assignment produces a BUY/SELL signal — from the scheduler, "
-    "scanner, or any future source. Only symbols in your assignments table generate notifications."
-)
+page_header("Notifications", subtitle="Alerts fired on active assignment signals — scheduler, scanner, and other sources.")
 
 # ── Controls ────────────────────────────────────────────────────────────
 c1, c2, c3 = st.columns([2, 2, 2])

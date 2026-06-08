@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
 from _theme import apply_theme, section, kpi_row, money, pct, divider, currency_symbol, market_status_bar
+from _components import page_header, stat_band, empty_state
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -18,12 +19,14 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 apply_theme("P/L")
-st.title("P/L Dashboard")
-market_status_bar()
-st.caption(
-    "Realized P/L is computed FIFO from filled orders. Unrealized P/L is the "
-    "open position size × (last quote − avg cost) — refreshed each page load."
+page_header(
+    "P&L Dashboard",
+    subtitle=(
+        "Realized P&L computed FIFO from fills · "
+        "Unrealized = open size × (last quote − avg cost) · refreshed each load"
+    ),
 )
+market_status_bar()
 
 
 # ── Load ────────────────────────────────────────────────────────────────────

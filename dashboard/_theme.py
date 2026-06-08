@@ -3,7 +3,31 @@
 Every page calls `apply_theme()` once near the top to install the CSS overrides,
 then composes pages out of the helpers below (`section`, `kpi_row`, `pill`,
 `money`, `pct`). The goal is one consistent visual language across pages so the
-UI feels less like a stack of unrelated dashboards.
+UI feels less like a stack of unrelated dashboards and more like a professional
+trading terminal.
+
+Design system token reference (mirrored in .streamlit/config.toml):
+  --bg        #0a0d13   deep graphite canvas
+  --panel     #111620   primary surface (cards, containers)
+  --panel-2   #181d28   raised surface (hover, headers, nav active)
+  --panel-3   #1e2433   highest elevation (dropdowns, tooltips)
+  --line      rgba(255,255,255,0.06)   hairline border
+  --line-2    rgba(255,255,255,0.11)   medium border (hover, focus)
+  --line-3    rgba(255,255,255,0.18)   strong border (active)
+  --text      #eaecf0   primary off-white
+  --text-2    #8e97a8   secondary / labels
+  --text-3    #5a6373   tertiary / helpers / metadata
+  --teal      #37b8aa   primary accent (restrained, not neon)
+  --teal-dim  rgba(55,184,170,0.12)   teal background tint
+  --gold      #b89c6b   section accent rule only
+  --pos       #4db896   gains (teal-green, elegant)
+  --pos-bg    rgba(77,184,150,0.10)
+  --neg       #d07a7a   losses (muted terracotta, not alarming)
+  --neg-bg    rgba(208,122,122,0.10)
+  --warn      #c29445   warnings / amber
+  --warn-bg   rgba(194,148,69,0.10)
+  --info      #5b92d1   informational / blue
+  --info-bg   rgba(91,146,209,0.10)
 """
 from __future__ import annotations
 
@@ -15,11 +39,8 @@ import streamlit as st
 
 
 # ── Market sessions ──────────────────────────────────────────────────────────
-# (label, open, close, tz). Kept in sync with app/config.py defaults — the
-# backend risk engine is the authority that actually gates orders; this is the
-# at-a-glance display so you know whether a market is tradeable right now.
 _SESSIONS = [
-    ("US",    time(9, 30), time(16, 0), "America/New_York"),
+    ("US",    time(9, 30), time(16, 0),  "America/New_York"),
     ("India", time(9, 15), time(15, 30), "Asia/Kolkata"),
 ]
 
@@ -32,11 +53,7 @@ def _session_status(open_t: time, close_t: time, tz_name: str) -> tuple[bool, st
 
 
 def market_status_bar() -> None:
-    """Render a compact OPEN/CLOSED line for the US and India sessions.
-
-    Surfaces both clocks so a Zerodha (₹, IST) order isn't a surprise when the
-    NSE is shut. Display-only — order gating lives in the risk engine.
-    """
+    """Compact OPEN/CLOSED clock bar for US and India sessions."""
     bits = []
     for label, open_t, close_t, tz_name in _SESSIONS:
         is_open, clock = _session_status(open_t, close_t, tz_name)
@@ -46,91 +63,125 @@ def market_status_bar() -> None:
     st.caption("&nbsp;&nbsp;|&nbsp;&nbsp;".join(bits), unsafe_allow_html=True)
 
 
-# ── CSS overrides — "institutional terminal" design system ─────────────────────
-# One cohesive premium dark theme. Strategy:
-#  - All colour decisions live in CSS custom properties (:root) so the palette is
-#    tunable in one place and reused by the pill/section helpers below.
-#  - Palette: deep graphite background, layered slate panels, soft off-white text,
-#    muted warm-grey secondary text, restrained brushed-teal primary accent, and a
-#    very subtle brushed-gold reserved for the section accent rule only.
-#  - Positive = elegant teal-green, Negative = muted (not saturated) red.
-#  - Native Streamlit widgets (buttons, selects, sidebar, tabs, banners, tables,
-#    progress) are retargeted by their data-testid / baseweb hooks so nothing
-#    reads as a default admin dashboard. Functionality is untouched — this is
-#    purely presentational.
-#
-# Token reference (mirrored in .streamlit/config.toml for native widgets):
-#   --bg        #0e1117  app background (graphite, not black)
-#   --panel     #161a22  card / surface
-#   --panel-2   #1c212c  raised surface (hover, headers)
-#   --line      hairline borders
-#   --text      #e6e8ec  primary
-#   --text-2    #9aa3b2  secondary / labels
-#   --text-3    #6b7382  tertiary / helper
-#   --teal      #3fb6a8  primary accent
-#   --gold      #c2a878  reserved highlight
-#   --pos / --neg        gains / losses
+# ── CSS — "institutional terminal" design system ──────────────────────────────
 _CSS = """
 <style>
-/* Inter — professional fintech sans. Falls back to the system stack offline. */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+/* ── Typeface ─────────────────────────────────────────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
+/* ── Design tokens ────────────────────────────────────────────────────── */
 :root {
-    --bg:       #0e1117;
-    --panel:    #161a22;
-    --panel-2:  #1c212c;
-    --line:     rgba(255,255,255,0.07);
-    --line-2:   rgba(255,255,255,0.12);
-    --text:     #e6e8ec;
-    --text-2:   #9aa3b2;
-    --text-3:   #6b7382;
-    --teal:     #3fb6a8;
-    --teal-dim: rgba(63,182,168,0.14);
-    --gold:     #c2a878;
-    --pos:      #5ec8a0;
-    --pos-bg:   rgba(94,200,160,0.12);
-    --neg:      #d98a8a;
-    --neg-bg:   rgba(217,138,138,0.12);
-    --font:     "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    --mono:     "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
-    --radius:   10px;
-    --shadow:   0 1px 2px rgba(0,0,0,0.35), 0 8px 24px rgba(0,0,0,0.22);
+    /* Canvas */
+    --bg:       #0a0d13;
+    --panel:    #111620;
+    --panel-2:  #181d28;
+    --panel-3:  #1e2433;
 
-    /* Spacing scale — 4px base ramp, used for all vertical rhythm. */
-    --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
-    --sp-5: 24px; --sp-6: 32px; --sp-7: 48px;
+    /* Borders */
+    --line:     rgba(255,255,255,0.06);
+    --line-2:   rgba(255,255,255,0.11);
+    --line-3:   rgba(255,255,255,0.20);
+
+    /* Text */
+    --text:     #eaecf0;
+    --text-2:   #8e97a8;
+    --text-3:   #5a6373;
+
+    /* Brand / accent */
+    --teal:     #37b8aa;
+    --teal-dim: rgba(55,184,170,0.12);
+    --teal-glow:rgba(55,184,170,0.22);
+    --gold:     #b89c6b;
+
+    /* Semantic */
+    --pos:      #4db896;
+    --pos-bg:   rgba(77,184,150,0.10);
+    --pos-bd:   rgba(77,184,150,0.28);
+    --neg:      #d07a7a;
+    --neg-bg:   rgba(208,122,122,0.10);
+    --neg-bd:   rgba(208,122,122,0.28);
+    --warn:     #c29445;
+    --warn-bg:  rgba(194,148,69,0.10);
+    --warn-bd:  rgba(194,148,69,0.28);
+    --info:     #5b92d1;
+    --info-bg:  rgba(91,146,209,0.10);
+    --info-bd:  rgba(91,146,209,0.28);
+
+    /* Typography */
+    --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --mono: "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+
+    /* Shape */
+    --radius:   8px;
+    --radius-lg:12px;
+    --radius-sm:5px;
+
+    /* Shadow / elevation */
+    --shadow-sm: 0 1px 3px rgba(0,0,0,0.40);
+    --shadow:    0 2px 8px rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.30);
+    --shadow-lg: 0 8px 32px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.30);
+
+    /* Spacing scale — 4 px base */
+    --sp-1: 4px;  --sp-2: 8px;   --sp-3: 12px;  --sp-4: 16px;
+    --sp-5: 24px; --sp-6: 32px;  --sp-7: 48px;  --sp-8: 64px;
 }
 
-/* Tabular-figures numerics: aligns columns without a code/mono look. */
-.stApp { font-feature-settings: "tnum" 0; }
-
-/* ── App canvas ──────────────────────────────────────────────────────── */
-.stApp { background: var(--bg); font-family: var(--font); }
+/* ── App canvas ────────────────────────────────────────────────────────── */
+.stApp {
+    background: var(--bg);
+    font-family: var(--font);
+    font-feature-settings: "tnum" 1;   /* tabular numerics everywhere */
+}
 section.main > div.block-container {
-    padding-top: var(--sp-6);
-    padding-bottom: var(--sp-7);
-    max-width: 1520px;
+    padding-top: var(--sp-5);
+    padding-bottom: var(--sp-8);
+    max-width: 1560px;
 }
-body, .stApp, .stMarkdown, p, span, label, div { color: var(--text); font-family: var(--font); }
-/* Body copy: generous line-height for readability. */
-.stMarkdown p, .stApp p { font-size: 0.9rem; line-height: 1.6; }
+body, .stApp, .stMarkdown, p, span, label, div {
+    color: var(--text);
+    font-family: var(--font);
+}
+.stMarkdown p, .stApp p {
+    font-size: 0.875rem;
+    line-height: 1.65;
+    color: var(--text-2);
+}
 
-/* ── Sidebar — slim premium nav rail ─────────────────────────────────── */
+/* ── Sidebar — premium dark nav rail ─────────────────────────────────── */
 section[data-testid="stSidebar"] {
-    background: #0b0e14;
+    background: #080b10;
     border-right: 1px solid var(--line);
+    min-width: 220px !important;
+    max-width: 240px !important;
 }
-section[data-testid="stSidebar"] .block-container { padding-top: 1.25rem; }
-/* Nav links: quiet by default, teal accent + raised surface on hover/active. */
+section[data-testid="stSidebar"] .block-container {
+    padding-top: 1rem;
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+}
+/* Logo / app name at top of sidebar */
+section[data-testid="stSidebar"] h1 {
+    font-size: 1rem !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.01em;
+    color: var(--text) !important;
+    margin-bottom: var(--sp-4) !important;
+    padding-bottom: var(--sp-3);
+    border-bottom: 1px solid var(--line);
+}
+/* Nav links */
 section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"] {
-    border-radius: 8px;
-    padding: var(--sp-1) var(--sp-3);
+    border-radius: var(--radius);
+    padding: 7px var(--sp-3);
     margin: 1px 0;
     color: var(--text-2);
-    font-size: 0.85rem;
+    font-size: 0.83rem;
     font-weight: 500;
-    letter-spacing: 0.005em;
-    transition: background 0.12s ease, color 0.12s ease;
+    letter-spacing: 0.01em;
+    transition: background 0.10s ease, color 0.10s ease;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
 }
 section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"]:hover {
     background: rgba(255,255,255,0.04);
@@ -138,243 +189,557 @@ section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"]:hover {
 }
 section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"][aria-current="page"] {
     background: var(--teal-dim);
-    color: var(--text);
-    box-shadow: inset 2px 0 0 var(--teal);
+    color: var(--teal);
+    font-weight: 600;
+    box-shadow: inset 3px 0 0 var(--teal);
 }
 
-/* ── Headings — strict 3-step hierarchy (H1 ≫ H2 > H3) ───────────────── */
+/* ── Headings — strict 3-step hierarchy ──────────────────────────────── */
 h1 {
+    font-size: 1.6rem;
     font-weight: 700;
-    letter-spacing: -0.02em;
-    font-size: 1.75rem;
+    letter-spacing: -0.025em;
     line-height: 1.15;
     margin: 0 0 var(--sp-1) 0;
-    color: #f3f5f8;
+    color: var(--text);
 }
 h2 {
+    font-size: 1.05rem;
     font-weight: 600;
-    letter-spacing: -0.005em;
-    font-size: 1.15rem;
-    line-height: 1.25;
+    letter-spacing: -0.01em;
+    line-height: 1.3;
     margin: var(--sp-6) 0 var(--sp-3) 0;
     color: var(--text);
     padding-left: var(--sp-2);
-    border-left: 2px solid var(--gold);   /* subtle brushed-gold section rule */
+    border-left: 2px solid var(--gold);
 }
 h3 {
+    font-size: 0.9rem;
     font-weight: 600;
-    font-size: 0.95rem;
     line-height: 1.3;
-    letter-spacing: 0;
+    letter-spacing: 0.005em;
     color: var(--text);
     margin: var(--sp-4) 0 var(--sp-2) 0;
 }
+h4 {
+    font-size: 0.82rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-3);
+    margin: var(--sp-3) 0 var(--sp-2) 0;
+}
 
-/* ── Metric / KPI cards — illuminated dark surfaces ──────────────────── */
+/* ── Page header shell (rendered by page_header() helper) ─────────────── */
+.tx-page-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--sp-4);
+    margin-bottom: var(--sp-2);
+    padding-bottom: var(--sp-3);
+    border-bottom: 1px solid var(--line);
+}
+.tx-page-title {
+    font-size: 1.55rem;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    color: var(--text);
+    line-height: 1.15;
+}
+.tx-page-sub {
+    font-size: 0.8rem;
+    color: var(--text-3);
+    margin-top: 3px;
+    line-height: 1.4;
+}
+
+/* ── Metric / KPI cards ──────────────────────────────────────────────── */
 div[data-testid="stMetric"] {
-    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    background: var(--panel);
     border: 1px solid var(--line);
     border-radius: var(--radius);
     padding: var(--sp-3) var(--sp-4);
-    box-shadow: var(--shadow);
-    transition: border-color 0.15s ease;
+    box-shadow: var(--shadow-sm);
+    transition: border-color 0.12s ease, box-shadow 0.12s ease;
+    position: relative;
+    overflow: hidden;
 }
-div[data-testid="stMetric"]:hover { border-color: var(--line-2); }
+div[data-testid="stMetric"]::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent);
+}
+div[data-testid="stMetric"]:hover {
+    border-color: var(--line-2);
+    box-shadow: var(--shadow);
+}
 div[data-testid="stMetricLabel"] {
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-2);
+    letter-spacing: 0.09em;
+    color: var(--text-3);
     font-weight: 600;
     margin-bottom: var(--sp-1);
 }
-/* Tabular figures keep multi-card rows vertically aligned without a mono look. */
 div[data-testid="stMetricValue"] {
     font-family: var(--font);
     font-variant-numeric: tabular-nums;
-    font-size: 1.45rem;
+    font-size: 1.5rem;
     font-weight: 650;
     line-height: 1.1;
-    letter-spacing: -0.01em;
-    color: #f3f5f8;
+    letter-spacing: -0.015em;
+    color: var(--text);
 }
 div[data-testid="stMetricDelta"] {
-    font-family: var(--font);
     font-variant-numeric: tabular-nums;
-    font-size: 0.78rem;
+    font-size: 0.75rem;
+    margin-top: var(--sp-1);
 }
 
 /* ── Dividers ────────────────────────────────────────────────────────── */
-hr { margin: var(--sp-5) 0 var(--sp-4) 0; border: 0; border-top: 1px solid var(--line); }
+hr {
+    margin: var(--sp-5) 0 var(--sp-4) 0;
+    border: 0;
+    border-top: 1px solid var(--line);
+}
 
-/* ── Tabs — quiet, terminal-like ─────────────────────────────────────── */
+/* ── Tabs — polished terminal style ──────────────────────────────────── */
 div[data-baseweb="tab-list"] {
     border-bottom: 1px solid var(--line);
-    gap: 0.25rem;
+    gap: 0;
+    background: transparent;
 }
 button[data-baseweb="tab"] {
-    font-size: 0.9rem;
-    letter-spacing: 0.02em;
-    padding: 0.45rem 1rem;
-    color: var(--text-2);
+    font-family: var(--font);
+    font-size: 0.85rem;
+    font-weight: 500;
+    letter-spacing: 0.015em;
+    padding: 0.55rem 1.1rem;
+    color: var(--text-3);
+    background: transparent;
+    border-bottom: 2px solid transparent;
+    transition: color 0.12s ease;
 }
-button[data-baseweb="tab"]:hover { color: var(--text); }
-button[data-baseweb="tab"][aria-selected="true"] { color: var(--text); font-weight: 550; }
-div[data-baseweb="tab-highlight"] { background: var(--teal); height: 2px; }
+button[data-baseweb="tab"]:hover { color: var(--text-2); }
+button[data-baseweb="tab"][aria-selected="true"] {
+    color: var(--text);
+    font-weight: 600;
+}
+div[data-baseweb="tab-highlight"] {
+    background: var(--teal);
+    height: 2px;
+    border-radius: 2px 2px 0 0;
+}
+div[data-baseweb="tab-panel"] { padding-top: var(--sp-4); }
 
-/* ── Buttons — restrained, precise, consistent height ────────────────── */
+/* ── Buttons ─────────────────────────────────────────────────────────── */
 div[data-testid="stButton"] > button,
 div[data-testid="stLinkButton"] > a,
 div[data-testid="stFormSubmitButton"] > button {
-    border-radius: 8px;
+    border-radius: var(--radius);
     border: 1px solid var(--line-2);
     background: var(--panel-2);
-    color: var(--text);
+    color: var(--text-2);
+    font-family: var(--font);
     font-weight: 500;
-    font-size: 0.86rem;
-    letter-spacing: 0.01em;
-    min-height: 38px;                 /* aligns with selects/inputs in filter rows */
-    transition: background 0.12s ease, border-color 0.12s ease;
+    font-size: 0.83rem;
+    letter-spacing: 0.015em;
+    min-height: 36px;
+    padding: 0 var(--sp-4);
+    transition: background 0.10s ease, border-color 0.10s ease, color 0.10s ease;
 }
 div[data-testid="stButton"] > button:hover,
 div[data-testid="stLinkButton"] > a:hover,
 div[data-testid="stFormSubmitButton"] > button:hover {
-    background: #232936;
-    border-color: var(--teal);
-    color: #fff;
+    background: var(--panel-3);
+    border-color: var(--line-3);
+    color: var(--text);
 }
-/* Primary buttons: a calm filled teal, no glow. */
 div[data-testid="stButton"] > button[kind="primary"],
 div[data-testid="stFormSubmitButton"] > button[kind="primary"] {
     background: var(--teal);
     border-color: var(--teal);
-    color: #07110f;
+    color: #061210;
     font-weight: 600;
 }
 div[data-testid="stButton"] > button[kind="primary"]:hover,
 div[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover {
-    background: #4cc7b8; border-color: #4cc7b8; color: #06100e;
+    background: #43ccbc;
+    border-color: #43ccbc;
+}
+/* Destructive / danger button — opt-in via class on the markdown container */
+.tx-btn-danger div[data-testid="stButton"] > button {
+    border-color: var(--neg-bd);
+    color: var(--neg);
+}
+.tx-btn-danger div[data-testid="stButton"] > button:hover {
+    background: var(--neg-bg);
 }
 
-/* ── Inputs / selects — consistent height for scannable filter rows ──── */
+/* ── Inputs / selects ────────────────────────────────────────────────── */
 div[data-baseweb="select"] > div,
 div[data-baseweb="input"] > div,
 div[data-testid="stNumberInput"] input,
-div[data-testid="stTextInput"] input {
+div[data-testid="stTextInput"] input,
+div[data-testid="stTextArea"] textarea {
     background: var(--panel) !important;
     border-color: var(--line-2) !important;
-    border-radius: 8px !important;
-    min-height: 38px;
-    font-size: 0.86rem !important;
+    border-radius: var(--radius) !important;
+    min-height: 36px;
+    font-family: var(--font) !important;
+    font-size: 0.85rem !important;
+    color: var(--text) !important;
+    transition: border-color 0.10s ease;
 }
 div[data-baseweb="select"] > div:focus-within,
-div[data-baseweb="input"] > div:focus-within { border-color: var(--teal) !important; }
-/* Widget labels: quiet secondary text, tight to their control. */
-div[data-testid="stWidgetLabel"] label, label[data-testid="stWidgetLabel"] {
-    font-size: 0.8rem;
+div[data-baseweb="input"] > div:focus-within,
+div[data-testid="stNumberInput"] input:focus,
+div[data-testid="stTextInput"] input:focus,
+div[data-testid="stTextArea"] textarea:focus {
+    border-color: var(--teal) !important;
+    box-shadow: 0 0 0 2px var(--teal-glow) !important;
+    outline: none;
+}
+/* Widget labels */
+div[data-testid="stWidgetLabel"] label,
+label[data-testid="stWidgetLabel"] {
+    font-size: 0.77rem;
     font-weight: 500;
-    color: var(--text-2);
+    color: var(--text-3);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
     margin-bottom: var(--sp-1);
 }
+/* Select dropdown options */
+ul[data-testid="stSelectboxVirtualDropdown"] li,
+div[data-baseweb="popover"] li {
+    font-size: 0.85rem;
+    color: var(--text);
+}
 
-/* ── Radio / horizontal toggles ──────────────────────────────────────── */
-div[role="radiogroup"] label { color: var(--text-2); font-size: 0.86rem; }
+/* ── Radio / toggles ─────────────────────────────────────────────────── */
+div[role="radiogroup"] label {
+    color: var(--text-2);
+    font-size: 0.84rem;
+    font-weight: 500;
+}
+div[data-testid="stRadio"] > div > div:hover label { color: var(--text); }
 
-/* ── Tables — aligned numerics, header hierarchy, subtle hover ───────── */
+/* ── Tables — premium data grid ──────────────────────────────────────── */
 div[data-testid="stDataFrame"] {
     border: 1px solid var(--line);
     border-radius: var(--radius);
     overflow: hidden;
-    margin: var(--sp-4) 0 var(--sp-5) 0;   /* breathing room above & below */
+    margin: var(--sp-3) 0 var(--sp-5) 0;
+    box-shadow: var(--shadow-sm);
 }
 div[data-testid="stDataFrame"] td,
 div[data-testid="stDataFrame"] th {
-    font-family: var(--font);
-    font-variant-numeric: tabular-nums;     /* numeric columns stay aligned */
-    font-size: 0.84rem;
+    font-family: var(--font) !important;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.82rem;
+    line-height: 1.4;
 }
 div[data-testid="stDataFrame"] th {
     text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-size: 0.7rem;
-    color: var(--text-2);
-    background: var(--panel-2);
-    font-weight: 600;
+    letter-spacing: 0.07em;
+    font-size: 0.67rem;
+    color: var(--text-3) !important;
+    background: var(--panel-2) !important;
+    font-weight: 700;
+    border-bottom: 1px solid var(--line-2) !important;
 }
-div[data-testid="stDataFrame"] [role="row"]:hover { background: rgba(255,255,255,0.03); }
+div[data-testid="stDataFrame"] td { color: var(--text); }
+div[data-testid="stDataFrame"] [role="row"]:hover { background: rgba(255,255,255,0.025) !important; }
+/* Zebra striping: subtle alternate rows */
+div[data-testid="stDataFrame"] [role="row"]:nth-child(even) {
+    background: rgba(255,255,255,0.012);
+}
 
 /* ── Progress bars (risk gauges) ─────────────────────────────────────── */
-div[data-testid="stProgress"] > div > div > div { background: var(--teal); }
+div[data-testid="stProgress"] > div > div > div {
+    background: linear-gradient(90deg, var(--teal), #2aa89c);
+    border-radius: 4px;
+}
+div[data-testid="stProgress"] > div > div {
+    background: var(--panel-2);
+    border-radius: 4px;
+}
 
-/* ── Banners / notices — also the polished empty-state surface ───────── */
+/* ── Alert / banner / notice panels ──────────────────────────────────── */
 div[data-testid="stAlert"] {
     border-radius: var(--radius);
-    border: 1px solid var(--line-2);
-    background: var(--panel);
+    border-width: 1px;
+    border-style: solid;
+    padding: var(--sp-3) var(--sp-4);
+    font-size: 0.84rem;
+}
+/* Info */
+div[data-testid="stAlert"][data-baseweb="notification"][kind="info"],
+div[data-testid="stAlert"] .stAlert-info {
+    background: var(--info-bg) !important;
+    border-color: var(--info-bd) !important;
+    color: var(--info) !important;
+}
+/* Warning */
+div[data-testid="stAlert"][data-baseweb="notification"][kind="warning"],
+div[data-testid="stAlert"] .stAlert-warning {
+    background: var(--warn-bg) !important;
+    border-color: var(--warn-bd) !important;
+}
+/* Error */
+div[data-testid="stAlert"][data-baseweb="notification"][kind="error"],
+div[data-testid="stAlert"] .stAlert-error {
+    background: var(--neg-bg) !important;
+    border-color: var(--neg-bd) !important;
+}
+/* Success */
+div[data-testid="stAlert"][data-baseweb="notification"][kind="success"],
+div[data-testid="stAlert"] .stAlert-success {
+    background: var(--pos-bg) !important;
+    border-color: var(--pos-bd) !important;
+}
+div[data-testid="stAlert"] p {
+    font-size: 0.84rem;
+    line-height: 1.5;
+}
+
+/* ── Expanders ───────────────────────────────────────────────────────── */
+div[data-testid="stExpander"] {
+    border: 1px solid var(--line) !important;
+    border-radius: var(--radius) !important;
+    background: var(--panel) !important;
+    margin-bottom: var(--sp-2);
+}
+div[data-testid="stExpander"] summary {
+    font-size: 0.84rem;
+    font-weight: 500;
+    color: var(--text-2);
     padding: var(--sp-3) var(--sp-4);
 }
-div[data-testid="stAlert"] p { font-size: 0.85rem; line-height: 1.5; color: var(--text-2); }
+div[data-testid="stExpander"] summary:hover { color: var(--text); }
+div[data-testid="stExpander"] > div[data-testid="stExpanderDetails"] {
+    padding: 0 var(--sp-4) var(--sp-3) var(--sp-4);
+    border-top: 1px solid var(--line);
+}
 
-/* ── Pills (status badges built via st.markdown) ─────────────────────── */
+/* ── Containers with border ──────────────────────────────────────────── */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    border: 1px solid var(--line) !important;
+    border-radius: var(--radius) !important;
+    background: var(--panel) !important;
+    padding: var(--sp-4) !important;
+    box-shadow: var(--shadow-sm);
+}
+
+/* ── Checkboxes / toggles ─────────────────────────────────────────────  */
+div[data-testid="stCheckbox"] label,
+div[data-testid="stToggle"] label {
+    font-size: 0.84rem;
+    color: var(--text-2);
+    font-weight: 500;
+}
+
+/* ── Slider ───────────────────────────────────────────────────────────── */
+div[data-testid="stSlider"] > div > div > div > div {
+    background: var(--teal) !important;
+}
+
+/* ── Spinner ─────────────────────────────────────────────────────────── */
+div[data-testid="stSpinner"] > div { border-top-color: var(--teal) !important; }
+
+/* ── Pills (status badges) ───────────────────────────────────────────── */
 .tx-pill {
     display: inline-block;
-    padding: var(--sp-1) var(--sp-2);
-    border-radius: 6px;          /* squared, terminal-credible — not bubbly */
-    font-size: 0.7rem;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    line-height: 1.4;
-    border: 1px solid transparent;
+    padding: 2px var(--sp-2);
+    border-radius: var(--radius-sm);
     font-family: var(--font);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    line-height: 1.5;
+    border: 1px solid transparent;
+    white-space: nowrap;
 }
-.tx-pill.green { background: var(--pos-bg);             color: var(--pos);  border-color: rgba(94,200,160,0.3); }
-.tx-pill.red   { background: var(--neg-bg);             color: var(--neg);  border-color: rgba(217,138,138,0.3); }
-.tx-pill.amber { background: rgba(194,168,120,0.14);    color: var(--gold); border-color: rgba(194,168,120,0.34); }
-.tx-pill.grey  { background: rgba(154,163,178,0.10);    color: var(--text-2); border-color: rgba(154,163,178,0.24); }
-.tx-pill.blue  { background: var(--teal-dim);           color: var(--teal); border-color: rgba(63,182,168,0.32); }
+.tx-pill.green  { background: var(--pos-bg);  color: var(--pos);  border-color: var(--pos-bd); }
+.tx-pill.red    { background: var(--neg-bg);  color: var(--neg);  border-color: var(--neg-bd); }
+.tx-pill.amber  { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-bd); }
+.tx-pill.grey   { background: rgba(90,99,115,0.15); color: var(--text-2); border-color: rgba(90,99,115,0.3); }
+.tx-pill.blue   { background: var(--info-bg); color: var(--info); border-color: var(--info-bd); }
+.tx-pill.teal   { background: var(--teal-dim); color: var(--teal); border-color: rgba(55,184,170,0.3); }
 
-/* ── Status strip (top command bar) ──────────────────────────────────── */
-/* Sits between the page title and the first section — token margins set the
-   title→bar→content rhythm. */
+/* ── Stat band (top command bar) ─────────────────────────────────────── */
+.tx-statband {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sp-5);
+    padding: var(--sp-3) var(--sp-5);
+    margin: var(--sp-3) 0 var(--sp-4) 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+}
+.tx-stat { display: inline-flex; align-items: center; gap: var(--sp-2); }
+.tx-stat-label {
+    color: var(--text-3);
+    font-size: 0.64rem;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    font-weight: 700;
+}
+
+/* Legacy: keep tx-statusbar as alias */
 .tx-statusbar {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: var(--sp-5);
-    padding: var(--sp-3) var(--sp-4);
-    margin: var(--sp-4) 0 var(--sp-2) 0;
-    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    padding: var(--sp-3) var(--sp-5);
+    margin: var(--sp-3) 0 var(--sp-4) 0;
+    background: var(--panel);
     border: 1px solid var(--line);
     border-radius: var(--radius);
-    box-shadow: var(--shadow);
+    box-shadow: var(--shadow-sm);
 }
-.tx-stat { display: inline-flex; align-items: center; gap: var(--sp-2); }
-.tx-stat-label { color: var(--text-3); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
 
-/* ── Section subtitles (helper text under section()) ─────────────────── */
+/* ── Section subtitles ───────────────────────────────────────────────── */
 .tx-subtle {
-    color: var(--text-2);
-    font-size: 0.8rem;
+    color: var(--text-3);
+    font-size: 0.78rem;
     line-height: 1.5;
     margin: calc(-1 * var(--sp-1)) 0 var(--sp-3) var(--sp-2);
 }
 
-/* ── Captions / help text — the micro/meta tier ──────────────────────── */
-div[data-testid="stCaptionContainer"], .stCaption {
+/* ── Numeric display class — larger tabular numbers ─────────────────── */
+.tx-num {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+    letter-spacing: -0.01em;
+}
+
+/* ── KPI mini-label ──────────────────────────────────────────────────── */
+.tx-kpi-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    font-weight: 700;
     color: var(--text-3);
-    font-size: 0.78rem;
+    margin-bottom: 2px;
+}
+.tx-kpi-value {
+    font-size: 1.45rem;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    line-height: 1.1;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+.tx-kpi-delta {
+    font-size: 0.73rem;
+    font-variant-numeric: tabular-nums;
+    margin-top: 2px;
+}
+.tx-kpi-delta.pos { color: var(--pos); }
+.tx-kpi-delta.neg { color: var(--neg); }
+.tx-kpi-delta.muted { color: var(--text-3); }
+
+/* ── Result / info card ──────────────────────────────────────────────── */
+.tx-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: var(--sp-4) var(--sp-5);
+    box-shadow: var(--shadow-sm);
+    margin-bottom: var(--sp-4);
+}
+.tx-card-title {
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-3);
+    margin-bottom: var(--sp-2);
+    padding-bottom: var(--sp-2);
+    border-bottom: 1px solid var(--line);
+}
+
+/* ── Empty state ─────────────────────────────────────────────────────── */
+.tx-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: var(--sp-8) var(--sp-5);
+    text-align: center;
+    background: var(--panel);
+    border: 1px dashed var(--line-2);
+    border-radius: var(--radius-lg);
+    margin: var(--sp-4) 0;
+}
+.tx-empty-icon { font-size: 2rem; margin-bottom: var(--sp-3); opacity: 0.5; }
+.tx-empty-title { font-size: 0.92rem; font-weight: 600; color: var(--text-2); margin-bottom: var(--sp-2); }
+.tx-empty-body  { font-size: 0.8rem; color: var(--text-3); max-width: 340px; line-height: 1.55; }
+
+/* ── Filter toolbar ─────────────────────────────────────────────────── */
+.tx-filterbar {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    padding: var(--sp-3) var(--sp-4);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    margin-bottom: var(--sp-4);
+    flex-wrap: wrap;
+}
+
+/* ── Captions / meta text ────────────────────────────────────────────── */
+div[data-testid="stCaptionContainer"],
+.stCaption,
+.element-container small {
+    color: var(--text-3);
+    font-size: 0.76rem;
     line-height: 1.5;
+}
+
+/* ── Code blocks ─────────────────────────────────────────────────────── */
+code, pre {
+    font-family: var(--mono) !important;
+    font-size: 0.82rem;
+    background: var(--panel-2);
+    border-radius: var(--radius-sm);
+}
+
+/* ── Inline colored text helpers ─────────────────────────────────────── */
+.tx-pos  { color: var(--pos)  !important; }
+.tx-neg  { color: var(--neg)  !important; }
+.tx-warn { color: var(--warn) !important; }
+.tx-info { color: var(--info) !important; }
+.tx-muted{ color: var(--text-3) !important; }
+.tx-accent{ color: var(--teal) !important; }
+
+/* ── Market clock bar (compact status line) ──────────────────────────── */
+.tx-clock {
+    display: inline-flex;
+    gap: var(--sp-4);
+    font-size: 0.76rem;
+    color: var(--text-3);
+    padding: var(--sp-1) 0 var(--sp-3) 0;
 }
 </style>
 """
 
 
 def apply_theme(page_title: str, *, page_icon: str | None = None) -> None:
-    """Set page config and inject the dashboard's CSS.
+    """Set page config and inject the dashboard CSS.
 
-    Call once per page, before any other Streamlit output. `page_icon` is
-    optional — when omitted, the browser tab gets no emoji.
+    Call once per page, before any other Streamlit output.
     """
     st.set_page_config(
         page_title=page_title,
@@ -389,35 +754,30 @@ def apply_theme(page_title: str, *, page_icon: str | None = None) -> None:
 
 
 def section(title: str, subtitle: str | None = None, *, level: int = 2) -> None:
-    """Render a section header with optional subtitle.
-
-    Replaces the `st.subheader(...) + st.caption(...)` pair that's repeated
-    across every page, and gives subtitles a quieter look than st.caption.
-    """
-    if level == 2:
-        st.markdown(f"## {title}")
-    elif level == 3:
-        st.markdown(f"### {title}")
-    else:
-        st.markdown(f"#### {title}")
+    """Render a section header with optional subtitle."""
+    tag = {2: "##", 3: "###", 4: "####"}.get(level, "##")
+    st.markdown(f"{tag} {title}")
     if subtitle:
         st.markdown(f"<div class='tx-subtle'>{subtitle}</div>", unsafe_allow_html=True)
 
 
 def divider() -> None:
-    """Quiet hairline divider — replaces st.divider() which is too heavy."""
+    """Quiet hairline divider."""
     st.markdown("<hr/>", unsafe_allow_html=True)
 
 
-def kpi_row(items: Sequence[tuple[str, str]] | Sequence[tuple[str, str, str | None]]) -> None:
-    """Render a row of KPI metrics from `(label, value)` or `(label, value, delta)` tuples.
+def kpi_row(
+    items: Sequence[tuple[str, str]] | Sequence[tuple[str, str, str | None]],
+    *,
+    gap: str = "small",
+) -> None:
+    """Render a row of KPI metric cards.
 
-    Picks `len(items)` columns automatically. Use this instead of hand-rolled
-    `c1, c2, c3 = st.columns(3); c1.metric(...)` blocks.
+    Accepts ``(label, value)`` or ``(label, value, delta)`` tuples.
     """
     if not items:
         return
-    cols = st.columns(len(items))
+    cols = st.columns(len(items), gap=gap)
     for col, item in zip(cols, items):
         if len(item) == 2:
             label, value = item
@@ -428,25 +788,15 @@ def kpi_row(items: Sequence[tuple[str, str]] | Sequence[tuple[str, str, str | No
 
 
 def pill(text: str, color: str = "grey") -> str:
-    """Return an HTML pill — use with `st.markdown(..., unsafe_allow_html=True)`.
+    """Return an HTML status pill for use with ``st.markdown(..., unsafe_allow_html=True)``.
 
-    Colors: green, red, amber, grey, blue. Use these consistently:
-        green = healthy / OK / on
-        red   = error / kill switch active / loss
-        amber = warning / approaching limit
-        blue  = informational / inactive-but-not-bad
-        grey  = neutral / off / disabled
+    Colors: green, red, amber, grey, blue, teal.
     """
     return f"<span class='tx-pill {color}'>{text}</span>"
 
 
 def status_row(items: Iterable[tuple[str, str, str]]) -> None:
-    """Render the top command/status bar from `(label, pill_text, color)` tuples.
-
-    Use for the top strip on Home / status bars: API up, market open, etc.
-    Renders as a single elevated panel so it reads as a command bar rather than
-    a loose line of text.
-    """
+    """Render the top stat/status band from ``(label, text, color)`` tuples."""
     parts = []
     for label, text, color in items:
         parts.append(
@@ -455,16 +805,44 @@ def status_row(items: Iterable[tuple[str, str, str]]) -> None:
             f"</span>"
         )
     st.markdown(
-        "<div class='tx-statusbar'>" + "".join(parts) + "</div>",
+        "<div class='tx-statband'>" + "".join(parts) + "</div>",
         unsafe_allow_html=True,
     )
 
 
+def empty_state(
+    title: str,
+    body: str = "",
+    icon: str = "📭",
+) -> None:
+    """Render a centered empty-state panel."""
+    st.markdown(
+        f"<div class='tx-empty'>"
+        f"<div class='tx-empty-icon'>{icon}</div>"
+        f"<div class='tx-empty-title'>{title}</div>"
+        f"<div class='tx-empty-body'>{body}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def card(title: str = "", *, border: bool = True) -> "st.delta_generator.DeltaGenerator":  # type: ignore[name-defined]
+    """Return a bordered container with an optional card-title label.
+
+    Usage::
+        with card("Open Positions"):
+            st.dataframe(df)
+    """
+    if title:
+        st.markdown(
+            f"<div class='tx-card-title'>{title}</div>",
+            unsafe_allow_html=True,
+        )
+    return st.container(border=border)
+
+
 # ── Formatters ───────────────────────────────────────────────────────────────
 
-
-# Broker → currency symbol. Zerodha trades NSE/BSE in rupees; everything else
-# is a US-dollar broker. Used so India positions don't render as "$".
 _BROKER_CURRENCY = {
     "zerodha": "₹",
     "schwab": "$",
@@ -488,28 +866,20 @@ def money(
     dash: str = "—",
     currency: str = "$",
 ) -> str:
-    """Format a monetary value. `None` or NaN → em-dash.
-
-    `currency` is the glyph to prefix (default '$'). Pass currency_symbol(broker)
-    for India (₹) vs US ($) values.
-    """
+    """Format a monetary value. ``None`` or NaN → em-dash."""
     if value is None:
         return dash
     try:
         v = float(value)
     except (TypeError, ValueError):
         return dash
-    if v != v:  # NaN
+    if v != v:
         return dash
     return f"{currency}{v:,.{decimals}f}"
 
 
 def pct(value: float | None, *, decimals: int = 1, dash: str = "—") -> str:
-    """Format a percentage. Accepts either fractional (0.15) or whole (15.0).
-
-    Heuristic: if abs(value) <= 1.5, treat as fraction; otherwise treat as
-    already-percentage. Most of our APIs return fractions, but some return %.
-    """
+    """Format a percentage. Accepts fractional (0.15) or whole (15.0)."""
     if value is None:
         return dash
     try:
@@ -524,7 +894,7 @@ def pct(value: float | None, *, decimals: int = 1, dash: str = "—") -> str:
 
 
 def num(value: float | int | None, *, decimals: int = 2, dash: str = "—") -> str:
-    """Plain numeric formatter. `None` or NaN → em-dash."""
+    """Plain numeric formatter. ``None`` or NaN → em-dash."""
     if value is None:
         return dash
     try:

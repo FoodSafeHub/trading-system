@@ -3,13 +3,13 @@ from __future__ import annotations
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
 from _theme import apply_theme, section, divider, kpi_row, pill, money
+from _components import page_header
 
 import pandas as pd
 import streamlit as st
 
 apply_theme("Risk & Safety")
-st.title("Risk & Safety")
-st.caption("Kill switch, daily limits, and live-trading gates. Check this page before going live.")
+page_header("Risk & Safety", subtitle="Kill switch, daily limits, and live-trading gates — check before going live.")
 
 # ── Status snapshot (single load, reused across the page) ────────────────
 try:

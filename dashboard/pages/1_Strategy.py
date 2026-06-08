@@ -6,10 +6,11 @@ import pandas as pd
 import streamlit as st
 import api
 from _theme import apply_theme, market_status_bar
+from _components import page_header
 from _broker_routing import render_broker_routing_toggle
 
 apply_theme("Strategy & Signals")
-st.title("Strategy & Signals")
+page_header("Strategy & Signals", subtitle="Active symbol assignments, consensus signals, broker routing")
 
 # Live US + India session clocks. A Zerodha (₹) symbol only trades when the
 # India market is open; this makes that obvious at a glance.

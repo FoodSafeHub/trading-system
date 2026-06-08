@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
 from _theme import apply_theme
+from _components import page_header, stat_band, empty_state
 import _charts as charts
 
 import plotly.graph_objects as go
@@ -14,8 +15,10 @@ import pandas as pd
 from app.services.recommendations.winner import score_strategies
 
 apply_theme("Backtest")
-st.title("Strategy Backtester")
-st.caption("Simulates how a strategy would have performed on historical data — no real money involved.")
+page_header(
+    "Strategy Backtester",
+    subtitle="Simulates how a strategy would have performed on historical data — no real money involved.",
+)
 
 # ── Broker route options (per-assignment override at Promote time) ─────────────
 # "default" defers to the global active_broker / trade_routing toggle; the
