@@ -418,6 +418,7 @@ def perplexity_save_suitability(config: dict):
 def daytrading_scanner_watchlist(
     max_symbols: int = 20,
     universe: str = "",
+    market: str = "us",
     market_state: str = "",
     min_price: float = 5.0,
     max_price: float | None = None,
@@ -432,6 +433,7 @@ def daytrading_scanner_watchlist(
     params: dict = {
         "max_symbols": max_symbols,
         "universe": universe,
+        "market": market,
         "market_state": market_state,
         "min_price": min_price,
         "min_avg_volume": min_avg_volume,
@@ -445,7 +447,6 @@ def daytrading_scanner_watchlist(
     if universe_max_symbols is not None:
         params["universe_max_symbols"] = universe_max_symbols
     if run_native_precheck is not None:
-        # FastAPI's bool query parser accepts "true"/"false" strings
         params["run_native_precheck"] = str(run_native_precheck).lower()
     if precheck_top_k is not None:
         params["precheck_top_k"] = precheck_top_k

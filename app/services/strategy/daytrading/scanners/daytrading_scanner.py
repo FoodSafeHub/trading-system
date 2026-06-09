@@ -36,6 +36,7 @@ from app.services.strategy.daytrading.market_open import ET, now_et
 from app.services.strategy.daytrading.scanners.universe import (
     load_float_cache,
     load_universe,
+    load_india_universe,
     save_float_cache,
 )
 
@@ -58,6 +59,12 @@ class DayTradingScannerConfig:
                                         # on liquid large-caps
     min_atr_pct: float = 1.0            # too dead to trade intraday
     max_atr_pct: float = 8.0            # too wild (blow-up risk)
+
+    # ── Market selection ──────────────────────────────────────────────────────
+    # "us"     → NASDAQ/NYSE universe, yfinance + TwelveData for data
+    # "india"  → Nifty 200 universe, Upstox for all data
+    # "both"   → runs US then India and merges results
+    market: str = "us"
 
     # ── Scan execution ────────────────────────────────────────────────────────
     max_workers: int = 32               # parallel workers for Phase 2 deep fetch
@@ -205,18 +212,20 @@ class DayTradingScanner:
     ):
         self.config = config or DayTradingScannerConfig()
         if universe is None:
-            # Default: full US-listed common-stock universe (~5,800 names),
-            # cached daily by the universe loader.
-            uni = load_universe()
+            market = self.config.market.lower()
+            if market == "india":
+                uni = load_india_universe()
+            elif market == "both":
+                uni = load_universe() + load_india_universe()
+            else:
+                uni = load_universe()
             if self.config.universe_max_symbols:
                 uni = uni[: self.config.universe_max_symbols]
             self._universe = uni
         else:
             self._universe = [s.upper() for s in universe]
         self._brain = brain
-        self._cache = cache  # BarCache instance, or None → fetch direct
-        # Float lookup populated on first scan of the day (lazy — only the
-        # symbols that survive cheap filters need a float lookup).
+        self._cache = cache
         self._float_cache: dict[str, float] = load_float_cache()
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -229,10 +238,12 @@ class DayTradingScanner:
     def invalidate_bulk_cache(cls) -> None:
         """Force the next scan to re-download all data.
         Call this when the user changes filter presets mid-session."""
-        cls._daily_cache      = {}
-        cls._daily_cache_date = None
-        cls._pm_vol_cache      = {}
-        cls._pm_vol_cache_date = None
+        cls._daily_cache            = {}
+        cls._daily_cache_date       = None
+        cls._india_daily_cache      = {}
+        cls._india_daily_cache_date = None
+        cls._pm_vol_cache           = {}
+        cls._pm_vol_cache_date      = None
         logger.info("Scanner caches invalidated — next scan will re-download everything")
 
     def fetch_metrics(self, symbol: str) -> SymbolScanMetrics:
@@ -413,13 +424,15 @@ class DayTradingScanner:
             metrics=metrics,
         )
 
-    # ── Daily OHLCV cache — stored per symbol, refreshed once per calendar day ──
-    # Maps symbol → full daily DataFrame (35d OHLCV). Built during Phase 1 so
-    # Phase 2 never re-downloads daily bars for any survivor.
+    # ── Daily OHLCV cache (US) ── symbol → DataFrame, refreshed daily ───────
     _daily_cache: dict[str, pd.DataFrame] = {}
     _daily_cache_date: date | None = None
 
-    # ── Pre-market volume cache — maps symbol → float, built in Phase 2a ──────
+    # ── Daily OHLCV cache (India / Upstox) ───────────────────────────────────
+    _india_daily_cache: dict[str, pd.DataFrame] = {}
+    _india_daily_cache_date: date | None = None
+
+    # ── Pre-market / opening-activity volume cache ────────────────────────────
     _pm_vol_cache: dict[str, float] = {}
     _pm_vol_cache_date: date | None = None
 
@@ -447,21 +460,47 @@ class DayTradingScanner:
         """
         universe = self.load_universe()
         cfg = self.config
-        logger.info("Scanner starting: %d symbols in universe", len(universe))
+        market = cfg.market.lower()
+        logger.info("Scanner starting: %d symbols, market=%s", len(universe), market)
+
+        from app.services.markets import is_india_symbol as _is_india
+        india_syms = [s for s in universe if _is_india(s)]
+        us_syms    = [s for s in universe if not _is_india(s)]
 
         # ── Phase 1: bulk OHLCV download + pre-filter ─────────────────────────
-        survivors, daily_data = self._bulk_download_and_filter(universe)
-        logger.info(
-            "Phase 1 complete: %d/%d symbols passed price+volume+ATR pre-filter",
-            len(survivors), len(universe),
-        )
+        survivors: list[str] = []
+        daily_data: dict[str, pd.DataFrame] = {}
+
+        if us_syms:
+            us_survivors, us_daily = self._bulk_download_and_filter(us_syms)
+            survivors.extend(us_survivors)
+            daily_data.update(us_daily)
+            logger.info("Phase 1 US: %d/%d passed", len(us_survivors), len(us_syms))
+
+        if india_syms:
+            in_survivors, in_daily = self._india_download_and_filter(india_syms)
+            survivors.extend(in_survivors)
+            daily_data.update(in_daily)
+            logger.info("Phase 1 India: %d/%d passed", len(in_survivors), len(india_syms))
+
+        logger.info("Phase 1 complete: %d/%d total survivors", len(survivors), len(universe))
         if not survivors:
             logger.warning("Phase 1 eliminated all symbols — check filters")
             return []
 
-        # ── Phase 2a: batch pre-market volume for survivors ───────────────────
-        pm_vols = self._batch_premarket_volume(survivors)
-        logger.info("Phase 2a complete: pre-market volume fetched for %d symbols", len(pm_vols))
+        # ── Phase 2a: opening-activity volume for survivors ───────────────────
+        # US: pre-market 04:00–09:30 ET via yfinance prepost batches
+        # India: first-30-min session volume 09:15–09:45 IST via Upstox batches
+        us_surv    = [s for s in survivors if not _is_india(s)]
+        india_surv = [s for s in survivors if _is_india(s)]
+
+        pm_vols: dict[str, float] = {}
+        if us_surv:
+            pm_vols.update(self._batch_premarket_volume(us_surv))
+        if india_surv:
+            pm_vols.update(self._india_opening_volume(india_surv))
+
+        logger.info("Phase 2a complete: activity volume for %d symbols", len(pm_vols))
 
         # ── Phase 2b: build metrics from cache — no HTTP calls ────────────────
         metrics_list: list[SymbolScanMetrics] = []
@@ -686,6 +725,112 @@ class DayTradingScanner:
                 except Exception:
                     pass
 
+        return result
+
+    # ── India Phase 1: Upstox daily OHLCV download + pre-filter ─────────────
+
+    def _india_download_and_filter(
+        self, symbols: list[str]
+    ) -> tuple[list[str], dict[str, pd.DataFrame]]:
+        """
+        Fetch 60d daily OHLCV for NSE symbols via Upstox in parallel.
+        Upstox has no multi-ticker batch endpoint, so we use a thread pool.
+        184 Nifty-200 symbols × ~0.3s/call ÷ 16 workers ≈ 4s total.
+        """
+        today = date.today()
+        if (DayTradingScanner._india_daily_cache_date == today
+                and DayTradingScanner._india_daily_cache):
+            cached = DayTradingScanner._india_daily_cache
+            logger.info("Phase 1 India: reusing cache (%d symbols)", len(cached))
+            survivors = self._apply_prefilters(cached, self.config)
+            return survivors, {s: cached[s] for s in survivors}
+
+        from app.services.marketdata import upstox_data
+
+        def _fetch_one(sym: str) -> tuple[str, pd.DataFrame | None]:
+            try:
+                df = upstox_data.fetch_bars(sym, interval="1d", period="60d")
+                if df is not None and not df.empty and len(df) >= 10:
+                    return sym, df
+            except Exception as e:
+                logger.debug("Upstox daily fetch failed for %s: %s", sym, e)
+            return sym, None
+
+        workers = min(16, max(1, int(self.config.max_workers)))
+        all_daily: dict[str, pd.DataFrame] = {}
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(_fetch_one, s): s for s in symbols}
+            for fut in as_completed(futs):
+                sym, df = fut.result()
+                if df is not None:
+                    all_daily[sym] = df
+
+        logger.info("India OHLCV: fetched %d/%d symbols via Upstox", len(all_daily), len(symbols))
+        DayTradingScanner._india_daily_cache      = all_daily
+        DayTradingScanner._india_daily_cache_date = today
+
+        survivors = self._apply_prefilters(all_daily, self.config)
+        return survivors, {s: all_daily[s] for s in survivors}
+
+    # ── India Phase 2a: opening-activity volume (first 30 min) ───────────────
+
+    def _india_opening_volume(self, symbols: list[str]) -> dict[str, float]:
+        """
+        Fetch NSE opening-activity volume via Upstox 5m bars.
+
+        NSE has no pre-market session. The first 30 minutes (09:15–09:45 IST)
+        is the equivalent signal: high volume in this window = catalyst/news
+        just as pre-market volume does for US stocks.
+
+        Uses the pm-vol cache so repeated scans are free.
+        """
+        today = date.today()
+        if DayTradingScanner._pm_vol_cache_date == today:
+            cached = {s: DayTradingScanner._pm_vol_cache[s]
+                      for s in symbols if s in DayTradingScanner._pm_vol_cache}
+            missing = [s for s in symbols if s not in cached]
+            if not missing:
+                return cached
+            fresh = self._fetch_india_opening_vol(missing)
+            DayTradingScanner._pm_vol_cache.update(fresh)
+            cached.update(fresh)
+            return cached
+
+        result = self._fetch_india_opening_vol(symbols)
+        DayTradingScanner._pm_vol_cache.update(result)
+        DayTradingScanner._pm_vol_cache_date = today
+        return result
+
+    @staticmethod
+    def _fetch_india_opening_vol(symbols: list[str]) -> dict[str, float]:
+        """Fetch first-30-min volume for NSE symbols via Upstox 5m bars in parallel."""
+        from app.services.marketdata import upstox_data
+        from datetime import time as _time
+        import pytz
+
+        IST = pytz.timezone("Asia/Kolkata")
+        OPEN_END = _time(9, 45)  # first 30 min of NSE session
+
+        def _fetch_one(sym: str) -> tuple[str, float]:
+            try:
+                df = upstox_data.fetch_bars(sym, interval="5m", period="2d")
+                if df is None or df.empty:
+                    return sym, 0.0
+                today_date = date.today()
+                today_bars = df[df.index.date == today_date]
+                opening = today_bars[today_bars.index.time <= OPEN_END]
+                return sym, float(opening["Volume"].sum()) if not opening.empty else 0.0
+            except Exception:
+                return sym, 0.0
+
+        workers = min(16, 4)  # Upstox rate-limits at higher concurrency
+        result: dict[str, float] = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(_fetch_one, s): s for s in symbols}
+            for fut in as_completed(futs):
+                sym, vol = fut.result()
+                result[sym] = vol
         return result
 
     # ── Phase 2b: build metrics from cached OHLCV ────────────────────────────

@@ -292,35 +292,22 @@ def get_market_status() -> dict[str, Any]:
 @router.get("/scanner/watchlist")
 def scanner_watchlist(
     max_symbols: int = Query(20, description="Max symbols to return"),
-    universe: str = Query("", description="Comma-separated override universe; empty = full US-listed"),
+    universe: str = Query("", description="Comma-separated override universe; empty = auto"),
+    market: str = Query("us", description="Universe to scan: 'us', 'india', or 'both'"),
     market_state: str = Query("", description="Force a market state (TREND_UP etc.); empty = auto"),
-    min_price: float = Query(5.0, description="Minimum last price ($)"),
-    max_price: float | None = Query(None, description="Maximum last price ($); null = no cap"),
+    min_price: float = Query(5.0, description="Minimum last price ($ for US, ₹ for India)"),
+    max_price: float | None = Query(None, description="Maximum last price; null = no cap"),
     min_avg_volume: float = Query(1_000_000, description="Minimum 30-day average daily volume"),
     min_float: float | None = Query(None, description="Minimum shares float; null = no floor"),
     max_float: float | None = Query(None, description="Maximum shares float; null = no cap"),
-    universe_max_symbols: int | None = Query(None, description="Cap total universe size; null = all (~5,800)"),
-    run_native_precheck: bool = Query(
-        True,
-        description=(
-            "Run the audited 4-strategy generate_signals() check on the top-K "
-            "ranked candidates and promote names with active signals to the front."
-        ),
-    ),
-    precheck_top_k: int = Query(
-        10, ge=0, le=50,
-        description="How many top-ranked candidates to pre-check (0 disables).",
-    ),
+    universe_max_symbols: int | None = Query(None, description="Cap total universe size; null = all"),
+    run_native_precheck: bool = Query(True),
+    precheck_top_k: int = Query(10, ge=0, le=50),
 ) -> list[dict[str, Any]]:
-    """Pre-market scanner: ranked watchlist with scores, tags, and strategy buckets.
-
-    The default universe is the full US-listed common-stock universe
-    (~5,800 names from NASDAQ Trader, refreshed daily). Use ``universe`` to
-    pass a comma-separated override.
-    """
     from app.services.strategy.daytrading.scanners import DayTradingScanner, DayTradingScannerConfig
     sym_list = [s.strip().upper() for s in universe.split(",") if s.strip()] or None
     cfg = DayTradingScannerConfig(
+        market=market.lower().strip() or "us",
         min_price=min_price,
         max_price=max_price,
         min_avg_volume=min_avg_volume,

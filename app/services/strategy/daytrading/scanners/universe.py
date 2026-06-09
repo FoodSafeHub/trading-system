@@ -212,6 +212,19 @@ def load_universe(*, force_refresh: bool = False) -> list[str]:
     return list(_FALLBACK_UNIVERSE)
 
 
+# ── India universe ───────────────────────────────────────────────────────────
+
+def load_india_universe() -> list[str]:
+    """Return the curated NSE universe (Nifty 200) as bare symbols.
+
+    Returns plain NSE trading symbols (e.g. "RELIANCE", "TATAMOTORS").
+    The India scanner path uses Upstox for all data fetching — no .NS
+    suffix manipulation needed.
+    """
+    from app.services.markets import NIFTY_200
+    return list(NIFTY_200)
+
+
 # ── Float cache ──────────────────────────────────────────────────────────────
 
 

@@ -1324,17 +1324,45 @@ with tab_scanner:
         },
     }
 
-    mc1, mc2, mc3 = st.columns([1, 1, 2])
+    mc1, mc2, mc3, mc4 = st.columns([1, 1, 1, 2])
     ms_max = mc1.number_input("Top N", min_value=5, max_value=50, value=20, step=5, key="ms_max")
-    ms_state = mc2.selectbox(
+    ms_market = mc2.selectbox(
+        "Market", ["US", "India", "Both"],
+        index=0, key="ms_market",
+        help=(
+            "US = NASDAQ/NYSE universe (~7,400 stocks), data via yfinance.\n"
+            "India = Nifty 200 (184 NSE stocks), data via Upstox.\n"
+            "Both = runs both universes and merges results."
+        ),
+    )
+    ms_state = mc3.selectbox(
         "Force market state",
         ["auto", "TREND_UP", "TREND_DOWN", "CHOPPY", "HIGH_VOL", "NEWS_RISK"],
         index=0, key="ms_state",
     )
-    ms_universe = mc3.text_input(
+    ms_universe = mc4.text_input(
         "Override universe (optional, comma-separated)", value="", key="ms_universe",
-        placeholder="leave empty to scan the full US-listed universe",
+        placeholder="leave empty to use the selected market universe",
     )
+
+    # India-specific info
+    if ms_market == "India":
+        st.info(
+            "**India scanner**: scans Nifty 200 (184 NSE stocks) via Upstox. "
+            "Price filter is in ₹. Min volume default (500k shares/day) is appropriate for NSE. "
+            "No pre-market session on NSE — opening-activity volume (09:15–09:45 IST) used instead.",
+            icon="🇮🇳",
+        )
+        # Auto-adjust defaults for India when switching market
+        if st.session_state.get("_ms_last_market") != ms_market:
+            st.session_state["_ms_last_market"] = ms_market
+            st.session_state["ms_min_price"] = 100.0    # ₹100 minimum
+            st.session_state["ms_min_vol"]   = 500_000  # NSE volume scale
+    elif st.session_state.get("_ms_last_market") == "India":
+        # Switched away from India — reset to US defaults
+        st.session_state["_ms_last_market"] = ms_market
+        st.session_state.setdefault("ms_min_price", 5.0)
+        st.session_state.setdefault("ms_min_vol", 1_000_000)
 
     ms_preset_name = st.selectbox(
         "Filter preset",
@@ -1458,6 +1486,7 @@ with tab_scanner:
                 ranked = _api.daytrading_scanner_watchlist(
                     max_symbols=int(ms_max),
                     universe=ms_universe.strip(),
+                    market=ms_market.lower(),
                     market_state="" if ms_state == "auto" else ms_state,
                     min_price=float(ms_min_price),
                     max_price=float(ms_max_price) if ms_max_price > 0 else None,
@@ -1512,7 +1541,7 @@ with tab_scanner:
                     "Adj Score": round(float(r.get("adjusted_score", 0.0)), 2),
                     "Bucket": r.get("recommended_strategy_bucket", "—") or "—",
                     "Tags": ", ".join(r.get("tags", []) or []),
-                    "Price": f"${m.get('last_price', 0):.2f}" if m.get("last_price") else "—",
+                    "Price": (f"₹{m.get('last_price', 0):.2f}" if ms_market == "India" else f"${m.get('last_price', 0):.2f}") if m.get("last_price") else "—",
                     "ATR %": f"{m.get('atr_pct', 0):.2f}%" if m.get("atr_pct") else "—",
                     "Gap %": f"{m.get('premarket_gap_pct', 0):+.2f}%" if m.get("premarket_gap_pct") else "—",
                     "Pre-Mkt Rel Vol": f"{m.get('premarket_rel_vol', 0):.2f}x" if m.get("premarket_rel_vol") else "—",
