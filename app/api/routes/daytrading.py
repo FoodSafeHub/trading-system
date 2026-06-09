@@ -113,11 +113,9 @@ def simulation_backtest(
     risk_per_trade_pct: float = Query(0.01),
     max_daily_loss_pct: float = Query(2.0),
     max_trades_per_day: int = Query(6),
+    strategy_name: str = Query(""),
 ) -> dict[str, Any]:
-    """
-    Replay the exact auto-trader logic bar-by-bar on historical data.
-    Results match what the Auto Trader simulation tab would produce over the same period.
-    """
+    """Replay auto-trader logic bar-by-bar. Matches Auto Trader simulation tab."""
     return run_simulation_backtest(
         symbol=symbol.upper(),
         period=period,
@@ -128,7 +126,46 @@ def simulation_backtest(
         risk_per_trade_pct=risk_per_trade_pct,
         max_daily_loss_pct=max_daily_loss_pct,
         max_trades_per_day=max_trades_per_day,
+        strategy_name=strategy_name.strip() or None,
     )
+
+
+@router.get("/simulation-backtest-all/{symbol}")
+def simulation_backtest_all(
+    symbol: str,
+    period: str = Query("60d"),
+    initial_capital: float = Query(10_000.0),
+    direction_mode: str = Query("long_only"),
+    trail_mode: str = Query("atr"),
+    partial_tp: bool = Query(True),
+    risk_per_trade_pct: float = Query(0.01),
+    max_daily_loss_pct: float = Query(2.0),
+    max_trades_per_day: int = Query(6),
+) -> list[dict[str, Any]]:
+    """Run simulation backtest for every strategy and return ranked comparison."""
+    from app.services.strategy.daytrading.strategies import ALL_STRATEGIES
+    results = []
+    for strat in ALL_STRATEGIES:
+        r = run_simulation_backtest(
+            symbol=symbol.upper(), period=period, initial_capital=initial_capital,
+            direction_mode=direction_mode, trail_mode=trail_mode, partial_tp=partial_tp,
+            risk_per_trade_pct=risk_per_trade_pct, max_daily_loss_pct=max_daily_loss_pct,
+            max_trades_per_day=max_trades_per_day, strategy_name=strat.name,
+        )
+        m = r.get("metrics", {})
+        results.append({
+            "strategy":          strat.name,
+            "trades":            m.get("total_trades", 0),
+            "win_rate":          m.get("win_rate", 0),
+            "profit_factor":     m.get("profit_factor", 0),
+            "total_pnl":         m.get("total_pnl", 0),
+            "avg_pnl_pct":       m.get("avg_pnl_per_trade", 0),
+            "sharpe_ratio":      m.get("sharpe_ratio", 0),
+            "max_drawdown_pct":  m.get("max_drawdown_pct", 0),
+            "simulation_mode":   True,
+        })
+    results.sort(key=lambda x: x.get("profit_factor", 0), reverse=True)
+    return results
 
 
 # ── Watchlist Analyzer ────────────────────────────────────────────────────────

@@ -205,6 +205,7 @@ def _cached_simulation_backtest(
     symbol: str, period: str, capital: float,
     direction_mode: str, trail_mode: str, partial_tp: bool,
     risk_pct: float, max_loss_pct: float, max_trades: int,
+    strategy_name: str = "",
 ) -> dict:
     return api._get(
         f"/daytrading/simulation-backtest/{symbol}",
@@ -218,8 +219,31 @@ def _cached_simulation_backtest(
             "risk_per_trade_pct": risk_pct,
             "max_daily_loss_pct": max_loss_pct,
             "max_trades_per_day": max_trades,
+            "strategy_name": strategy_name,
         },
     ) or {}
+
+
+@st.cache_data(ttl=300)
+def _cached_simulation_backtest_all(
+    symbol: str, period: str, capital: float,
+    direction_mode: str, trail_mode: str, partial_tp: bool,
+    risk_pct: float, max_loss_pct: float, max_trades: int,
+) -> list:
+    return api._get(
+        f"/daytrading/simulation-backtest-all/{symbol}",
+        timeout=600,
+        params={
+            "period": period,
+            "initial_capital": capital,
+            "direction_mode": direction_mode,
+            "trail_mode": trail_mode,
+            "partial_tp": str(partial_tp).lower(),
+            "risk_per_trade_pct": risk_pct,
+            "max_daily_loss_pct": max_loss_pct,
+            "max_trades_per_day": max_trades,
+        },
+    ) or []
 
 
 @st.cache_data(ttl=300)
@@ -748,6 +772,7 @@ with tab_backtest:
                     risk_pct=bt_sim_risk / 100,
                     max_loss_pct=bt_sim_maxloss,
                     max_trades=int(bt_sim_maxtrades),
+                    strategy_name=bt_strategy if bt_mode == "Auto-Trader Simulation Replay" else "",
                 )
                 st.session_state["bt_cmp_result"] = None
                 st.session_state["bt_mode_stored"] = "Auto-Trader Simulation Replay"
@@ -1089,9 +1114,40 @@ with tab_compare:
     _ca_cur = _sym_currency(ca_symbol)
     ca_capital = ca3.number_input(f"Capital ({_ca_cur})", value=10_000, step=1_000, key="ca_capital")
 
+    ca_sim_mode = st.toggle(
+        "Auto-Trader Simulation mode",
+        value=False, key="ca_sim_mode",
+        help=(
+            "OFF = signal-level backtest (raw strategy, instant bracket exit).\n"
+            "ON = replays the auto-trader bot logic: same ExitManager, PositionManager, "
+            "RiskGovernor, and cooldowns as the live simulation tab. "
+            "Slower (~2–5 min) but reflects real bot behaviour."
+        ),
+    )
+
+    if ca_sim_mode:
+        cs1, cs2, cs3, cs4 = st.columns(4)
+        ca_sim_dir    = cs1.selectbox("Direction", ["long_only", "both", "short_only"], key="ca_sim_dir")
+        ca_sim_trail  = cs2.selectbox("Trail stop", ["atr", "ema", "candle"], key="ca_sim_trail")
+        ca_sim_risk   = cs3.number_input("Risk/trade %", 0.1, 5.0, 1.0, 0.1, key="ca_sim_risk")
+        ca_sim_maxloss= cs4.number_input("Daily loss limit %", 0.5, 10.0, 2.0, 0.5, key="ca_sim_maxloss")
+        ca_sim_partial = st.toggle("Scale out 50% at +1R", value=True, key="ca_sim_partial")
+        st.info("Simulation mode runs each strategy through the same bot logic. Results match what you'd see in the Auto Trader simulation tab.", icon="🤖")
+
     if st.button("▶ Compare All Strategies", key="run_compare"):
         with st.spinner(f"Running all {len(ALL_STRATEGIES)} strategies on {ca_symbol}…"):
-            results = _cached_backtest_all(ca_symbol, ca_period, float(ca_capital))
+            if ca_sim_mode:
+                results = _cached_simulation_backtest_all(
+                    ca_symbol, ca_period, float(ca_capital),
+                    direction_mode=ca_sim_dir,
+                    trail_mode=ca_sim_trail,
+                    partial_tp=ca_sim_partial,
+                    risk_pct=ca_sim_risk / 100,
+                    max_loss_pct=ca_sim_maxloss,
+                    max_trades=6,
+                )
+            else:
+                results = _cached_backtest_all(ca_symbol, ca_period, float(ca_capital))
 
         if results:
             _ca_cur2 = _sym_currency(ca_symbol)
