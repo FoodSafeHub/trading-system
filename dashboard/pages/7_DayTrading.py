@@ -43,7 +43,11 @@ from _theme import apply_theme  # noqa: E402
 import _charts as charts  # noqa: E402
 import _lightweight_chart as lwc  # noqa: E402
 import api  # noqa: E402
-from _broker_routing import render_broker_routing_toggle  # noqa: E402
+from _broker_routing import (  # noqa: E402
+    render_broker_routing_toggle,
+    render_daytrading_broker_toggle,
+    get_daytrading_broker,
+)
 from _components import (  # noqa: E402
     page_header, stat_band, filter_cols, empty_state,
     regime_chip, eligibility_chip, bot_state_chip, blocker_chip, blocker_label,
@@ -92,7 +96,9 @@ page_header(
 
 _br_col, _restart_col = st.columns([6, 1])
 with _br_col:
-    render_broker_routing_toggle(key_suffix="daytrading")
+    # Isolated day-trading broker — does NOT touch the global .env or affect
+    # the Strategy page. Stored in session_state only, passed per-request.
+    render_daytrading_broker_toggle(key="dt_broker_main")
 with _restart_col:
     from _server_controls import render_restart_button as _render_restart
     _render_restart(key="dt_restart_api")
@@ -2018,7 +2024,7 @@ with tab_autotrader:
             "</div>",
             unsafe_allow_html=True,
         )
-        render_broker_routing_toggle(key_suffix="at_live")
+        render_daytrading_broker_toggle(key="dt_broker_live_mode")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # ROW 2 — risk config strip (always visible, compact)
@@ -2127,10 +2133,12 @@ with tab_autotrader:
             _exec_svc = None
             _acct_id  = ""
             if not at_simulation:
-                from app.services.broker import get_broker as _get_broker
+                # Use the day-trading-specific broker selection (isolated from Strategy page)
+                _dt_broker_name = get_daytrading_broker()
+                from app.services.brokers.factory import get_broker as _get_broker
                 from app.services.execution.service import ExecutionService
                 import asyncio as _aio
-                _broker = _get_broker()
+                _broker = _get_broker(_dt_broker_name)
                 _aio.run(_broker.authenticate())
                 _accts  = _aio.run(_broker.get_accounts())
                 _acct_id = _accts[0].account_id if _accts else ""
@@ -2372,6 +2380,7 @@ with tab_autotrader:
             elif state_val == "FLAT":
                 cooldown_left   = status.get("cooldown_bars_remaining", 0) or 0
                 no_trade_reason = status.get("last_no_trade_reason", "") or ""
+
                 if cooldown_left > 0:
                     st.markdown(
                         f"{eligibility_chip('cooldown')} "
@@ -2380,11 +2389,34 @@ with tab_autotrader:
                         unsafe_allow_html=True,
                     )
                 elif no_trade_reason:
+                    # Translate the technical message into something readable
+                    _display_reason = no_trade_reason
+                    if "No native strategy accepted" in no_trade_reason:
+                        _ms = status.get("market_state", "UNKNOWN")
+                        _display_reason = f"Scanning for setup… (regime: {_ms}, no strategy signal fired this bar)"
+                    elif "Too late in day" in no_trade_reason:
+                        _display_reason = "Market closing soon — no new entries after 3:15 PM"
+                    elif "Insufficient" in no_trade_reason:
+                        _display_reason = "Waiting for enough bars to build indicators…"
                     st.markdown(
                         f"{eligibility_chip('idle')} "
-                        f"<span style='color:var(--text-3);font-size:0.82rem'>{no_trade_reason}</span>",
+                        f"<span style='color:var(--text-3);font-size:0.82rem'>{_display_reason}</span>",
                         unsafe_allow_html=True,
                     )
+
+                    # Show per-strategy rejection breakdown when available
+                    _last_log = (status.get("decision_log") or [])
+                    _last_no_trade = next(
+                        (e for e in reversed(_last_log[-20:]) if e.get("event") == "NO_TRADE"),
+                        None,
+                    )
+                    if _last_no_trade:
+                        _checks = _last_no_trade.get("checks", {}) or {}
+                        _rejections = _checks.get("native_rejections", {})
+                        if _rejections:
+                            with st.expander("Why no signal?", expanded=False):
+                                for _strat, _why in _rejections.items():
+                                    st.caption(f"**{_strat}**: {_why}")
                 else:
                     st.markdown(
                         f"{eligibility_chip('idle')} "

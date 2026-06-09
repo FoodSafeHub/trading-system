@@ -37,6 +37,10 @@ _ROUTING_TABLE: dict[str, list[str]] = {
     CHOPPY:     ["VWAPMeanReversion", "BollingerMomentum", "ORBBreakout", "OpeningGapFade"],
     HIGH_VOL:   ["VolumeSpikeReversal", "ORBBreakout"],
     NEWS_RISK:  [],   # all blocked
+    # UNKNOWN = regime classifier couldn't determine state (e.g. pre-market, insufficient bars).
+    # Allow the same conservative set as CHOPPY so the bot can still trade instead of
+    # blocking every signal until the market opens fully.
+    "UNKNOWN":  ["VWAPMeanReversion", "BollingerMomentum", "ORBBreakout", "OpeningGapFade", "EMAMomentum"],
 }
 
 # Rationale messages for each blocking decision

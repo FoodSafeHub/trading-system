@@ -404,10 +404,16 @@ class SingleStockTrader:
 
     def _run_loop(self) -> None:
         while self._running:
+            # Always update heartbeat so the UI knows the thread is alive,
+            # even when the market is closed.
+            self._last_heartbeat = datetime.now(ET)
             try:
                 if is_market_open(self.symbol):
                     self._refresh_data()
                     self._evaluate_cycle()
+                else:
+                    # Market closed — log once, keep thread alive.
+                    logger.debug("AutoTrader idle — market closed for %s", self.symbol)
             except Exception as e:
                 logger.error("AutoTrader loop error: %s", e, exc_info=True)
 
@@ -417,17 +423,28 @@ class SingleStockTrader:
                 _time.sleep(0.5)
 
     def _refresh_data(self) -> None:
-        """Pull fresh bars from yfinance."""
+        """Pull fresh bars. Uses Upstox for Indian symbols, yfinance for US."""
         from app.services.strategy.daytrading.runner import fetch_intraday
+        from app.services.markets import is_india_symbol
         try:
             self._df_1m  = fetch_intraday(self.symbol, "1m",  "1d")
             self._df_5m  = fetch_intraday(self.symbol, "5m",  "5d")
             self._df_15m = fetch_intraday(self.symbol, "15m", "60d")
-            # SPY for market state
-            df_spy = fetch_intraday("SPY", "5m", "2d")
-            if not df_spy.empty and not (self._df_5m is None or self._df_5m.empty):
-                self._market_state = classify_market_state(self._df_5m, df_spy)
+            # Use the correct market index for regime classification
+            _ref_sym = "^NSEI" if is_india_symbol(self.symbol) else "SPY"
+            try:
+                df_ref = fetch_intraday(_ref_sym, "5m", "2d")
+            except Exception:
+                df_ref = None
+            if not (self._df_5m is None or self._df_5m.empty):
+                self._market_state = classify_market_state(
+                    self._df_5m,
+                    df_ref if df_ref is not None and not df_ref.empty else None,
+                )
                 self._last_market_state_str = self._market_state.state
+                logger.debug("Market state: %s (conf=%.0f%%)",
+                             self._last_market_state_str,
+                             self._market_state.confidence * 100)
         except Exception as e:
             logger.warning("Data refresh error: %s", e)
 
