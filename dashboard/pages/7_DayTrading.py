@@ -2338,6 +2338,30 @@ with tab_autotrader:
                 f"{'Running' if status.get('running') else 'Stopped'}"
             )
 
+            # Active config strip — reflects the RUNNING bot's config (from its
+            # own status), not the toggle. Always visible even when the config
+            # expander is collapsed.
+            _tt_running = status.get("tight_trail_enabled")
+            if _tt_running is None:
+                # Older running bot started before this feature existed
+                st.caption(
+                    f"⚙️ Trail: **{status.get('active_trail_mode','—')}** · "
+                    f"🛡️ Tight-trail: **not available on this bot** — "
+                    f"Stop & Start to enable"
+                )
+            else:
+                st.caption(
+                    f"⚙️ Trail: **{status.get('active_trail_mode','—')}** · "
+                    f"🛡️ Tight-trail-on-signal: **{'ON' if _tt_running else 'OFF'}**"
+                )
+                # Warn if the toggle differs from the running bot
+                if bool(_tt_running) != bool(at_tight_trail):
+                    st.warning(
+                        f"Toggle is **{'ON' if at_tight_trail else 'OFF'}** but the running "
+                        f"bot is **{'ON' if _tt_running else 'OFF'}**. Stop & Start to apply.",
+                        icon="⚠️",
+                    )
+
             st.markdown("---")
 
             # ── Active position ───────────────────────────────────────────────

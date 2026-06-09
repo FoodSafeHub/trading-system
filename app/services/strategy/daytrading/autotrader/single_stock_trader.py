@@ -248,6 +248,7 @@ class SingleStockTrader:
                     self._last_market_state_str, tsm.strategy or ""
                 ),
                 "active_trail_mode": self._active_trail_mode or "—",
+                "tight_trail_enabled": self.tight_trail_on_exit_signal,
                 "tight_trail_armed": tsm.tight_trail_armed,
                 "tight_trail_floor": round(tsm.tight_trail_floor, 4) if tsm.tight_trail_armed else None,
                 "tight_trail_signal_reason": tsm.tight_trail_signal_reason,
