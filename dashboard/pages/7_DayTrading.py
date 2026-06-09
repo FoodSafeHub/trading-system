@@ -1979,58 +1979,129 @@ with tab_config:
 # TAB — 🎯 Single Stock Auto Trader
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_autotrader:
-    st.markdown("### Single Stock Auto Trader")
-    st.caption(
-        "Pick one symbol, configure risk, and let the bot manage the full intraday trade "
-        "from entry to exit — stops, trailing, partial TP, and EOD flatten included."
-    )
 
-    # ── Session-state init ────────────────────────────────────────────────────
+    # ── Session state init ────────────────────────────────────────────────────
     if "at_trader" not in st.session_state:
         st.session_state["at_trader"] = None
     if "at_status" not in st.session_state:
         st.session_state["at_status"] = {}
 
-    # ── Config panel ──────────────────────────────────────────────────────────
-    with st.expander("⚙️ Trader Configuration", expanded=True):
-        ac1, ac2, ac3 = st.columns(3)
-        at_symbol = ac1.text_input("Symbol", value="AAPL", key="at_symbol").strip().upper()
-        at_mode   = ac2.radio("Trade Mode", ["Paper", "Live-ready"], horizontal=True, key="at_mode")
-        at_dir    = ac3.radio(
-            "Direction", ["Long only", "Short only", "Both"],
-            horizontal=True, key="at_dir"
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # TOP CONTROL BAR — symbol, mode toggle, broker, start/stop/flatten
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    cb1, cb2, cb3, cb4, cb5, cb6, cb7 = st.columns([2, 1, 1, 1, 1, 1, 1])
+
+    at_symbol = cb1.text_input(
+        "Symbol", value=st.session_state.get("signals_symbol", "AAPL"),
+        key="at_symbol", placeholder="AAPL, MTEN, SPY …",
+    ).strip().upper() or "AAPL"
+
+    at_simulation = cb2.toggle(
+        "Simulation", value=True, key="at_simulation",
+        help=(
+            "ON = paper simulation: bot runs all logic, shows where it would buy/sell "
+            "and the P&L it would realize — no real orders placed.\n\n"
+            "OFF = live trading: real orders sent to the selected broker."
+        ),
+    )
+
+    at_dir = cb3.selectbox(
+        "Direction", ["Long only", "Both", "Short only"],
+        index=0, key="at_dir",
+    )
+
+    at_tf = cb4.selectbox("Timeframe", ["5m", "1m", "15m"], index=0, key="at_tf")
+
+    start_pressed   = cb5.button("▶ Start", use_container_width=True, type="primary", key="at_start")
+    stop_pressed    = cb6.button("⏹ Stop",  use_container_width=True, key="at_stop")
+    flatten_pressed = cb7.button("🚨 Flatten", use_container_width=True, key="at_flatten")
+
+    # Mode indicator bar
+    if at_simulation:
+        st.markdown(
+            "<div style='background:rgba(91,146,209,0.12);border:1px solid rgba(91,146,209,0.3);"
+            "border-radius:8px;padding:8px 14px;margin-bottom:8px;font-size:0.84rem'>"
+            "🔵 <b>SIMULATION MODE</b> — paper trading only. "
+            "The bot runs all strategy logic and shows exactly where it would enter, "
+            "manage stops, take profits, and exit. <b>No real orders are placed.</b> "
+            "Switch Simulation OFF + select a broker to go live."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            "<div style='background:rgba(208,122,122,0.12);border:1px solid rgba(208,122,122,0.4);"
+            "border-radius:8px;padding:8px 14px;margin-bottom:8px;font-size:0.84rem'>"
+            "🔴 <b>LIVE TRADING MODE</b> — real orders will be sent to your broker. "
+            "Verify broker routing and risk limits before starting."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        render_broker_routing_toggle(key_suffix="at_live")
+
+    # ── Risk configuration (compact, collapsed by default when running) ───────
+    trader_running = bool(st.session_state.get("at_status", {}).get("running"))
+    with st.expander("⚙️ Risk & Strategy Config", expanded=not trader_running):
+        rc1, rc2, rc3, rc4 = st.columns(4)
+        at_risk_pct   = rc1.number_input("Risk per trade %", 0.1, 5.0, 1.0, 0.1, key="at_risk",
+                                          help="% of capital risked per trade (stop distance × shares).")
+        at_max_loss   = rc2.number_input("Max daily loss %", 0.5, 10.0, 2.0, 0.5, key="at_maxloss",
+                                          help="Bot stops trading for the day when realized loss exceeds this.")
+        at_capital    = rc3.number_input("Capital ($)", 1000, 10_000_000, 10_000, 1000, key="at_capital")
+        at_max_trades = rc4.number_input("Max trades/day", 1, 20, 6, 1, key="at_maxtrades")
+
+        sc1, sc2, sc3 = st.columns(3)
+        at_partial_tp = sc1.toggle("Partial TP at +1R", value=True, key="at_partial",
+                                    help="Scale out 50% of position at 1× risk gained.")
+        at_trail_mode = sc2.selectbox("Trail stop mode", ["atr", "ema", "candle"], key="at_trail")
+        at_entry_mode = sc3.selectbox(
+            "Entry mode",
+            ["native_strategy", "legacy_entry_decider"],
+            index=0, key="at_entry_mode",
+            help=(
+                "native_strategy: uses the same strategy.generate_signals() as the backtest "
+                "(recommended — most consistent with what you see on the signals chart).\n\n"
+                "legacy_entry_decider: uses the older indicator-scoring entry path."
+            ),
         )
 
-        bc1, bc2, bc3, bc4 = st.columns(4)
-        at_risk_pct    = bc1.number_input("Risk per trade %", min_value=0.1, max_value=5.0, value=1.0, step=0.1, key="at_risk")
-        at_max_loss    = bc2.number_input("Max daily loss %", min_value=0.5, max_value=10.0, value=2.0, step=0.5, key="at_maxloss")
-        at_capital     = bc3.number_input("Capital ($)", min_value=1000, value=10000, step=1000, key="at_capital")
-        at_max_trades  = bc4.number_input("Max trades/day", min_value=1, max_value=20, value=6, step=1, key="at_maxtrades")
-
-        cc1, cc2 = st.columns(2)
-        at_partial_tp   = cc1.toggle("Partial take-profit at +1R", value=True, key="at_partial")
-        at_trail_mode   = cc2.selectbox(
-            "Trailing stop mode",
-            ["atr", "ema", "candle"],
-            key="at_trail",
-        )
-
-    # ── Control buttons ───────────────────────────────────────────────────────
-    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
-
-    start_pressed    = btn_col1.button("▶ Start Bot", use_container_width=True, type="primary", key="at_start")
-    stop_pressed     = btn_col2.button("⏹ Stop Bot", use_container_width=True, key="at_stop")
-    flatten_pressed  = btn_col3.button("🚨 Force Flatten", use_container_width=True, key="at_flatten")
-
+    # ── Start / stop logic ────────────────────────────────────────────────────
     if start_pressed:
         try:
             from app.services.strategy.daytrading.autotrader import SingleStockTrader
             from app.services.strategy.daytrading.autotrader.single_stock_trader import PolicyError
-            from app.services.strategy.daytrading.brain.symbol_policy import get_policy
+            from app.services.strategy.daytrading.brain.symbol_policy import get_policy, set_policy, SymbolPolicy, ENABLED
+
+            # Auto-enable policy so the bot can always trade what you pick
+            _pol = get_policy(at_symbol)
+            if not _pol.allows_live():
+                set_policy(at_symbol, SymbolPolicy(
+                    symbol=at_symbol, status=ENABLED, override_live=True,
+                    reason=f"Auto-enabled for bot run {datetime.now(ET).strftime('%H:%M ET')}",
+                    wf_verdict=_pol.wf_verdict, wf_score=_pol.wf_score,
+                ))
+
             dir_map = {"Long only": "long_only", "Short only": "short_only", "Both": "both"}
+
+            # Broker: None = paper sim; real broker instance for live
+            _broker = None
+            _exec_svc = None
+            _acct_id  = ""
+            if not at_simulation:
+                from app.services.broker import get_broker as _get_broker
+                from app.services.execution.service import ExecutionService
+                import asyncio as _aio
+                _broker = _get_broker()
+                _aio.run(_broker.authenticate())
+                _accts  = _aio.run(_broker.get_accounts())
+                _acct_id = _accts[0].account_id if _accts else ""
+                _exec_svc = ExecutionService(_broker)
+
             trader = SingleStockTrader(
                 symbol=at_symbol,
-                broker=None,   # paper mode — no real broker needed
+                broker=_broker,
+                execution_service=_exec_svc,
+                account_id=_acct_id,
                 direction_mode=dir_map[at_dir],
                 trail_mode=at_trail_mode,
                 partial_tp=at_partial_tp,
@@ -2038,230 +2109,321 @@ with tab_autotrader:
                 max_daily_loss_pct=at_max_loss,
                 max_trades_per_day=int(at_max_trades),
                 initial_capital=float(at_capital),
+                entry_mode=at_entry_mode,
                 on_trade_update=lambda s: st.session_state.update({"at_status": s}),
             )
+            # Stop previous trader if running
             old = st.session_state.get("at_trader")
             if old is not None:
-                try:
-                    old.stop()
-                except Exception:
-                    pass
+                try: old.stop()
+                except Exception: pass
+
             st.session_state["at_trader"] = trader
-            trader.start()
-            st.success(f"Auto Trader started for {at_symbol} ({at_mode} mode)")
-        except PolicyError as e:
-            pol = get_policy(at_symbol)
-            st.error(f"**Deployment policy blocked auto-trade for {at_symbol}**")
-            st.warning(
-                f"**Status:** {pol.badge()}  \n"
-                f"**Reason:** {pol.reason}  \n"
-                f"**Walk-forward verdict:** {pol.wf_verdict} (score {pol.wf_score:.0f}/100)  \n\n"
-                f"To override: enable *Manual Override* in the Symbol Policy panel below."
+            trader.start(force=True)   # force=True allows start outside RTH for testing
+            _mode_label = "SIMULATION" if at_simulation else "LIVE"
+            st.success(
+                f"✅ Bot started for **{at_symbol}** in **{_mode_label}** mode. "
+                f"Polling every 30s · EOD flatten at market close."
             )
         except Exception as e:
-            st.error(f"Failed to start trader: {e}")
+            st.error(f"Failed to start: {e}", icon="❌")
 
     if stop_pressed:
-        trader_obj = st.session_state.get("at_trader")
-        if trader_obj:
-            trader_obj.stop()
-            st.info("Auto Trader stopped.")
+        _trader = st.session_state.get("at_trader")
+        if _trader:
+            _trader.stop()
+            st.info("Bot stopped.")
         else:
-            st.warning("No active trader to stop.")
+            st.warning("No active bot.")
 
     if flatten_pressed:
-        trader_obj = st.session_state.get("at_trader")
-        if trader_obj:
-            trader_obj.force_flatten("Manual force flatten from UI")
-            st.warning("Force flatten executed.")
+        _trader = st.session_state.get("at_trader")
+        if _trader:
+            _trader.force_flatten("Manual flatten from UI")
+            st.warning("🚨 Force flatten executed — all positions closed at market.")
         else:
-            st.warning("No active trader.")
+            st.warning("No active bot.")
 
-    # ── Refresh status ────────────────────────────────────────────────────────
-    trader_obj = st.session_state.get("at_trader")
-    if trader_obj is not None:
+    # ── Refresh status from running trader ────────────────────────────────────
+    _trader_obj = st.session_state.get("at_trader")
+    if _trader_obj is not None:
         try:
-            st.session_state["at_status"] = trader_obj.get_status()
+            st.session_state["at_status"] = _trader_obj.get_status()
         except Exception:
             pass
 
     status = st.session_state.get("at_status", {})
-    st.divider()
 
-    # ── Status panels ─────────────────────────────────────────────────────────
-    if not status:
-        from _components import empty_state as _es
-        _es("Bot not started", "Configure a symbol and click Start Bot above.", icon="🤖")
-    else:
-        state_val  = status.get("state", "UNKNOWN")
-        at_regime  = status.get("market_state", "UNKNOWN")
-        at_sym     = status.get("symbol", "—")
-        unreal_pnl = status.get("unrealized_pnl", 0)
-        real_pnl   = status.get("realized_pnl", 0)
-        block_rsn  = status.get("block_reason", "")
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # MAIN AREA — chart (left) | position + log (right)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    chart_col, ctrl_col = st.columns([7, 3], gap="medium")
 
-        # Use shared bot_state_chip for consistent vocabulary
-        _state_chip = bot_state_chip(state_val, block_rsn)
+    with chart_col:
+        # ── Live TradingView chart with signal + trade markers ────────────────
+        # Pulls /chart/intraday which runs strategies server-side and returns
+        # marker positions with entry/stop/target. Refreshes every poll cycle.
+        _at_chart_sym = at_symbol
+        try:
+            _at_payload = api.intraday_chart(
+                _at_chart_sym,
+                timeframe=at_tf,
+                strategies="all",
+                include_rejected=True,
+            )
+        except Exception as _cex:
+            _at_payload = None
+            st.warning(f"Chart load failed: {_cex}", icon="⚠️")
 
-        # Header: symbol + regime + state all on one line
-        st.markdown(
-            f"**{at_sym}** &nbsp;&nbsp;"
-            f"{regime_chip(at_regime)} &nbsp;"
-            f"{_state_chip}",
-            unsafe_allow_html=True,
-        )
-        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        if _at_payload:
+            # Inject bot trade markers (sim fills) on top of strategy signals
+            _bot_markers = []
+            _session_trades = status.get("session_trades", []) or []
+            for _t in _session_trades:
+                _fill_ts = _t.get("entry_time", "")
+                _exit_ts = _t.get("exit_time", "")
+                if _fill_ts and _t.get("entry_price"):
+                    _bot_markers.append({
+                        "time": _fill_ts, "side": _t.get("side", "BUY").upper(),
+                        "entry_price": _t.get("entry_price"), "strategy": "BOT ENTRY",
+                        "reason": f"Bot entered @ ${_t.get('entry_price',0):.2f}",
+                        "_accepted": True,
+                    })
+                if _exit_ts and _t.get("exit_price"):
+                    _exit_side = "SELL" if _t.get("side","BUY").upper() == "BUY" else "BUY"
+                    _bot_markers.append({
+                        "time": _exit_ts, "side": _exit_side,
+                        "entry_price": _t.get("exit_price"),
+                        "strategy": f"BOT EXIT ({_t.get('exit_reason','')[:20]})",
+                        "reason": (
+                            f"P&L: ${_t.get('pnl', 0):+.2f} ({_t.get('pnl_pct', 0):+.2f}%) — "
+                            f"{_t.get('exit_reason', '')}"
+                        ),
+                        "_accepted": True,
+                    })
+            # Merge bot fills into the payload's marker list
+            if _bot_markers:
+                _at_payload = dict(_at_payload)
+                _at_payload["markers"] = list(_at_payload.get("markers") or []) + _bot_markers
 
-        s1, s2, s3 = st.columns(3)
-        s1.metric("Unrealized P&L", f"${unreal_pnl:+,.2f}")
-        s2.metric("Realized P&L",   f"${real_pnl:+,.2f}")
-        s3.metric("State",          state_val)
+            lwc.render_strategy_chart(
+                _at_payload,
+                overlays_enabled=["vwap", "ema9", "ema21"],
+                show_trades=True,
+                show_rejected=True,
+                show_levels=True,     # draws entry/stop/target lines
+                height=540,
+            )
+            _mode_note = "SIMULATION — showing where bot would trade" if at_simulation else "LIVE — real orders"
+            st.caption(
+                f"▲ green = BUY signal  ·  ▼ red = SELL signal  ·  ✕ yellow = rejected  ·  "
+                f"BOT fills overlaid in same colors  ·  {_mode_note}  ·  "
+                "Click any marker for entry/stop/target detail"
+            )
 
-        # ── Management profile (always visible) ───────────────────────────────
-        mgmt_profile = status.get("management_profile", "")
-        if mgmt_profile:
-            st.caption(f"**Management profile:** {mgmt_profile}")
+    with ctrl_col:
+        # ── Bot state header ──────────────────────────────────────────────────
+        if not status:
+            empty_state(
+                "Bot not running",
+                "Configure a symbol above and click ▶ Start.",
+                icon="🤖",
+            )
+        else:
+            state_val  = status.get("state", "UNKNOWN")
+            at_regime  = status.get("market_state", "UNKNOWN")
+            unreal_pnl = status.get("unrealized_pnl", 0) or 0
+            real_pnl   = status.get("realized_pnl", 0) or 0
+            block_rsn  = status.get("block_reason", "")
+            is_sim     = _trader_obj._broker is None if _trader_obj else True
 
-        # ── Active trade panel ─────────────────────────────────────────────────
-        if state_val in ("LONG", "SHORT", "PARTIAL_EXIT_TAKEN", "TRAILING"):
-            st.markdown("#### Active Position")
-            tp1, tp2, tp3, tp4, tp5, tp6, tp7, tp8 = st.columns(8)
-            entry_px = status.get("entry_price", 0)
-            curr_px  = status.get("current_price", 0) or status.get("last_price", 0)
-            stop_px  = status.get("current_stop", 0)
-            tgt_px   = status.get("first_target", 0)
-            r_val    = status.get("r_multiple")
-            tp1.metric("Side",       status.get("side", "—"))
-            tp2.metric("Entry",      f"${entry_px:.2f}")
-            tp3.metric("Current",    f"${curr_px:.2f}",
-                       delta=f"{curr_px - entry_px:+.2f}" if curr_px and entry_px else None,
-                       delta_color="normal" if (curr_px or 0) >= entry_px else "inverse")
-            tp4.metric("Stop",       f"${stop_px:.2f}",
-                       delta=f"risk {abs(curr_px - stop_px):.2f}" if curr_px and stop_px else None,
-                       delta_color="off")
-            tp5.metric("Target",     f"${tgt_px:.2f}",
-                       delta=f"reward {abs(tgt_px - curr_px):.2f}" if curr_px and tgt_px else None,
-                       delta_color="off")
-            tp6.metric("R Multiple", f"{r_val:+.2f}R" if r_val is not None else "—")
-            tp7.metric("Trail Mode", status.get("active_trail_mode", "—"))
-            tp8.metric("Strategy",   status.get("strategy", "—"))
-
-            # Time in trade
-            _entry_time = status.get("entry_time", "")
-            if _entry_time:
-                try:
-                    _et_ts = datetime.fromisoformat(_entry_time.replace("Z", "+00:00"))
-                    _elapsed = (datetime.now(ET) - _et_ts.astimezone(ET)).total_seconds()
-                    _mins = int(_elapsed // 60)
-                    st.caption(f"⏱ In trade {_mins}m  ·  Unrealized: **${status.get('unrealized_pnl', 0):+,.2f}**"
-                               f"  ·  Max profit if target hit: **${abs(tgt_px - entry_px) * status.get('qty', 0):,.0f}**"
-                               f"  ·  Max loss if stopped: **${abs(entry_px - stop_px) * status.get('qty', 0):,.0f}**")
-                except Exception:
-                    pass
-
-        elif state_val == "FLAT":
-            cooldown_left   = status.get("cooldown_bars_remaining", 0)
-            no_trade_reason = status.get("last_no_trade_reason", "")
-            if cooldown_left > 0:
-                st.markdown(
-                    f"{eligibility_chip('cooldown', f'Waiting {cooldown_left} bar(s) before next entry')}"
-                    f" &nbsp; {cooldown_left} bar(s) remaining",
-                    unsafe_allow_html=True,
-                )
-            elif no_trade_reason:
-                st.markdown(
-                    f"{eligibility_chip('idle', no_trade_reason)} &nbsp; "
-                    f"<span style='color:var(--text-3);font-size:0.82rem'>{no_trade_reason}</span>",
-                    unsafe_allow_html=True,
-                )
-
-        elif state_val == "BLOCKED":
-            _block_rsn = status.get("block_reason", "Risk limit hit")
+            # Mode + state chips
+            mode_chip = (
+                "<span class='tx-pill blue'>SIMULATION</span>"
+                if is_sim else
+                "<span class='tx-pill red'>LIVE</span>"
+            )
             st.markdown(
-                f"{blocker_chip(_block_rsn.upper().replace(' ','_'))} &nbsp; "
-                f"<span style='color:var(--neg);font-size:0.82rem'>{_block_rsn}</span>",
+                f"{mode_chip} &nbsp; {regime_chip(at_regime)} &nbsp; {bot_state_chip(state_val, block_rsn)}",
                 unsafe_allow_html=True,
             )
+            st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
-        # ── Session stats ──────────────────────────────────────────────────────
-        st.markdown("#### Session Summary")
-        ss1, ss2, ss3, ss4 = st.columns(4)
-        ss1.metric("Trades today",     status.get("trades_today", 0))
-        ss2.metric("Consec. losses",   status.get("consecutive_losses", 0))
-        hb_age = status.get("heartbeat_age_s", 0)
-        hb_label = f"{hb_age:.0f}s ago" if hb_age < 120 else f"⚠️ {hb_age:.0f}s ago"
-        ss3.metric("Last heartbeat",   hb_label)
-        ss4.metric("Running",          "✅ Yes" if status.get("running") else "⏸ No")
+            # P&L metrics
+            pnl1, pnl2, pnl3 = st.columns(3)
+            pnl1.metric("Unrealized", f"${unreal_pnl:+,.2f}",
+                        delta_color="normal" if unreal_pnl >= 0 else "inverse")
+            pnl2.metric("Realized",   f"${real_pnl:+,.2f}",
+                        delta_color="normal" if real_pnl >= 0 else "inverse")
+            pnl3.metric("Total",      f"${unreal_pnl + real_pnl:+,.2f}",
+                        delta_color="normal" if (unreal_pnl + real_pnl) >= 0 else "inverse")
 
-        # ── Closed trades table ────────────────────────────────────────────────
-        session_trades = status.get("session_trades", [])
-        if session_trades:
-            st.markdown("#### Today's Closed Trades")
-            rows = []
-            for t in session_trades:
-                rows.append({
-                    "Time": t.get("entry_time", "")[:19],
-                    "Side": t.get("side", ""),
-                    "Entry": t.get("entry_price", 0),
-                    "Exit": t.get("exit_price", 0),
-                    "Qty": t.get("qty", 0),
-                    "P&L ($)": t.get("pnl", 0),
-                    "P&L %": t.get("pnl_pct", 0),
-                    "Exit Reason": t.get("exit_reason", ""),
-                    "Strategy": t.get("strategy", ""),
-                })
-            trades_df = pd.DataFrame(rows)
-            st.dataframe(
-                # Styler.applymap was removed in pandas 2.1+; .map is the
-                # drop-in replacement with the same signature.
-                trades_df.style.map(
-                    lambda v: "color: green" if isinstance(v, (int, float)) and v > 0 else
-                              "color: red"   if isinstance(v, (int, float)) and v < 0 else "",
-                    subset=["P&L ($)", "P&L %"],
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.markdown("---")
 
-        # ── Decision log ──────────────────────────────────────────────────────
-        log = status.get("decision_log", [])
-        if log:
-            with st.expander(f"📋 Decision Log ({len(log)} entries)", expanded=False):
-                _ICONS = {
-                    "ENTRY LONG": "🟢", "ENTRY SHORT": "🔴",
-                    "EXIT": "✅", "EXIT LONG": "✅", "EXIT SHORT": "✅",
-                    "MOVE_STOP": "🔧", "PARTIAL_EXIT": "📤",
-                    "NO_TRADE": "⬜", "BLOCKED": "🚫",
-                    "TRAIL_ACTIVATED": "🔵", "RESET": "🔄", "COOLDOWN": "⏳",
-                }
-                for entry in reversed(log[-50:]):
-                    event = entry.get("event", "")
-                    icon  = _ICONS.get(event, "ℹ️")
-                    reason = entry.get("reason", "")
-                    checks = entry.get("checks", {}) or {}
-                    # Enrich ENTRY lines with strategy + confidence + RR
-                    extra = ""
-                    if "ENTRY" in event:
-                        strat = checks.get("strategy") or entry.get("strategy", "")
-                        conf  = checks.get("confidence")
-                        rr    = checks.get("rr")
-                        if strat: extra += f" · {strat}"
-                        if conf is not None: extra += f" · conf {float(conf):.0%}"
-                        if rr  is not None: extra += f" · RR {float(rr):.1f}"
-                    # Enrich NO_TRADE with top rejection reason
-                    elif event == "NO_TRADE":
-                        guard = checks.get("guard", {}) or {}
-                        guard_reason = guard.get("reason", "")
-                        if guard_reason and guard_reason not in reason:
-                            extra = f" [{guard_reason[:60]}]"
+            # ── Active position panel ─────────────────────────────────────────
+            if state_val in ("LONG", "SHORT", "PARTIAL_EXIT_TAKEN", "TRAILING"):
+                entry_px = status.get("entry_price", 0) or 0
+                curr_px  = status.get("current_price", 0) or status.get("last_price", 0) or 0
+                stop_px  = status.get("current_stop", 0) or 0
+                tgt_px   = status.get("first_target", 0) or 0
+                r_val    = status.get("r_multiple")
+                qty      = status.get("qty", 0) or 0
+
+                st.markdown(
+                    f"<div style='font-size:0.69rem;font-weight:700;text-transform:uppercase;"
+                    f"letter-spacing:0.08em;color:var(--text-3);margin-bottom:6px'>"
+                    f"Active position — {status.get('side','—')} {at_symbol}</div>",
+                    unsafe_allow_html=True,
+                )
+                p1, p2 = st.columns(2)
+                p1.metric("Entry",   f"${entry_px:.2f}")
+                p2.metric("Current", f"${curr_px:.2f}",
+                          delta=f"{curr_px - entry_px:+.2f}" if curr_px and entry_px else None,
+                          delta_color="normal" if curr_px >= entry_px else "inverse")
+                p3, p4 = st.columns(2)
+                p3.metric("Stop",   f"${stop_px:.2f}",
+                          delta=f"−${abs(curr_px - stop_px):.2f} risk" if curr_px and stop_px else None,
+                          delta_color="off")
+                p4.metric("Target", f"${tgt_px:.2f}",
+                          delta=f"+${abs(tgt_px - curr_px):.2f} reward" if curr_px and tgt_px else None,
+                          delta_color="off")
+                p5, p6 = st.columns(2)
+                p5.metric("R Multiple", f"{r_val:+.2f}R" if r_val is not None else "—")
+                p6.metric("Qty", f"{qty:g}")
+
+                # Time in trade + scenario analysis
+                _entry_time = status.get("entry_time", "")
+                if _entry_time:
+                    try:
+                        _et_ts = datetime.fromisoformat(_entry_time.replace("Z", "+00:00"))
+                        _mins = int((datetime.now(ET) - _et_ts.astimezone(ET)).total_seconds() // 60)
+                        _max_profit = abs(tgt_px - entry_px) * qty if tgt_px and entry_px else 0
+                        _max_loss   = abs(entry_px - stop_px) * qty if entry_px and stop_px else 0
+                        st.caption(
+                            f"⏱ {_mins}m in trade · "
+                            f"If target: **${_max_profit:,.0f}** · "
+                            f"If stopped: **−${_max_loss:,.0f}**"
+                        )
+                        if state_val == "TRAILING":
+                            st.caption(f"Trail mode: {status.get('active_trail_mode','—')}")
+                    except Exception:
+                        pass
+
+            elif state_val == "FLAT":
+                cooldown_left   = status.get("cooldown_bars_remaining", 0) or 0
+                no_trade_reason = status.get("last_no_trade_reason", "") or ""
+                if cooldown_left > 0:
                     st.markdown(
-                        f"`{entry.get('time','')}` {icon} **{event}**{extra} — {reason}"
+                        f"{eligibility_chip('cooldown')} "
+                        f"<span style='color:var(--text-3);font-size:0.82rem'>"
+                        f"{cooldown_left} bar(s) before next entry</span>",
+                        unsafe_allow_html=True,
                     )
+                elif no_trade_reason:
+                    st.markdown(
+                        f"{eligibility_chip('idle')} "
+                        f"<span style='color:var(--text-3);font-size:0.82rem'>{no_trade_reason}</span>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        f"{eligibility_chip('idle')} "
+                        f"<span style='color:var(--text-3);font-size:0.82rem'>Scanning for setup…</span>",
+                        unsafe_allow_html=True,
+                    )
+
+            elif state_val == "BLOCKED":
+                _block_rsn = status.get("block_reason", "Risk limit hit")
+                st.error(f"BLOCKED — {_block_rsn}", icon="🚫")
+
+            st.markdown("---")
+
+            # ── Session stats ─────────────────────────────────────────────────
+            ss1, ss2 = st.columns(2)
+            ss1.metric("Trades today",    status.get("trades_today", 0))
+            ss2.metric("Consec. losses",  status.get("consecutive_losses", 0))
+            hb = status.get("heartbeat_age_s", 0) or 0
+            hb_label = f"{hb:.0f}s ago" if hb < 120 else f"⚠️ {hb:.0f}s — may be stale"
+            st.caption(f"Heartbeat: {hb_label} · Running: {'✅' if status.get('running') else '⏸'}")
+
+            st.markdown("---")
+
+            # ── Closed trades table ───────────────────────────────────────────
+            session_trades = status.get("session_trades", []) or []
+            if session_trades:
+                st.markdown(
+                    "<div style='font-size:0.69rem;font-weight:700;text-transform:uppercase;"
+                    "letter-spacing:0.08em;color:var(--text-3);margin-bottom:6px'>"
+                    f"Closed trades today ({len(session_trades)})</div>",
+                    unsafe_allow_html=True,
+                )
+                _trade_rows = []
+                for _t in session_trades:
+                    _pnl = _t.get("pnl", 0) or 0
+                    _trade_rows.append({
+                        "Time":   (_t.get("entry_time") or "")[:16].replace("T", " "),
+                        "Side":   _t.get("side", ""),
+                        "Entry":  _t.get("entry_price", 0),
+                        "Exit":   _t.get("exit_price", 0),
+                        "Qty":    _t.get("qty", 0),
+                        "P&L $":  _pnl,
+                        "P&L %":  _t.get("pnl_pct", 0),
+                        "Reason": (_t.get("exit_reason") or "")[:25],
+                    })
+                st.dataframe(
+                    pd.DataFrame(_trade_rows).style.map(
+                        lambda v: "color:#4db896" if isinstance(v, (int, float)) and v > 0
+                                  else "color:#d07a7a" if isinstance(v, (int, float)) and v < 0
+                                  else "",
+                        subset=["P&L $", "P&L %"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Entry": st.column_config.NumberColumn("Entry", format="$%.2f", width="small"),
+                        "Exit":  st.column_config.NumberColumn("Exit",  format="$%.2f", width="small"),
+                        "Qty":   st.column_config.NumberColumn("Qty",   format="%.1f",  width="small"),
+                        "P&L $": st.column_config.NumberColumn("P&L $", format="$%+.2f",width="small"),
+                        "P&L %": st.column_config.NumberColumn("P&L %", format="%+.2f%%",width="small"),
+                    },
+                )
+
+            # ── Decision log ──────────────────────────────────────────────────
+            log = status.get("decision_log", []) or []
+            if log:
+                with st.expander(f"Decision log ({len(log)} entries)", expanded=False):
+                    _ICONS = {
+                        "ENTRY LONG": "🟢", "ENTRY SHORT": "🔴",
+                        "EXIT": "✅", "EXIT LONG": "✅", "EXIT SHORT": "✅",
+                        "MOVE_STOP": "🔧", "PARTIAL_EXIT": "📤",
+                        "NO_TRADE": "⬜", "BLOCKED": "🚫",
+                        "TRAIL_ACTIVATED": "🔵", "RESET": "🔄", "COOLDOWN": "⏳",
+                    }
+                    for _entry in reversed(log[-50:]):
+                        _event  = _entry.get("event", "")
+                        _icon   = _ICONS.get(_event, "ℹ️")
+                        _reason = _entry.get("reason", "")
+                        _checks = _entry.get("checks", {}) or {}
+                        _extra  = ""
+                        if "ENTRY" in _event:
+                            _s = _checks.get("strategy") or _entry.get("strategy", "")
+                            _c = _checks.get("confidence")
+                            _r = _checks.get("rr")
+                            if _s: _extra += f" · {_s}"
+                            if _c is not None: _extra += f" · {float(_c):.0%}"
+                            if _r is not None: _extra += f" · {float(_r):.1f}R"
+                        elif _event == "NO_TRADE":
+                            _gr = (_checks.get("guard") or {}).get("reason", "")
+                            if _gr and _gr not in _reason:
+                                _extra = f" [{_gr[:50]}]"
+                        st.markdown(
+                            f"`{_entry.get('time','')[-8:]}` {_icon} **{_event}**{_extra} — {_reason}"
+                        )
 
     # ── Auto-refresh while bot is running ─────────────────────────────────────
     if status.get("running"):
         import time as _t
-        _t.sleep(0.1)
+        _t.sleep(0.3)
         st.rerun()
 
 
