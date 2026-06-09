@@ -516,6 +516,43 @@ with tab_signals:
         with st.spinner("Fetching intraday data and running strategies…"):
             result = _cached_signals(symbol_input)
 
+        # ── Policy block — show prominently before anything else ──────────────
+        if result.get("policy_blocked"):
+            _pol_reason = result.get("policy_reason", "Symbol blocked by deployment policy.")
+            st.warning(
+                f"**{symbol_input}** signals are gated by deployment policy.  \n"
+                f"{_pol_reason}",
+                icon="⚠️",
+            )
+            _pol_col, _ = st.columns([2, 6])
+            if _pol_col.button(
+                "Override policy — enable signals",
+                key="policy_override_btn",
+                type="primary",
+                use_container_width=True,
+            ):
+                try:
+                    from app.services.strategy.daytrading.brain.symbol_policy import (
+                        set_policy, get_policy, SymbolPolicy, ENABLED,
+                    )
+                    _current = get_policy(symbol_input)
+                    set_policy(symbol_input, SymbolPolicy(
+                        symbol=symbol_input,
+                        status=ENABLED,
+                        reason=f"Manually enabled via UI by trader ({datetime.now(ET).strftime('%H:%M ET')})",
+                        wf_verdict=_current.wf_verdict,
+                        wf_score=_current.wf_score,
+                        override_live=True,
+                    ))
+                    _cached_signals.clear()
+                    st.rerun()
+                except Exception as _oe:
+                    st.error(f"Override failed: {_oe}")
+            st.caption(
+                "Override is in-memory and resets on server restart. "
+                "To make permanent, update the symbol policy table in Settings → Symbol Policy."
+            )
+
         regime = result.get("regime", "CHOPPY")
         signals = result.get("signals", [])
         rejected = result.get("rejected_signals", [])
@@ -661,36 +698,66 @@ with tab_signals:
             except Exception:
                 pass
 
-            # Combine accepted + rejected signals so traders can see both on the chart.
+            # ── Build chart markers ───────────────────────────────────────────
+            # signal_time is the authoritative timestamp field from DayTradeSignal.
+            # entry_time / bar_time are legacy aliases; timestamp was never set.
+            def _sig_ts(s: dict) -> str | None:
+                return (s.get("signal_time") or s.get("entry_time")
+                        or s.get("bar_time") or s.get("timestamp"))
+
             combined_signals = []
             for s in signals:
                 combined_signals.append({
-                    "timestamp": s.get("timestamp") or s.get("bar_time") or s.get("entry_time") or s.get("signal_time"),
-                    "direction": s.get("direction"),
+                    "timestamp":   _sig_ts(s),
+                    "direction":   s.get("direction"),
                     "entry_price": s.get("entry_price"),
+                    "label":       s.get("strategy", ""),
                 })
             for s in rejected:
                 combined_signals.append({
-                    "timestamp": s.get("timestamp") or s.get("bar_time") or s.get("signal_time"),
-                    "direction": "HOLD",   # grey marker for rejected
+                    "timestamp":   _sig_ts(s),
+                    "direction":   "HOLD",    # grey marker for rejected signals
                     "entry_price": s.get("entry_price"),
+                    "label":       s.get("strategy", ""),
                 })
 
-            st.markdown("### Price Action — 5m Candles")
-            _overlay_note = []
-            if "VWAP"  in _chart_df.columns: _overlay_note.append("VWAP")
-            if "EMA9"  in _chart_df.columns: _overlay_note.append("EMA 9")
-            if "EMA21" in _chart_df.columns: _overlay_note.append("EMA 21")
-            st.caption(
-                "5m bars with signal markers (green=accepted BUY, red=accepted SELL, grey=rejected). "
-                + (f"Overlays: {', '.join(_overlay_note)}." if _overlay_note else "")
-            )
+            # ── Fetch today's executed fills for this symbol ──────────────────
+            # Show fills as distinct diamond markers so you can see where orders
+            # actually executed vs where signals fired.
+            _fill_markers = []
+            try:
+                _orders = api.orders() or []
+                _today_str = datetime.now(ET).strftime("%Y-%m-%d")
+                for _o in _orders:
+                    if (str(_o.get("symbol", "")).upper() != symbol_input
+                            or _o.get("status") != "filled"
+                            or not (_o.get("created_at") or "").startswith(_today_str)):
+                        continue
+                    _fill_ts  = _o.get("filled_at") or _o.get("created_at")
+                    _fill_px  = _o.get("fill_price")
+                    _fill_side = str(_o.get("side") or "").upper()
+                    if _fill_ts and _fill_px:
+                        _fill_markers.append({
+                            "timestamp":   _fill_ts,
+                            "direction":   _fill_side,
+                            "entry_price": float(_fill_px),
+                            "label":       f"FILL {_fill_side}",
+                            "is_fill":     True,
+                        })
+            except Exception:
+                pass   # fills are best-effort; never block chart rendering
+
+            import plotly.graph_objects as _go
+            from plotly.subplots import make_subplots as _make_subplots
+            import pandas as _pd_local
+
+            # Build chart
             fig_intraday = charts.intraday_candles(
                 _chart_df, signals=combined_signals,
-                title=f"{symbol_input} — 5m", height=520,
+                title=f"{symbol_input} — 5m Intraday", height=540,
             )
-            # Add EMA9/21 traces manually (intraday_candles handles VWAP via column)
-            import plotly.graph_objects as _go
+
+            # EMA 9/21 overlays (intraday_candles handles VWAP via column)
             if "EMA9" in _chart_df.columns:
                 fig_intraday.add_trace(_go.Scatter(
                     x=_chart_df.index, y=_chart_df["EMA9"],
@@ -703,6 +770,64 @@ with tab_signals:
                     mode="lines", line=dict(color="#FF9800", width=1, dash="dot"),
                     name="EMA 21", showlegend=True,
                 ), row=1, col=1)
+
+            # Execution fill markers — distinct diamond shape, solid color
+            if _fill_markers:
+                _buy_fills  = [f for f in _fill_markers if f["direction"] == "BUY"]
+                _sell_fills = [f for f in _fill_markers if f["direction"] == "SELL"]
+
+                def _parse_ts(ts_str):
+                    try:
+                        return _pd_local.Timestamp(ts_str).tz_convert(ET)
+                    except Exception:
+                        return None
+
+                if _buy_fills:
+                    fig_intraday.add_trace(_go.Scatter(
+                        x=[_parse_ts(f["timestamp"]) for f in _buy_fills],
+                        y=[f["entry_price"] * 0.998 for f in _buy_fills],  # slightly below bar
+                        mode="markers",
+                        marker=dict(symbol="diamond", size=14,
+                                    color="#00ff88", line=dict(color="#007744", width=2)),
+                        name="Filled BUY",
+                        text=[f"FILLED BUY @ ${f['entry_price']:.2f}" for f in _buy_fills],
+                        hovertemplate="%{text}<extra></extra>",
+                    ), row=1, col=1)
+                if _sell_fills:
+                    fig_intraday.add_trace(_go.Scatter(
+                        x=[_parse_ts(f["timestamp"]) for f in _sell_fills],
+                        y=[f["entry_price"] * 1.002 for f in _sell_fills],  # slightly above bar
+                        mode="markers",
+                        marker=dict(symbol="diamond", size=14,
+                                    color="#ff4466", line=dict(color="#aa0022", width=2)),
+                        name="Filled SELL",
+                        text=[f"FILLED SELL @ ${f['entry_price']:.2f}" for f in _sell_fills],
+                        hovertemplate="%{text}<extra></extra>",
+                    ), row=1, col=1)
+
+            # Chart header
+            _overlay_note = []
+            if "VWAP"  in _chart_df.columns: _overlay_note.append("VWAP")
+            if "EMA9"  in _chart_df.columns: _overlay_note.append("EMA 9")
+            if "EMA21" in _chart_df.columns: _overlay_note.append("EMA 21")
+
+            _n_sigs  = len([s for s in combined_signals if s.get("direction") != "HOLD"])
+            _n_fills = len(_fill_markers)
+            _legend_parts = [
+                "▲ green = BUY signal",
+                "▼ red = SELL signal",
+                "· grey = rejected",
+            ]
+            if _n_fills:
+                _legend_parts.append("◆ diamond = executed fill")
+
+            st.markdown("### Price Action — 5m Intraday")
+            st.caption(
+                f"{_n_sigs} signal(s)"
+                + (f" · {_n_fills} fill(s) today" if _n_fills else "")
+                + (f" · Overlays: {', '.join(_overlay_note)}" if _overlay_note else "")
+                + f"  ·  {' | '.join(_legend_parts)}"
+            )
             st.plotly_chart(fig_intraday, use_container_width=True, theme=None)
 
         # ── Pipeline diagnostics panel ────────────────────────────────────────

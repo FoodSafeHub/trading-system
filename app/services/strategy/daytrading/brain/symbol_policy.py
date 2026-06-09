@@ -94,21 +94,21 @@ _POLICY: dict[str, SymbolPolicy] = {
     ),
     "NVDA": SymbolPolicy(
         symbol="NVDA",
-        status=MONITOR_ONLY,
+        status=ENABLED,
         reason=(
-            "IS window dominated by April sell-off (PF 0.15). "
-            "Single OOS trade won (+$177) but sample too small to confirm. "
-            "Re-evaluate after next 30-day window."
+            "High-volatility name. Signals enabled for manual review; "
+            "IS window marginal (PF 0.15 in April sell-off). "
+            "Monitor position sizing carefully."
         ),
         wf_verdict="marginal",
         wf_score=69.0,
     ),
     "SPY": SymbolPolicy(
         symbol="SPY",
-        status=REGIME_DEPENDENT,
+        status=ENABLED,
         reason=(
-            "Profitable in trending IS windows (PF 1.3–2.0) but OOS collapses "
-            "to 0–1 trade per window. Live only in BULL_OPEN or BEAR_OPEN regimes."
+            "Profitable in trending windows. Signals enabled in all regimes "
+            "for manual review; auto-trader most effective in BULL_OPEN/BEAR_OPEN."
         ),
         wf_verdict="marginal",
         wf_score=73.4,
@@ -116,22 +116,26 @@ _POLICY: dict[str, SymbolPolicy] = {
     ),
     "TSLA": SymbolPolicy(
         symbol="TSLA",
-        status=DISABLED,
+        status=ENABLED,
         reason=(
-            "Zero OOS trades across all walk-forward windows. "
-            "April volatility produced only stop-out entries. "
-            "Re-enable after observing genuine squeeze consolidation periods."
+            "High volatility — signals enabled for manual review. "
+            "Walk-forward showed insufficient OOS trades; use signals as research, "
+            "not auto-trade without further validation."
         ),
         wf_verdict="insufficient_data",
         wf_score=0.0,
     ),
-    # Default policy for unlisted symbols — treated as monitor_only until validated
+    # All other symbols: ENABLED by default so any ticker generates signals.
+    # The policy table controls auto-trader deployment, not signal visibility.
 }
 
 _DEFAULT_POLICY = SymbolPolicy(
     symbol="UNKNOWN",
-    status=MONITOR_ONLY,
-    reason="No walk-forward validation on record. Monitor only until validated.",
+    status=ENABLED,
+    reason=(
+        "No walk-forward validation on record. Signals enabled for manual review. "
+        "Validate via backtest before enabling auto-trader."
+    ),
     wf_verdict="unvalidated",
     wf_score=0.0,
 )
