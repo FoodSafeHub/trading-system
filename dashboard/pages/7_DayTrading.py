@@ -41,6 +41,7 @@ from app.services.strategy.daytrading.strategies import ALL_STRATEGIES, STRATEGY
 sys.path.insert(0, dashboard_root)
 from _theme import apply_theme  # noqa: E402
 import _charts as charts  # noqa: E402
+import _lightweight_chart as lwc  # noqa: E402
 import api  # noqa: E402
 from _broker_routing import render_broker_routing_toggle  # noqa: E402
 from _components import (  # noqa: E402
@@ -478,18 +479,25 @@ def _metrics_row(m: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 1 — Live Signals
+# TAB 1 — Live Signals  (day-trading workstation)
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_signals:
-    col_sym, col_btn, col_auto = st.columns([3, 1, 1])
-    symbol_input = col_sym.text_input("Symbol", value="SPY", key="signals_symbol").upper()
-    get_btn = col_btn.button("▶ Get Signals", use_container_width=True)
-    auto_refresh = col_auto.toggle("Auto-refresh", value=False, key="signals_auto_refresh",
-                                   help="Refreshes every 5 minutes while the market is open.")
+    # ── Top control bar ───────────────────────────────────────────────────────
+    ctrl1, ctrl2, ctrl3, ctrl4, ctrl5 = st.columns([3, 1, 1, 1, 1])
+    symbol_input = ctrl1.text_input(
+        "Symbol", value="SPY", key="signals_symbol",
+        placeholder="AAPL, MTEN, SPY …",
+    ).upper().strip() or "SPY"
+    tf_pick      = ctrl2.selectbox("Timeframe", ["5m", "1m", "15m"], index=0, key="signals_tf")
+    auto_refresh = ctrl3.toggle("Live", value=False, key="signals_auto_refresh",
+                                help="Auto-refresh every 5 min during market hours.")
+    show_rejected = ctrl4.toggle("Show rejected", value=True, key="signals_show_rej",
+                                 help="Overlay rejected signal markers on chart.")
+    get_btn = ctrl5.button("🔄 Refresh", use_container_width=True)
 
-    # Market status inline band
+    # ── Status band ───────────────────────────────────────────────────────────
     _mkt_status_obj = market_status()
-    _now_str2 = _mkt_status_obj.get("time_et", "")
+    _now_str2    = _mkt_status_obj.get("time_et", "")
     _mkt_is_open = is_market_open(symbol_input)
     _mkt_pre     = is_pre_market(symbol_input)
     _mkt_state   = "OPEN" if _mkt_is_open else ("PRE-MARKET" if _mkt_pre else "CLOSED")
@@ -497,381 +505,216 @@ with tab_signals:
     _last_refresh = st.session_state.get("_signals_last_refresh")
     _refresh_str  = _last_refresh.strftime("%H:%M:%S") if _last_refresh else "—"
     stat_band([
-        ("Session",   _mkt_state, _mkt_clr),
-        ("Clock",     _now_str2,  "grey"),
+        ("Session",      _mkt_state, _mkt_clr),
+        ("Clock",        _now_str2,  "grey"),
+        ("Timeframe",    tf_pick,    "grey"),
         ("Last refresh", _refresh_str, "grey"),
     ])
 
-    # Auto-refresh: clear cache and rerun every 5 min while market is open
+    # ── Auto-refresh trigger ──────────────────────────────────────────────────
     if auto_refresh and _mkt_is_open:
-        import time as _time_mod
         _last = st.session_state.get("_signals_last_refresh")
         if _last is None or (datetime.now(ET) - _last).total_seconds() >= 300:
-            _cached_signals.clear()
-            get_btn = True   # treat as a manual click
+            get_btn = True
 
-    if get_btn or st.session_state.get("_dt_signals_loaded"):
-        st.session_state["_dt_signals_loaded"] = True
-        st.session_state["_signals_last_refresh"] = datetime.now(ET)
-        with st.spinner("Fetching intraday data and running strategies…"):
-            result = _cached_signals(symbol_input)
+    # ─────────────────────────────────────────────────────────────────────────
+    # MAIN WORKSTATION — chart left, signals right
+    # ─────────────────────────────────────────────────────────────────────────
+    chart_col, side_col = st.columns([7, 3], gap="medium")
 
-        # ── Policy block — show prominently before anything else ──────────────
-        if result.get("policy_blocked"):
-            _pol_reason = result.get("policy_reason", "Symbol blocked by deployment policy.")
-            st.warning(
-                f"**{symbol_input}** signals are gated by deployment policy.  \n"
-                f"{_pol_reason}",
-                icon="⚠️",
-            )
-            _pol_col, _ = st.columns([2, 6])
-            if _pol_col.button(
-                "Override policy — enable signals",
-                key="policy_override_btn",
-                type="primary",
-                use_container_width=True,
-            ):
-                try:
-                    from app.services.strategy.daytrading.brain.symbol_policy import (
-                        set_policy, get_policy, SymbolPolicy, ENABLED,
-                    )
-                    _current = get_policy(symbol_input)
-                    set_policy(symbol_input, SymbolPolicy(
-                        symbol=symbol_input,
-                        status=ENABLED,
-                        reason=f"Manually enabled via UI by trader ({datetime.now(ET).strftime('%H:%M ET')})",
-                        wf_verdict=_current.wf_verdict,
-                        wf_score=_current.wf_score,
-                        override_live=True,
-                    ))
-                    _cached_signals.clear()
-                    st.rerun()
-                except Exception as _oe:
-                    st.error(f"Override failed: {_oe}")
-            st.caption(
-                "Override is in-memory and resets on server restart. "
-                "To make permanent, update the symbol policy table in Settings → Symbol Policy."
-            )
-
-        regime = result.get("regime", "CHOPPY")
-        signals = result.get("signals", [])
-        rejected = result.get("rejected_signals", [])
-        brain = result.get("brain", {})
-
-        # ── Brain Status Panel ────────────────────────────────────────────────
-        if brain:
-            ms_state     = brain.get("market_state", "UNKNOWN")
-            ms_conf      = brain.get("state_confidence", 0)
-            kill         = brain.get("kill_switch", False)
-            size_mult    = brain.get("size_multiplier", 1.0)
-            trades_today = brain.get("trades_today", 0)
-            losses_row   = brain.get("losses_in_a_row", 0)
-            daily_pnl    = brain.get("daily_pnl_pct", 0.0)
-            enabled      = brain.get("enabled_strategies", [])
-            disabled     = brain.get("disabled_strategies", [])
-
-            # Derive eligibility using shared vocabulary
-            if kill:
-                _elig_state  = "blocked"
-                _elig_chip   = blocker_chip("KILL_SWITCH")
-            elif size_mult == 0.0:
-                _elig_state  = "blocked"
-                _elig_chip   = blocker_chip("POSITION_LIMIT")
-            elif ms_state == "NEWS_RISK":
-                _elig_state  = "blocked"
-                _elig_chip   = blocker_chip("NEWS_RISK")
-            elif size_mult < 0.6:
-                _elig_state  = "watch"
-                _elig_chip   = eligibility_chip("watch", blocker_label("SIZE_REDUCED", detail=True))
-            elif ms_state in ("CHOPPY", "HIGH_VOL"):
-                _elig_state  = "watch"
-                _elig_chip   = eligibility_chip("watch", blocker_label(ms_state, detail=True))
-            else:
-                _elig_state  = "ready"
-                _elig_chip   = eligibility_chip("ready", "Market conditions acceptable for entries")
-
-            st.markdown("---")
-
-            # Compact header: regime + eligibility + confidence on one line
+    with chart_col:
+        # ── TradingView lightweight-charts via /chart/intraday endpoint ───────
+        # This is the same engine used on the Charts page: proper candles,
+        # auto-zoom to the current session, backend-computed VWAP/EMA overlays,
+        # and strategy markers anchored to the correct bar.
+        if not get_btn and not st.session_state.get("_dt_signals_loaded"):
             st.markdown(
-                f"**Brain** &nbsp;"
-                f"{regime_chip(ms_state)} &nbsp;"
-                f"<span style='color:var(--text-3);font-size:0.78rem'>conf {ms_conf:.0%}</span>"
-                f" &nbsp;&nbsp; {_elig_chip}",
+                "<div style='padding:60px 24px;text-align:center;"
+                "color:var(--text-3);font-size:0.9rem'>"
+                "Enter a symbol and click <b>Refresh</b> to load the live chart."
+                "</div>",
                 unsafe_allow_html=True,
             )
-            st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        else:
+            st.session_state["_dt_signals_loaded"] = True
+            st.session_state["_signals_last_refresh"] = datetime.now(ET)
 
-            if kill:
-                st.error(
-                    f"🛑 **KILL SWITCH** — {brain.get('kill_switch_reason', 'all entries blocked')}",
-                    icon="🛑",
+            with st.spinner(f"Loading {symbol_input} {tf_pick} chart…"):
+                try:
+                    _chart_payload = api.intraday_chart(
+                        symbol_input,
+                        timeframe=tf_pick,
+                        strategies="all",
+                        include_rejected=show_rejected,
+                    )
+                except Exception as _ce:
+                    _chart_payload = None
+                    st.error(f"Chart fetch failed: {_ce}", icon="⚠️")
+
+            if _chart_payload:
+                # Warn about policy block but still show whatever came back
+                if _chart_payload.get("warning") and "policy" in str(_chart_payload.get("warning","")).lower():
+                    st.warning(_chart_payload["warning"], icon="⚠️")
+
+                lwc.render_strategy_chart(
+                    _chart_payload,
+                    overlays_enabled=["vwap", "ema9", "ema21"],
+                    show_trades=True,
+                    show_rejected=show_rejected,
+                    show_levels=True,
+                    height=560,
+                )
+                _n_markers = len(_chart_payload.get("markers") or [])
+                _n_rej = len(_chart_payload.get("rejected_markers") or [])
+                st.caption(
+                    f"▲ green = BUY  ·  ▼ red = SELL  ·  ✕ yellow = rejected  ·  "
+                    f"{_n_markers} signal(s)  ·  {_n_rej} rejected  ·  "
+                    f"Click any marker for entry/stop/target detail"
                 )
 
-            # Metrics row — only what a trader needs at a glance
-            b1, b2, b3, b4, b5 = st.columns(5)
-            b1.metric("Kill Switch",     "🔴 ON" if kill else "🟢 OFF")
-            b2.metric("Size Multiplier", f"{size_mult:.0%}")
-            b3.metric("Trades Today",    str(trades_today))
-            b4.metric("Losses in a Row", str(losses_row))
-            pnl_color = "normal" if daily_pnl >= 0 else "inverse"
-            b5.metric("Daily P&L",       f"{daily_pnl:+.2f}%", delta_color=pnl_color)
+    with side_col:
+        # ── Signal panel: run signals for the accepted list + brain status ────
+        if st.session_state.get("_dt_signals_loaded"):
+            with st.spinner("Running strategy signals…"):
+                result = _cached_signals(symbol_input)
 
-            # Strategy routing — one line per strategy, compact
-            if enabled or disabled:
-                _strat_summary = (
-                    f"{len(enabled)} allowed · {len(disabled)} blocked"
-                    + (f" · {', '.join(disabled[:3])}" if disabled else "")
-                    + ("…" if len(disabled) > 3 else "")
-                )
-                with st.expander(f"Strategy routing — {_strat_summary}", expanded=False):
-                    col_on, col_off = st.columns(2)
-                    with col_on:
-                        st.markdown(
-                            "<div style='font-size:0.69rem;font-weight:700;text-transform:uppercase;"
-                            "letter-spacing:0.08em;color:var(--text-3);margin-bottom:4px'>Allowed</div>",
-                            unsafe_allow_html=True,
+            # Policy block with 1-click override
+            if result.get("policy_blocked"):
+                _pol_reason = result.get("policy_reason", "Symbol blocked by deployment policy.")
+                st.warning(_pol_reason, icon="⚠️")
+                if st.button("Enable signals for this symbol", key="policy_override_btn",
+                             type="primary", use_container_width=True):
+                    try:
+                        from app.services.strategy.daytrading.brain.symbol_policy import (
+                            set_policy, get_policy, SymbolPolicy, ENABLED,
                         )
+                        _cur = get_policy(symbol_input)
+                        set_policy(symbol_input, SymbolPolicy(
+                            symbol=symbol_input, status=ENABLED, override_live=True,
+                            reason=f"Enabled via UI {datetime.now(ET).strftime('%H:%M ET')}",
+                            wf_verdict=_cur.wf_verdict, wf_score=_cur.wf_score,
+                        ))
+                        _cached_signals.clear()
+                        st.rerun()
+                    except Exception as _oe:
+                        st.error(f"Override failed: {_oe}")
+                st.caption("In-memory only — resets on server restart.")
+                st.stop()
+
+            regime   = result.get("regime", "CHOPPY")
+            signals  = result.get("signals", [])
+            rejected = result.get("rejected_signals", [])
+            brain    = result.get("brain", {})
+            raw_count = result.get("raw_signal_count", 0)
+
+            # ── Brain status (compact) ────────────────────────────────────────
+            if brain:
+                ms_state  = brain.get("market_state", "UNKNOWN")
+                ms_conf   = brain.get("state_confidence", 0)
+                kill      = brain.get("kill_switch", False)
+                size_mult = brain.get("size_multiplier", 1.0)
+                daily_pnl = brain.get("daily_pnl_pct", 0.0)
+
+                if kill:
+                    _elig_chip = blocker_chip("KILL_SWITCH")
+                elif ms_state == "NEWS_RISK":
+                    _elig_chip = blocker_chip("NEWS_RISK")
+                elif size_mult < 0.6:
+                    _elig_chip = eligibility_chip("watch", "Reduced size")
+                elif ms_state in ("CHOPPY", "HIGH_VOL"):
+                    _elig_chip = eligibility_chip("watch", ms_state)
+                else:
+                    _elig_chip = eligibility_chip("ready")
+
+                st.markdown(
+                    f"{regime_chip(ms_state)} &nbsp;"
+                    f"<span style='color:var(--text-3);font-size:0.75rem'>conf {ms_conf:.0%}</span>"
+                    f"&nbsp;&nbsp; {_elig_chip}",
+                    unsafe_allow_html=True,
+                )
+                b1, b2, b3 = st.columns(3)
+                b1.metric("Size", f"{size_mult:.0%}")
+                b2.metric("Trades", str(brain.get("trades_today", 0)))
+                pnl_c = "normal" if daily_pnl >= 0 else "inverse"
+                b3.metric("P&L", f"{daily_pnl:+.2f}%", delta_color=pnl_c)
+
+                if kill:
+                    st.error("🛑 Kill switch active", icon="🛑")
+
+                # Strategy routing — one line
+                enabled  = brain.get("enabled_strategies", [])
+                disabled = brain.get("disabled_strategies", [])
+                if enabled or disabled:
+                    with st.expander(
+                        f"Routing: {len(enabled)} on · {len(disabled)} off",
+                        expanded=False,
+                    ):
+                        _dis_reasons = brain.get("disabled_strategies_reasons", {}) or {}
                         for s in enabled:
                             st.markdown(
-                                f"<span class='tx-pill green' "
-                                f"style='margin-bottom:3px;display:inline-block'>{s}</span>",
+                                f"<span class='tx-pill green' style='margin:2px;display:inline-block'>{s}</span>",
                                 unsafe_allow_html=True,
                             )
-                    with col_off:
-                        st.markdown(
-                            "<div style='font-size:0.69rem;font-weight:700;text-transform:uppercase;"
-                            "letter-spacing:0.08em;color:var(--text-3);margin-bottom:4px'>Blocked</div>",
-                            unsafe_allow_html=True,
-                        )
-                        _dis_reasons = brain.get("disabled_strategies_reasons", {}) or {}
                         for s in disabled:
-                            _reason = _dis_reasons.get(s, "Blocked by regime routing")
+                            _r = _dis_reasons.get(s, "regime")
                             st.markdown(
-                                f"<span class='tx-pill red' title='{_reason}' "
-                                f"style='margin-bottom:3px;display:inline-block'>{s}</span>",
+                                f"<span class='tx-pill red' title='{_r}' "
+                                f"style='margin:2px;display:inline-block'>{s}</span>",
                                 unsafe_allow_html=True,
                             )
-                    if brain.get("routing_summary"):
-                        st.caption(brain["routing_summary"])
 
-            reasons = brain.get("state_reasons", [])
-            if reasons:
-                with st.expander("Why this market state?", expanded=False):
-                    for r in reasons:
-                        st.caption(f"• {r}")
+                reasons = brain.get("state_reasons", [])
+                if reasons:
+                    with st.expander("Why this state?", expanded=False):
+                        for r in reasons:
+                            st.caption(f"• {r}")
 
             st.markdown("---")
 
-        # ── Signal counts (raw AND post-brain) ───────────────────────────────
-        raw_count = result.get("raw_signal_count", 0)
-        buys  = [s for s in signals if s.get("direction") == "BUY"]
-        sells = [s for s in signals if s.get("direction") in ("SELL", "SELL_SHORT")]
-        holds = [s for s in signals if s.get("direction") == "HOLD"]
-
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Raw Signals",    raw_count)
-        m2.metric("Accepted",       len(signals))
-        m3.metric("Rejected",       len(rejected))
-        m4.metric("Raw BUY",        result.get("diagnostics", {}).get("signals", {}).get("raw_buy_signals", 0))
-        m5.metric("Raw SELL",       result.get("diagnostics", {}).get("signals", {}).get("raw_sell_signals", 0))
-        st.markdown(
-            f"&nbsp; Regime: {regime_chip(regime)}",
-            unsafe_allow_html=True,
-        )
-
-        # ── Intraday candlestick with signal markers ─────────────────────────
-        try:
-            intraday_df = fetch_intraday(symbol_input, interval="5m", period="5d")
-        except Exception:
-            intraday_df = None
-        if intraday_df is not None and not intraday_df.empty:
-            # Add VWAP + EMA 9/21 overlays so traders can read context.
-            _chart_df = intraday_df.copy()
-            try:
-                _chart_df["VWAP"] = compute_vwap(_chart_df)
-            except Exception:
-                pass
-            try:
-                _chart_df["EMA9"]  = _chart_df["Close"].ewm(span=9,  adjust=False).mean()
-                _chart_df["EMA21"] = _chart_df["Close"].ewm(span=21, adjust=False).mean()
-            except Exception:
-                pass
-
-            # ── Build chart markers ───────────────────────────────────────────
-            # signal_time is the authoritative timestamp field from DayTradeSignal.
-            # entry_time / bar_time are legacy aliases; timestamp was never set.
-            def _sig_ts(s: dict) -> str | None:
-                return (s.get("signal_time") or s.get("entry_time")
-                        or s.get("bar_time") or s.get("timestamp"))
-
-            combined_signals = []
-            for s in signals:
-                combined_signals.append({
-                    "timestamp":   _sig_ts(s),
-                    "direction":   s.get("direction"),
-                    "entry_price": s.get("entry_price"),
-                    "label":       s.get("strategy", ""),
-                })
-            for s in rejected:
-                combined_signals.append({
-                    "timestamp":   _sig_ts(s),
-                    "direction":   "HOLD",    # grey marker for rejected signals
-                    "entry_price": s.get("entry_price"),
-                    "label":       s.get("strategy", ""),
-                })
-
-            # ── Fetch today's executed fills for this symbol ──────────────────
-            # Show fills as distinct diamond markers so you can see where orders
-            # actually executed vs where signals fired.
-            _fill_markers = []
-            try:
-                _orders = api.orders() or []
-                _today_str = datetime.now(ET).strftime("%Y-%m-%d")
-                for _o in _orders:
-                    if (str(_o.get("symbol", "")).upper() != symbol_input
-                            or _o.get("status") != "filled"
-                            or not (_o.get("created_at") or "").startswith(_today_str)):
-                        continue
-                    _fill_ts  = _o.get("filled_at") or _o.get("created_at")
-                    _fill_px  = _o.get("fill_price")
-                    _fill_side = str(_o.get("side") or "").upper()
-                    if _fill_ts and _fill_px:
-                        _fill_markers.append({
-                            "timestamp":   _fill_ts,
-                            "direction":   _fill_side,
-                            "entry_price": float(_fill_px),
-                            "label":       f"FILL {_fill_side}",
-                            "is_fill":     True,
-                        })
-            except Exception:
-                pass   # fills are best-effort; never block chart rendering
-
-            import plotly.graph_objects as _go
-            from plotly.subplots import make_subplots as _make_subplots
-            import pandas as _pd_local
-
-            # Build chart
-            fig_intraday = charts.intraday_candles(
-                _chart_df, signals=combined_signals,
-                title=f"{symbol_input} — 5m Intraday", height=540,
+            # ── Signal cards ──────────────────────────────────────────────────
+            st.markdown(
+                f"<div style='font-size:0.72rem;font-weight:700;text-transform:uppercase;"
+                f"letter-spacing:0.08em;color:var(--text-3);margin-bottom:8px'>"
+                f"Signals — {len(signals)} accepted · {raw_count} raw · {len(rejected)} rejected"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"Regime: {regime_chip(regime)}",
+                unsafe_allow_html=True,
             )
 
-            # EMA 9/21 overlays (intraday_candles handles VWAP via column)
-            if "EMA9" in _chart_df.columns:
-                fig_intraday.add_trace(_go.Scatter(
-                    x=_chart_df.index, y=_chart_df["EMA9"],
-                    mode="lines", line=dict(color="#26C6DA", width=1, dash="dot"),
-                    name="EMA 9", showlegend=True,
-                ), row=1, col=1)
-            if "EMA21" in _chart_df.columns:
-                fig_intraday.add_trace(_go.Scatter(
-                    x=_chart_df.index, y=_chart_df["EMA21"],
-                    mode="lines", line=dict(color="#FF9800", width=1, dash="dot"),
-                    name="EMA 21", showlegend=True,
-                ), row=1, col=1)
+            if not signals and raw_count == 0:
+                empty_state(
+                    "No setups found",
+                    "Strategies found no qualifying conditions in current bars. "
+                    "Check diagnostics below.",
+                    icon="📭",
+                )
+            elif not signals and raw_count > 0:
+                st.warning(
+                    f"{raw_count} raw signal(s) all rejected by brain.",
+                    icon="⚠️",
+                )
+            else:
+                for i, sig in enumerate(signals):
+                    _render_signal_card(sig, i, symbol=symbol_input)
+                    brain_reason = sig.get("brain_reason", "")
+                    brain_size   = sig.get("brain_size_multiplier", 1.0)
+                    if brain_reason:
+                        st.caption(f"Brain: {brain_reason}  |  Size: {brain_size:.0%}")
 
-            # Execution fill markers — distinct diamond shape, solid color
-            if _fill_markers:
-                _buy_fills  = [f for f in _fill_markers if f["direction"] == "BUY"]
-                _sell_fills = [f for f in _fill_markers if f["direction"] == "SELL"]
+            if rejected:
+                with st.expander(f"{len(rejected)} rejected", expanded=False):
+                    for sig in rejected:
+                        st.caption(
+                            f"**{sig.get('strategy')}** {sig.get('direction')} "
+                            f"@ ${sig.get('entry_price', 0):.2f} — "
+                            f"{sig.get('brain_reason', 'filtered')}"
+                        )
 
-                def _parse_ts(ts_str):
-                    try:
-                        return _pd_local.Timestamp(ts_str).tz_convert(ET)
-                    except Exception:
-                        return None
-
-                if _buy_fills:
-                    fig_intraday.add_trace(_go.Scatter(
-                        x=[_parse_ts(f["timestamp"]) for f in _buy_fills],
-                        y=[f["entry_price"] * 0.998 for f in _buy_fills],  # slightly below bar
-                        mode="markers",
-                        marker=dict(symbol="diamond", size=14,
-                                    color="#00ff88", line=dict(color="#007744", width=2)),
-                        name="Filled BUY",
-                        text=[f"FILLED BUY @ ${f['entry_price']:.2f}" for f in _buy_fills],
-                        hovertemplate="%{text}<extra></extra>",
-                    ), row=1, col=1)
-                if _sell_fills:
-                    fig_intraday.add_trace(_go.Scatter(
-                        x=[_parse_ts(f["timestamp"]) for f in _sell_fills],
-                        y=[f["entry_price"] * 1.002 for f in _sell_fills],  # slightly above bar
-                        mode="markers",
-                        marker=dict(symbol="diamond", size=14,
-                                    color="#ff4466", line=dict(color="#aa0022", width=2)),
-                        name="Filled SELL",
-                        text=[f"FILLED SELL @ ${f['entry_price']:.2f}" for f in _sell_fills],
-                        hovertemplate="%{text}<extra></extra>",
-                    ), row=1, col=1)
-
-            # Chart header
-            _overlay_note = []
-            if "VWAP"  in _chart_df.columns: _overlay_note.append("VWAP")
-            if "EMA9"  in _chart_df.columns: _overlay_note.append("EMA 9")
-            if "EMA21" in _chart_df.columns: _overlay_note.append("EMA 21")
-
-            _n_sigs  = len([s for s in combined_signals if s.get("direction") != "HOLD"])
-            _n_fills = len(_fill_markers)
-            _legend_parts = [
-                "▲ green = BUY signal",
-                "▼ red = SELL signal",
-                "· grey = rejected",
-            ]
-            if _n_fills:
-                _legend_parts.append("◆ diamond = executed fill")
-
-            st.markdown("### Price Action — 5m Intraday")
-            st.caption(
-                f"{_n_sigs} signal(s)"
-                + (f" · {_n_fills} fill(s) today" if _n_fills else "")
-                + (f" · Overlays: {', '.join(_overlay_note)}" if _overlay_note else "")
-                + f"  ·  {' | '.join(_legend_parts)}"
-            )
-            st.plotly_chart(fig_intraday, use_container_width=True, theme=None)
-
-        # ── Pipeline diagnostics panel ────────────────────────────────────────
-        diag_data = result.get("diagnostics", {})
-        if diag_data:
+            # ── Export + diagnostics ──────────────────────────────────────────
             st.markdown("---")
-            _render_pipeline_diagnostics(diag_data)
-            st.markdown("---")
-
-        if not signals and raw_count == 0:
-            st.info(
-                "**No raw candidate setups found in current bars.** "
-                "The strategies found no qualifying conditions. "
-                "See pipeline diagnostics above for details."
-            )
-        elif not signals and raw_count > 0:
-            st.warning(
-                f"**{raw_count} raw signals found but all rejected by brain filters.** "
-                "See pipeline diagnostics above for the breakdown."
-            )
-        else:
-            st.markdown("### Accepted Signals")
-            for i, sig in enumerate(signals):
-                _render_signal_card(sig, i, symbol=symbol_input)
-                brain_reason = sig.get("brain_reason", "")
-                brain_size = sig.get("brain_size_multiplier", 1.0)
-                if brain_reason:
-                    st.caption(f"Brain: {brain_reason}  |  Size: {brain_size:.0%}")
-
-        if rejected:
-            with st.expander(f"{len(rejected)} signal(s) rejected by brain"):
-                for sig in rejected:
-                    st.markdown(
-                        f"**{sig.get('strategy')}** — {sig.get('direction')} @ "
-                        f"${sig.get('entry_price', 0):.2f}  |  "
-                        f"Reason: {sig.get('brain_reason', 'filtered')}"
-                    )
-
-        col_ref, col_exp, _ = st.columns([2, 2, 6])
-        if col_ref.button("🔄 Refresh Now"):
-            _cached_signals.clear()
-            st.session_state["_signals_last_refresh"] = None
-            st.rerun()
-        with col_exp.expander("Export signals"):
             _exp_rows = [
                 {k: s.get(k) for k in ["strategy","direction","entry_price","stop_price",
                                         "target_price","r_multiple","confidence","regime","signal_time"]}
@@ -879,15 +722,19 @@ with tab_signals:
             ]
             if _exp_rows:
                 st.download_button(
-                    "⬇ Download CSV",
+                    "⬇ Export signals CSV",
                     data=pd.DataFrame(_exp_rows).to_csv(index=False),
                     file_name=f"{symbol_input}_signals_{datetime.now(ET).strftime('%Y%m%d_%H%M')}.csv",
                     mime="text/csv",
+                    use_container_width=True,
                 )
-            else:
-                st.caption("No accepted signals to export.")
 
-    # Auto-rerun when market is open and toggle is on (schedule next rerun)
+            diag_data = result.get("diagnostics", {})
+            if diag_data:
+                with st.expander("Pipeline diagnostics", expanded=False):
+                    _render_pipeline_diagnostics(diag_data)
+
+    # Auto-rerun schedule
     if auto_refresh and _mkt_is_open and st.session_state.get("_dt_signals_loaded"):
         import time as _t2
         _t2.sleep(0.5)
