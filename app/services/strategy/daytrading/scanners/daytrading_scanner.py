@@ -60,7 +60,8 @@ class DayTradingScannerConfig:
     max_atr_pct: float = 8.0            # too wild (blow-up risk)
 
     # ── Scan execution ────────────────────────────────────────────────────────
-    max_workers: int = 16               # parallel workers for fetching metrics
+    max_workers: int = 32               # parallel workers for Phase 2 deep fetch
+    chunk_size: int = 200               # symbols per Phase 2 chunk
     universe_max_symbols: int | None = None  # cap universe size for development; None = all
 
     # ── Pre-market activity ───────────────────────────────────────────────────
@@ -223,6 +224,16 @@ class DayTradingScanner:
     def load_universe(self) -> list[str]:
         """Return the symbol universe this scanner will evaluate."""
         return list(self._universe)
+
+    @classmethod
+    def invalidate_bulk_cache(cls) -> None:
+        """Force the next scan to re-download all data.
+        Call this when the user changes filter presets mid-session."""
+        cls._daily_cache      = {}
+        cls._daily_cache_date = None
+        cls._pm_vol_cache      = {}
+        cls._pm_vol_cache_date = None
+        logger.info("Scanner caches invalidated — next scan will re-download everything")
 
     def fetch_metrics(self, symbol: str) -> SymbolScanMetrics:
         """
@@ -402,49 +413,339 @@ class DayTradingScanner:
             metrics=metrics,
         )
 
+    # ── Daily OHLCV cache — stored per symbol, refreshed once per calendar day ──
+    # Maps symbol → full daily DataFrame (35d OHLCV). Built during Phase 1 so
+    # Phase 2 never re-downloads daily bars for any survivor.
+    _daily_cache: dict[str, pd.DataFrame] = {}
+    _daily_cache_date: date | None = None
+
+    # ── Pre-market volume cache — maps symbol → float, built in Phase 2a ──────
+    _pm_vol_cache: dict[str, float] = {}
+    _pm_vol_cache_date: date | None = None
+
     def scan(self, max_symbols: int = 50) -> list[SymbolScanResult]:
         """
-        Run the full pre-market scan:
-          1. Load universe.
-          2. Fetch metrics per symbol in parallel.
-          3. Attach float data (daily cache; only fetched for survivors of the
-             cheap price/volume filters to keep load on yfinance manageable).
-          4. Score each symbol.
-          5. Return top-N by score (rejected symbols excluded).
+        Three-phase scan for 7,000+ symbol universes.
+
+        Phase 1 — bulk OHLCV download + pre-filter (full universe, batched):
+          Downloads 35d daily OHLCV for every symbol in batches of 100 using
+          yfinance multi-ticker mode (~50× faster than per-symbol calls).
+          Computes price, 30d avg volume, ATR-14, and gap from this data.
+          Eliminates ~90% of the universe immediately. Full OHLCV stored in
+          _daily_cache so Phase 2 never re-downloads daily bars.
+
+        Phase 2a — batch pre-market volume (survivors only, batched):
+          Downloads 1m intraday bars with prepost=True for all survivors in
+          batches of 50, extracting 04:00–09:30 volume. One batch call covers
+          50 symbols vs the old 50 individual calls.
+
+        Phase 2b — build metrics from cached data (no network calls):
+          Constructs SymbolScanMetrics entirely from Phase 1 + 2a cache.
+          No per-symbol HTTP requests needed.
+
+        Phase 3 — float, score, rank.
         """
         universe = self.load_universe()
+        cfg = self.config
         logger.info("Scanner starting: %d symbols in universe", len(universe))
 
-        # ── Step 1: parallel metric fetch ─────────────────────────────────────
-        metrics_list: list[SymbolScanMetrics] = []
-        workers = max(1, int(self.config.max_workers))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(self.fetch_metrics, sym): sym for sym in universe}
-            for fut in as_completed(futures):
-                try:
-                    metrics_list.append(fut.result())
-                except Exception as e:
-                    sym = futures[fut]
-                    logger.debug("fetch_metrics worker failed for %s: %s", sym, e)
+        # ── Phase 1: bulk OHLCV download + pre-filter ─────────────────────────
+        survivors, daily_data = self._bulk_download_and_filter(universe)
+        logger.info(
+            "Phase 1 complete: %d/%d symbols passed price+volume+ATR pre-filter",
+            len(survivors), len(universe),
+        )
+        if not survivors:
+            logger.warning("Phase 1 eliminated all symbols — check filters")
+            return []
 
-        # ── Step 2: attach float for symbols that passed the cheap filters ────
-        # Float only matters if a float threshold is configured. Avoid the
-        # ~50k yfinance calls when no one asked for them.
-        cfg = self.config
+        # ── Phase 2a: batch pre-market volume for survivors ───────────────────
+        pm_vols = self._batch_premarket_volume(survivors)
+        logger.info("Phase 2a complete: pre-market volume fetched for %d symbols", len(pm_vols))
+
+        # ── Phase 2b: build metrics from cache — no HTTP calls ────────────────
+        metrics_list: list[SymbolScanMetrics] = []
+        for sym in survivors:
+            try:
+                m = self._metrics_from_cache(sym, daily_data[sym], pm_vols.get(sym, 0.0))
+                metrics_list.append(m)
+            except Exception as e:
+                logger.debug("metrics_from_cache failed for %s: %s", sym, e)
+
+        logger.info("Phase 2b complete: %d metrics built from cache", len(metrics_list))
+
+        # ── Phase 3a: float (only when filters active) ────────────────────────
         if cfg.min_float or cfg.max_float:
             self._attach_floats(metrics_list)
 
-        # ── Step 3: score everything ──────────────────────────────────────────
+        # ── Phase 3b: score and rank ───────────────────────────────────────────
         results = [self.score_symbol(m) for m in metrics_list]
-
-        passed = [r for r in results if not r.rejection_reason]
-        rejected = [r for r in results if r.rejection_reason]
+        passed  = [r for r in results if not r.rejection_reason]
         logger.info(
-            "Scan complete: %d passed filters, %d rejected", len(passed), len(rejected)
+            "Scan complete: %d passed all filters out of %d survivors (%d universe)",
+            len(passed), len(metrics_list), len(universe),
         )
-
         passed.sort(key=lambda r: r.score, reverse=True)
         return passed[:max_symbols]
+
+    # ── Phase 1: bulk download ────────────────────────────────────────────────
+
+    def _bulk_download_and_filter(
+        self, universe: list[str]
+    ) -> tuple[list[str], dict[str, pd.DataFrame]]:
+        """
+        Download 35d daily OHLCV for the full universe in batches of 100.
+        Returns (survivors, daily_df_map) where daily_df_map covers survivors only.
+
+        Cached in-process for the calendar day — subsequent scans (e.g. UI
+        refresh with different top-N) reuse the cache and skip all downloads.
+        """
+        today = date.today()
+        cfg   = self.config
+
+        if DayTradingScanner._daily_cache_date == today and DayTradingScanner._daily_cache:
+            logger.info("Phase 1: reusing in-process OHLCV cache (%d symbols)", len(DayTradingScanner._daily_cache))
+            daily_data = DayTradingScanner._daily_cache
+            survivors  = self._apply_prefilters(daily_data, cfg)
+            return survivors, {s: daily_data[s] for s in survivors}
+
+        BATCH_SIZE    = 100
+        BATCH_WORKERS = 8
+
+        batches = [universe[i: i + BATCH_SIZE] for i in range(0, len(universe), BATCH_SIZE)]
+        logger.info("Phase 1: %d batches × %d symbols, %d workers", len(batches), BATCH_SIZE, BATCH_WORKERS)
+
+        all_daily: dict[str, pd.DataFrame] = {}
+
+        def _fetch_ohlcv_batch(syms: list[str]) -> dict[str, pd.DataFrame]:
+            try:
+                df = yf.download(
+                    " ".join(syms),
+                    period="35d",
+                    interval="1d",
+                    progress=False,
+                    group_by="ticker",
+                    auto_adjust=True,
+                    threads=True,
+                )
+                if df.empty:
+                    return {}
+                out: dict[str, pd.DataFrame] = {}
+                multi = isinstance(df.columns, pd.MultiIndex)
+                for sym in syms:
+                    try:
+                        sym_df = df[sym].dropna(how="all") if multi else df
+                        if sym_df is None or len(sym_df) < 10:
+                            continue
+                        # Normalise column names
+                        sym_df = sym_df.copy()
+                        sym_df.index = pd.to_datetime(sym_df.index)
+                        out[sym] = sym_df
+                    except Exception:
+                        continue
+                return out
+            except Exception as e:
+                logger.debug("OHLCV batch failed: %s", e)
+                return {}
+
+        with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as pool:
+            futs = {pool.submit(_fetch_ohlcv_batch, b): b for b in batches}
+            for fut in as_completed(futs):
+                try:
+                    all_daily.update(fut.result())
+                except Exception as e:
+                    logger.debug("Batch future error: %s", e)
+
+        logger.info("Phase 1 download: OHLCV for %d/%d symbols", len(all_daily), len(universe))
+
+        DayTradingScanner._daily_cache      = all_daily
+        DayTradingScanner._daily_cache_date = today
+
+        survivors = self._apply_prefilters(all_daily, cfg)
+        return survivors, {s: all_daily[s] for s in survivors}
+
+    @staticmethod
+    def _apply_prefilters(
+        daily_map: dict[str, pd.DataFrame],
+        cfg: "DayTradingScannerConfig",
+    ) -> list[str]:
+        """
+        Cheap pre-filters computed entirely from cached OHLCV — no network calls.
+        Eliminates price-out-of-range, low-volume, and ATR-out-of-range symbols.
+        """
+        survivors: list[str] = []
+        for sym, df in daily_map.items():
+            try:
+                if df is None or len(df) < 10:
+                    continue
+                price = float(df["Close"].iloc[-1])
+                if price <= 0 or price < cfg.min_price:
+                    continue
+                if cfg.max_price and price > cfg.max_price:
+                    continue
+
+                avg_vol = float(df["Volume"].tail(30).mean())
+                # Relaxed volume floor (50%) — score_symbol re-applies the strict
+                # threshold; this just prunes the obvious non-starters.
+                if avg_vol < cfg.min_avg_volume * 0.5:
+                    continue
+
+                # ATR pre-filter — eliminates the comatose and the wildly volatile
+                # before Phase 2 even starts.
+                atr = _compute_daily_atr(df, period=14)
+                if atr > 0:
+                    atr_pct = atr / price * 100
+                    if atr_pct < cfg.min_atr_pct * 0.5:   # too dead
+                        continue
+                    if atr_pct > cfg.max_atr_pct * 1.5:   # way too wild
+                        continue
+
+                survivors.append(sym)
+            except Exception:
+                continue
+        return survivors
+
+    # ── Phase 2a: batch pre-market volume ────────────────────────────────────
+
+    def _batch_premarket_volume(self, symbols: list[str]) -> dict[str, float]:
+        """
+        Fetch 1m intraday bars for all survivors in batches of 50.
+        Extracts 04:00–09:30 ET volume from each symbol's bars.
+
+        A single multi-ticker yf.download call for 50 symbols is ~50× faster
+        than 50 individual calls because Yahoo batches the HTTP request.
+        """
+        today = date.today()
+        if DayTradingScanner._pm_vol_cache_date == today and DayTradingScanner._pm_vol_cache:
+            # Return cached values; compute only the symbols not yet cached.
+            cached = {s: DayTradingScanner._pm_vol_cache[s]
+                      for s in symbols if s in DayTradingScanner._pm_vol_cache}
+            missing = [s for s in symbols if s not in cached]
+            if not missing:
+                logger.info("Phase 2a: all %d pm-vol values from cache", len(symbols))
+                return cached
+            logger.info("Phase 2a: %d from cache, %d to fetch", len(cached), len(missing))
+            fresh = self._fetch_pm_vol_batched(missing)
+            DayTradingScanner._pm_vol_cache.update(fresh)
+            cached.update(fresh)
+            return cached
+
+        result = self._fetch_pm_vol_batched(symbols)
+        DayTradingScanner._pm_vol_cache      = dict(result)
+        DayTradingScanner._pm_vol_cache_date = today
+        return result
+
+    @staticmethod
+    def _fetch_pm_vol_batched(symbols: list[str]) -> dict[str, float]:
+        """Download 1m bars for a list of symbols in batches of 50 and extract pre-market volume."""
+        from app.services.strategy.daytrading.market_open import _normalise_yf
+
+        BATCH_SIZE    = 50
+        BATCH_WORKERS = 6   # kept moderate — 1m prepost data is heavier than daily
+
+        batches = [symbols[i: i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
+        result: dict[str, float] = {}
+
+        def _pm_batch(syms: list[str]) -> dict[str, float]:
+            try:
+                df = yf.download(
+                    " ".join(syms),
+                    period="1d",
+                    interval="1m",
+                    prepost=True,
+                    progress=False,
+                    group_by="ticker",
+                    auto_adjust=True,
+                    threads=True,
+                )
+                if df.empty:
+                    return {}
+                out: dict[str, float] = {}
+                multi = isinstance(df.columns, pd.MultiIndex)
+                for sym in syms:
+                    try:
+                        sym_df = df[sym].dropna(how="all") if multi else df
+                        if sym_df is None or sym_df.empty:
+                            continue
+                        sym_df = _normalise_yf(sym_df)
+                        pm_mask = (sym_df.index.time >= time(4, 0)) & (sym_df.index.time < time(9, 30))
+                        pm_vol = float(sym_df.loc[pm_mask, "Volume"].sum()) if pm_mask.any() else 0.0
+                        out[sym] = pm_vol
+                    except Exception:
+                        continue
+                return out
+            except Exception as e:
+                logger.debug("PM-vol batch failed: %s", e)
+                return {}
+
+        with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as pool:
+            futs = {pool.submit(_pm_batch, b): b for b in batches}
+            for fut in as_completed(futs):
+                try:
+                    result.update(fut.result())
+                except Exception:
+                    pass
+
+        return result
+
+    # ── Phase 2b: build metrics from cached OHLCV ────────────────────────────
+
+    def _metrics_from_cache(
+        self,
+        symbol: str,
+        daily_df: pd.DataFrame,
+        pm_vol: float,
+    ) -> SymbolScanMetrics:
+        """
+        Build a complete SymbolScanMetrics from already-downloaded data.
+        Zero network calls — everything comes from Phase 1 + 2a caches.
+        """
+        cfg = self.config
+        last_price  = float(daily_df["Close"].iloc[-1])
+        avg_vol_30d = float(daily_df["Volume"].tail(30).mean())
+        atr_14      = _compute_daily_atr(daily_df, period=14)
+        atr_pct     = (atr_14 / last_price * 100) if last_price > 0 else 0.0
+
+        prior_close = float(daily_df["Close"].iloc[-2]) if len(daily_df) >= 2 else last_price
+        today_open  = float(daily_df["Open"].iloc[-1])
+        today_bar   = _is_today(daily_df)
+        open_price  = today_open if today_bar else last_price
+        if not today_bar:
+            prior_close = last_price
+
+        gap_pct  = (open_price - prior_close) / prior_close * 100 if prior_close > 0 else 0.0
+        abs_gap  = abs(gap_pct)
+        if abs_gap < cfg.gap_flat_pct:
+            gap_size, gap_dir = "none", "flat"
+        elif abs_gap < cfg.gap_small_pct:
+            gap_size, gap_dir = "small", "up" if gap_pct > 0 else "down"
+        elif abs_gap < cfg.gap_medium_pct:
+            gap_size, gap_dir = "medium", "up" if gap_pct > 0 else "down"
+        elif abs_gap < cfg.gap_large_pct:
+            gap_size, gap_dir = "large", "up" if gap_pct > 0 else "down"
+        else:
+            gap_size, gap_dir = "extreme", "up" if gap_pct > 0 else "down"
+
+        rel_vol        = pm_vol / avg_vol_30d if avg_vol_30d > 0 else 0.0
+        catalyst_tags  = _detect_catalyst(symbol, daily_df)
+
+        return SymbolScanMetrics(
+            symbol=symbol,
+            last_price=last_price,
+            avg_daily_volume_30d=avg_vol_30d,
+            atr_14=round(atr_14, 4),
+            atr_pct=round(atr_pct, 3),
+            premarket_volume=pm_vol,
+            premarket_rel_vol=round(rel_vol, 4),
+            premarket_gap_pct=round(gap_pct, 3),
+            gap_direction=gap_dir,
+            gap_size=gap_size,
+            has_catalyst=len(catalyst_tags) > 0,
+            catalyst_tags=catalyst_tags,
+            prior_close=round(prior_close, 4),
+            today_open=round(open_price, 4),
+            data_quality="ok",
+        )
 
     def _attach_floats(self, metrics_list: list[SymbolScanMetrics]) -> None:
         """Populate ``shares_float`` on every metric using the daily cache.
@@ -801,20 +1102,26 @@ class DayTradingScanner:
         )
 
     def _get_daily_bars(self, symbol: str) -> pd.DataFrame | None:
-        """Return 60-day daily OHLCV. Tries BarCache → Twelve Data → yfinance."""
+        """Return daily OHLCV. Checks process-level daily cache first (free), then network."""
         from app.services.strategy.daytrading.market_open import _td_fetch
-        # Try cache first
+
+        # 1. In-process daily cache built by Phase 1 — zero cost
+        if (DayTradingScanner._daily_cache_date == date.today()
+                and symbol in DayTradingScanner._daily_cache):
+            return DayTradingScanner._daily_cache[symbol]
+
+        # 2. BarCache (warm in-process bar store)
         if self._cache is not None:
             cached = self._cache.get_bars(symbol, "1d")
             if cached is not None and len(cached) >= 10:
                 return cached
 
-        # Try Twelve Data
+        # 3. Twelve Data
         df = _td_fetch(symbol, "1d", "60d")
         if not df.empty:
             return df
 
-        # Fall back to yfinance
+        # 4. yfinance fallback
         try:
             df = yf.download(symbol, period="60d", interval="1d", progress=False)
             if df.empty:
@@ -828,35 +1135,30 @@ class DayTradingScanner:
             return None
 
     def _get_premarket_volume(self, symbol: str, avg_daily_vol: float) -> float:
-        """
-        Attempt to get pre-market volume (04:00–09:30 ET).
-        Tries Twelve Data 1m bars first, then yfinance prepost, then first-bar proxy.
-        """
+        """Return pre-market volume (04:00–09:30 ET). Checks pm-vol cache first."""
+        # Phase 2a batch cache — free if scan() already ran
+        if (DayTradingScanner._pm_vol_cache_date == date.today()
+                and symbol in DayTradingScanner._pm_vol_cache):
+            return DayTradingScanner._pm_vol_cache[symbol]
+
         from app.services.strategy.daytrading.market_open import _td_fetch, _normalise_yf
         try:
-            # Twelve Data 1m bars (regular session — no prepost, but 1m resolution good)
             df = _td_fetch(symbol, "1m", "1d")
             if not df.empty:
                 pm_mask = (df.index.time >= time(4, 0)) & (df.index.time < time(9, 30))
-                pm_df = df[pm_mask]
-                if not pm_df.empty:
-                    return float(pm_df["Volume"].sum())
-                # No pre-market bars from this provider — do NOT substitute
-                # regular-session bars; that inflates rel_vol scores.
-                # Fall through to yfinance prepost path instead.
+                if pm_mask.any():
+                    return float(df.loc[pm_mask, "Volume"].sum())
 
-            # Fallback: yfinance with prepost
             df = yf.download(symbol, period="1d", interval="1m", prepost=True, progress=False)
             if not df.empty:
                 df = _normalise_yf(df)
                 pm_mask = (df.index.time >= time(4, 0)) & (df.index.time < time(9, 30))
-                pm_df = df[pm_mask]
-                if not pm_df.empty:
-                    return float(pm_df["Volume"].sum())
+                if pm_mask.any():
+                    return float(df.loc[pm_mask, "Volume"].sum())
 
-            return _fallback_premarket_vol(symbol)
+            return 0.0
         except Exception:
-            return _fallback_premarket_vol(symbol)
+            return 0.0
 
     @staticmethod
     def _reject(metrics: SymbolScanMetrics, reason: str) -> SymbolScanResult:

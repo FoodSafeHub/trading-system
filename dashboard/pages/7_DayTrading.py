@@ -51,83 +51,37 @@ from _components import (  # noqa: E402
 
 apply_theme("Day Trading")
 
-# ── Page header + data-source status ─────────────────────────────────────────
-_ds_label, _ds_color = "unknown", "grey"
-_ds_detail = ""
+# ── Page header + data-source health pill ────────────────────────────────────
+_ds_label, _ds_color = "ok", "green"
 try:
     _ds = api.daytrading_data_source_status() or {}
     _ds_status = _ds.get("status", "idle")
-    _ds_label  = _ds.get("label", "unknown")
-    _ctr       = _ds.get("counters", {}) or {}
+    _ds_label  = _ds.get("label", "ok")
     _ds_color  = {"ok": "green", "degraded": "amber", "idle": "grey"}.get(_ds_status, "grey")
-    _ds_detail = (
-        f"TD: {_ctr.get('twelvedata', 0)}  "
-        f"Webull: {_ctr.get('webull', 0)}  "
-        f"yfinance: {_ctr.get('yfinance', 0)}"
-    )
 except Exception:
     pass
+
+from app.services.strategy.daytrading.market_open import now_et as _now_et
+from _theme import pill as _pill
 
 page_header(
     "Day Trading",
     subtitle=(
-        f"{len(ALL_STRATEGIES)} intraday strategies · 5m and 15m bars · "
-        "All signals expire at market close · No overnight holds"
+        f"{len(ALL_STRATEGIES)} strategies · 5m / 15m bars · "
+        "All signals expire at market close"
     ),
-)
-
-# Compact stat band: market session clocks + data provider health
-_mkt_status_bits = []
-from app.services.strategy.daytrading.market_open import now_et as _now_et
-_now_str = _now_et().strftime("%H:%M ET")
-_mkt_bits: list[tuple[str,str,str]] = [
-    ("Data", _ds_label, _ds_color),
-]
-if _ds_detail:
-    _mkt_bits.append(("Providers", _ds_detail, "grey"))
-from _theme import pill as _pill
-_mkt_html = "".join(
-    f"<span class='tx-stat'><span class='tx-stat-label'>{l}</span>{_pill(v, c)}</span>"
-    for l, v, c in _mkt_bits
-)
-st.markdown(
-    f"<div class='tx-statband' style='margin-top:var(--sp-2)'>{_mkt_html}"
-    f"<span style='margin-left:auto;font-size:0.75rem;color:var(--text-3)'>{_now_str}</span>"
-    f"</div>",
-    unsafe_allow_html=True,
 )
 
 render_broker_routing_toggle(key_suffix="daytrading")
 
 STRATEGY_DESCRIPTIONS = {
-    "ORBBreakout": (
-        "Opening Range Breakout — price breaks above/below the first 15m range "
-        "with volume confirmation. Best in BULL_OPEN regime."
-    ),
-    "VWAPMeanReversion": (
-        "VWAP Mean Reversion — fades moves >0.5% below VWAP with RSI oversold + "
-        "reversal wick. BULL_OPEN only. Target = VWAP."
-    ),
-    "EMAMomentum": (
-        "EMA 9/21 Momentum — crossover on 15m bars confirmed by MACD. "
-        "Adapts direction for BULL and BEAR regimes."
-    ),
-    "OpeningGapFade": (
-        "Opening Gap Fade — fades 0.75–3% gaps that lack news volume. "
-        "Statistical edge: >60% of such gaps partially fill within 90 minutes."
-    ),
-    "VolumeSpikeReversal": (
-        "Volume Spike Reversal — catches capitulation moves driven by 3× volume spikes "
-        "at RSI extremes. Works in all regimes."
-    ),
-    "BollingerMomentum": (
-        "Bollinger Momentum Breakout — BB squeeze (band width in lowest 20%) "
-        "followed by close above/below the band with EMA + RSI + volume confirmation."
-    ),
-    "SupertrendTrend": (
-        "Supertrend Trend-Following — 15m Supertrend sets macro bias; 5m pullback "
-        "to ST/EMA20 with reclaim candle. Stop trails the 5m ST line."
-    ),
+    "ORBBreakout":         "Opening Range Breakout — breaks above/below the first 15m range with volume.",
+    "VWAPMeanReversion":   "VWAP Mean Reversion — fades oversold/overbought moves back to VWAP.",
+    "EMAMomentum":         "EMA 9/21 Momentum — crossover on 15m bars confirmed by MACD.",
+    "OpeningGapFade":      "Opening Gap Fade — fades 0.5–2.5% gaps that lack news volume.",
+    "VolumeSpikeReversal": "Volume Spike Reversal — catches capitulation moves at RSI extremes.",
+    "BollingerMomentum":   "Bollinger Squeeze Breakout — BB squeeze followed by close outside the band.",
+    "SupertrendTrend":     "Supertrend Trend-Follow — 5m pullback to ST line with reclaim candle.",
 }
 
 DEFAULT_SYMBOLS = "SPY,QQQ,AAPL,TSLA,NVDA,MSFT,AMZN,META"
@@ -145,7 +99,7 @@ tab_trade, tab_research, tab_scanner, tab_settings = st.tabs([
 ])
 
 with tab_trade:
-    tab_signals, tab_autotrader = st.tabs(["Live Signals", "Auto Trader"])
+    tab_signals, tab_autotrader, tab_rules = st.tabs(["Live Signals", "Auto Trader", "📖 Strategy Rules"])
 
 with tab_research:
     tab_backtest, tab_compare, tab_sizer, tab_watchlist, tab_wf = st.tabs([
@@ -180,8 +134,7 @@ def _render_signal_card(sig: dict, idx: int, symbol: str = "") -> None:
     rr = sig.get("r_multiple", 0)
     label = (
         f"**{sig['strategy']}** · {direction} · "
-        f"conf {confidence:.0%} · R:R {rr:.1f} · {sig.get('timeframe', '')} · "
-        f"{_regime_badge(sig.get('regime', ''))}"
+        f"{confidence:.0%} conf · {rr:.1f}R"
     )
     with st.expander(label, expanded=idx == 0):
         c1, c2, c3, c4 = st.columns(4)
@@ -189,33 +142,13 @@ def _render_signal_card(sig: dict, idx: int, symbol: str = "") -> None:
         stop  = sig.get("stop_price", 0)
         tgt   = sig.get("target_price", 0)
         c1.metric("Entry",  f"${entry:.2f}")
-        c2.metric("Stop",   f"${stop:.2f}",  delta=f"-{abs(entry-stop):.2f}" if entry else None, delta_color="inverse")
-        c3.metric("Target", f"${tgt:.2f}",   delta=f"+{abs(tgt-entry):.2f}"  if entry else None, delta_color="normal")
+        c2.metric("Stop",   f"${stop:.2f}",  delta=f"−${abs(entry-stop):.2f}" if entry else None, delta_color="inverse")
+        c3.metric("Target", f"${tgt:.2f}",   delta=f"+${abs(tgt-entry):.2f}"  if entry else None, delta_color="normal")
         c4.metric("R:R",    f"{rr:.1f}:1")
 
         st.progress(min(confidence, 1.0), text=f"Confidence: {confidence:.0%}")
-        st.caption(f"Reason: {sig.get('reason', '')}")
-
-        # Market-aware expiry label
-        _sym = symbol or sig.get("symbol", "")
-        if _sym:
-            try:
-                _sess = market_session(_sym)
-                _close_str = _sess.close_time.strftime("%H:%M")
-                _tz_str = "IST" if _sess.tz is IST else "ET"
-                st.info(f"⏱ **DAY ORDER — expires at close ({_close_str} {_tz_str})**")
-            except Exception:
-                st.info("⏱ **DAY ORDER — expires at close (3:45 PM ET)**")
-        else:
-            st.info("⏱ **DAY ORDER — expires at close (3:45 PM ET)**")
-
-        indicators = sig.get("indicators", {})
-        if indicators:
-            with st.expander("Indicator values"):
-                ind_df = pd.DataFrame(
-                    [{"Indicator": k, "Value": v} for k, v in indicators.items()]
-                )
-                st.dataframe(ind_df, use_container_width=True, hide_index=True)
+        if sig.get("reason"):
+            st.caption(sig["reason"])
 
 
 @st.cache_data(ttl=300)
@@ -354,99 +287,37 @@ def _render_pipeline_diagnostics(diag: dict, expanded: bool = False) -> None:
     rej   = brain.get("rejected_by_brain_total", 0)
     execs = exec_.get("trades_opened", 0)
 
-    # ── Top-level funnel row ──────────────────────────────────────────────────
-    st.markdown("#### Pipeline Funnel")
+    # ── Funnel: raw → accepted → executed ────────────────────────────────────
     f1, f2, f3, f4 = st.columns(4)
-    f1.metric("Raw Signals Found",  raw,
-              delta=f"Buy:{signals.get('raw_buy_signals',0)} Sell:{signals.get('raw_sell_signals',0)}",
-              delta_color="off")
-    f2.metric("Brain Accepted",     acc,
-              delta=f"-{rej} rejected" if rej else "backtest mode (no live brain)",
-              delta_color="inverse" if rej > 0 else "off")
-    f3.metric("Trades Executed",    execs,
-              delta=f"{exec_.get('trades_skipped_no_future_bars',0)} skip (no future bars)" if exec_.get('trades_skipped_no_future_bars',0) else None,
-              delta_color="off")
-    f4.metric("Days Skipped (Regime)", regime.get("days_skipped_by_regime", 0),
-              delta=f"/{data.get('trading_days_found', 0)} days total",
-              delta_color="off")
+    f1.metric("Raw signals",  raw)
+    f2.metric("Accepted",     acc, delta=f"−{rej} filtered" if rej else None, delta_color="off")
+    f3.metric("Trades",       execs)
+    f4.metric("Regime-blocked days", regime.get("days_skipped_by_regime", 0))
 
-    # ── Root cause ────────────────────────────────────────────────────────────
     if root_cause:
-        if execs == 0 and raw == 0:
-            st.error(f"**Root cause:** {root_cause}")
-        elif execs == 0 and acc == 0 and raw > 0:
-            st.warning(f"**Root cause:** {root_cause}")
-        elif execs == 0 and acc > 0:
-            st.warning(f"**Root cause:** {root_cause}")
-        else:
-            st.success(f"**Status:** {root_cause}")
-
-    # ── Regime distribution ───────────────────────────────────────────────────
-    regime_dist = regime.get("distribution", {})
-    if regime_dist:
-        dist_str = " | ".join(f"{k}: {v}d" for k, v in sorted(regime_dist.items()))
-        st.caption(f"Regime distribution: {dist_str}")
+        _fn = st.error if (execs == 0 and raw == 0) else (st.warning if execs == 0 else st.success)
+        _fn(root_cause)
 
     skipped_strats = regime.get("strategies_skipped_by_regime", [])
     if skipped_strats:
-        st.caption(f"Strategies blocked by regime: {', '.join(skipped_strats)}")
+        st.caption(f"Blocked by regime: {', '.join(skipped_strats)}")
 
-    # ── First-hour window (9:30–10:30 AM ET) ─────────────────────────────────
-    fh = diag.get("first_hour", {})
-    fh_raw  = fh.get("raw_signals", 0)
-    fh_rej  = fh.get("brain_rejections", 0)
-    fh_exec = fh.get("executed_trades", 0)
-    fh_bars = fh.get("bars_loaded", 0)
-    if fh_bars > 0 or fh_raw > 0:
-        with st.expander(f"🕙 First Hour (9:30–10:30 AM) — {fh_raw} signals, {fh_exec} trades", expanded=(fh_raw == 0 or fh_exec == 0)):
-            h1, h2, h3, h4 = st.columns(4)
-            h1.metric("Bars in window",   fh_bars)
-            h2.metric("Raw signals",      fh_raw,  delta="no signals — strategy warmup or filters" if fh_raw == 0 else None, delta_color="off")
-            h3.metric("Brain rejections", fh_rej,  delta=fh.get("top_rejection_reason", "") or None, delta_color="off")
-            h4.metric("Trades executed",  fh_exec)
-            fh_counts = fh.get("rejection_counts", {})
-            if fh_counts:
-                st.caption("Rejection breakdown: " + " | ".join(f"{k}: {v}" for k, v in sorted(fh_counts.items(), key=lambda x: -x[1])))
-            if fh_raw == 0 and fh_bars > 0:
-                st.info("No raw signals generated in the first hour. Typical causes: indicator warmup bars not met (EMA/RSI need history), minimum-bars checks, or time-cutoff rules in the strategy.")
-            elif fh_exec == 0 and fh_raw > 0:
-                top = fh.get("top_rejection_reason", "unknown")
-                st.warning(f"Signals generated but none executed — all rejected by brain. Top reason: **{top}**")
-
-    # ── Brain rejection breakdown ─────────────────────────────────────────────
     if rej > 0:
-        with st.expander(f"Brain rejection breakdown ({rej} rejected)", expanded=False):
-            rb1, rb2, rb3, rb4, rb5, rb6 = st.columns(6)
+        with st.expander(f"{rej} signals filtered — why?", expanded=False):
+            rb1, rb2, rb3, rb4 = st.columns(4)
             rb1.metric("Regime",    brain.get("rejected_by_regime", 0))
             rb2.metric("Volume",    brain.get("rejected_by_volume", 0))
             rb3.metric("R:R",       brain.get("rejected_by_rr", 0))
-            rb4.metric("Time",      brain.get("rejected_by_time", 0))
-            rb5.metric("Extension", brain.get("rejected_by_extension", 0))
-            rb6.metric("Kill sw.",  brain.get("rejected_by_kill_switch", 0))
-            reasons = brain.get("rejection_reasons", [])
-            if reasons:
-                st.markdown("**Sample rejection reasons:**")
-                for r in reasons:
-                    st.caption(f"• {r}")
+            rb4.metric("Time/Other", brain.get("rejected_by_time", 0) + brain.get("rejected_by_extension", 0))
+            for r in (brain.get("rejection_reasons") or [])[:5]:
+                st.caption(f"• {r}")
 
-    # ── Data info ─────────────────────────────────────────────────────────────
-    with st.expander("Data quality", expanded=False):
-        d1, d2, d3, d4 = st.columns(4)
-        d1.metric("5m bars loaded",   data.get("bars_loaded_5m", 0))
-        d2.metric("Mkt-hours bars",   data.get("bars_in_market_hours", 0))
-        d3.metric("Trading days",     data.get("trading_days_found", 0))
-        d4.metric("Days skipped<4bars", data.get("trading_days_skipped_short", 0))
-        st.caption(
-            f"Range: {data.get('earliest_bar','?')[:16]} → "
-            f"{data.get('latest_bar','?')[:16]}  |  tz: {data.get('timezone','')}"
-        )
-        warn = data.get("data_warning", "")
-        if warn:
-            st.warning(warn)
+    warn = data.get("data_warning", "")
+    if warn:
+        st.warning(warn)
 
-    # ── Full pipeline trace ───────────────────────────────────────────────────
     if steps:
-        with st.expander("Full pipeline trace", expanded=expanded):
+        with st.expander("Full trace", expanded=expanded):
             for step in steps:
                 st.code(step, language=None)
 
@@ -461,8 +332,7 @@ def _metrics_row(m: dict) -> None:
     cols[5].metric("Sharpe", f"{m.get('sharpe_ratio', 0):.2f}")
     cols[6].metric("Trades", str(m.get("total_trades", 0)))
     _hold_bars = m.get("avg_hold_bars", 0)
-    _hold_min  = _hold_bars * 5   # 5m bars → minutes
-    cols[7].metric("Avg Hold", f"{_hold_bars:.1f} bars", delta=f"≈{_hold_min:.0f} min", delta_color="off")
+    cols[7].metric("Avg Hold", f"≈{int(_hold_bars * 5)} min")
 
     # P&L cost breakdown — only shown when commission/slippage data is present
     gross = m.get("gross_pnl")
@@ -483,32 +353,26 @@ def _metrics_row(m: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_signals:
     # ── Top control bar ───────────────────────────────────────────────────────
-    ctrl1, ctrl2, ctrl3, ctrl4, ctrl5 = st.columns([3, 1, 1, 1, 1])
+    ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([3, 1, 1, 1])
     symbol_input = ctrl1.text_input(
         "Symbol", value="SPY", key="signals_symbol",
-        placeholder="AAPL, MTEN, SPY …",
+        placeholder="AAPL, TSLA, SPY …",
     ).upper().strip() or "SPY"
-    tf_pick      = ctrl2.selectbox("Timeframe", ["5m", "1m", "15m"], index=0, key="signals_tf")
-    auto_refresh = ctrl3.toggle("Live", value=False, key="signals_auto_refresh",
-                                help="Auto-refresh every 5 min during market hours.")
-    show_rejected = ctrl4.toggle("Show rejected", value=True, key="signals_show_rej",
-                                 help="Overlay rejected signal markers on chart.")
-    get_btn = ctrl5.button("🔄 Refresh", use_container_width=True)
+    tf_pick       = ctrl2.selectbox("Timeframe", ["5m", "1m", "15m"], index=0, key="signals_tf")
+    auto_refresh  = ctrl3.toggle("Auto-refresh", value=False, key="signals_auto_refresh",
+                                 help="Re-runs signals every time the market is open.")
+    get_btn = ctrl4.button("🔄 Refresh", use_container_width=True)
 
-    # ── Status band ───────────────────────────────────────────────────────────
-    _mkt_status_obj = market_status()
-    _now_str2    = _mkt_status_obj.get("time_et", "")
+    # ── Market status strip ───────────────────────────────────────────────────
     _mkt_is_open = is_market_open(symbol_input)
     _mkt_pre     = is_pre_market(symbol_input)
     _mkt_state   = "OPEN" if _mkt_is_open else ("PRE-MARKET" if _mkt_pre else "CLOSED")
     _mkt_clr     = "green" if _mkt_is_open else ("blue" if _mkt_pre else "grey")
     _last_refresh = st.session_state.get("_signals_last_refresh")
-    _refresh_str  = _last_refresh.strftime("%H:%M:%S") if _last_refresh else "—"
+    _refresh_str  = _last_refresh.strftime("%H:%M") if _last_refresh else "—"
     stat_band([
-        ("Session",      _mkt_state, _mkt_clr),
-        ("Clock",        _now_str2,  "grey"),
-        ("Timeframe",    tf_pick,    "grey"),
-        ("Last refresh", _refresh_str, "grey"),
+        ("Market", _mkt_state, _mkt_clr),
+        ("Refreshed", _refresh_str, "grey"),
     ])
 
     # ── Auto-refresh trigger ──────────────────────────────────────────────────
@@ -545,7 +409,7 @@ with tab_signals:
                         symbol_input,
                         timeframe=tf_pick,
                         strategies="all",
-                        include_rejected=show_rejected,
+                        include_rejected=True,
                     )
                 except Exception as _ce:
                     _chart_payload = None
@@ -560,7 +424,7 @@ with tab_signals:
                     _chart_payload,
                     overlays_enabled=["vwap", "ema9", "ema21"],
                     show_trades=True,
-                    show_rejected=show_rejected,
+                    show_rejected=True,
                     show_levels=True,
                     height=560,
                 )
@@ -607,7 +471,7 @@ with tab_signals:
             brain    = result.get("brain", {})
             raw_count = result.get("raw_signal_count", 0)
 
-            # ── Brain status (compact) ────────────────────────────────────────
+            # ── Brain status strip ────────────────────────────────────────────
             if brain:
                 ms_state  = brain.get("market_state", "UNKNOWN")
                 ms_conf   = brain.get("state_confidence", 0)
@@ -628,84 +492,37 @@ with tab_signals:
 
                 st.markdown(
                     f"{regime_chip(ms_state)} &nbsp;"
-                    f"<span style='color:var(--text-3);font-size:0.75rem'>conf {ms_conf:.0%}</span>"
+                    f"<span style='color:var(--text-3);font-size:0.75rem'>{ms_conf:.0%}</span>"
                     f"&nbsp;&nbsp; {_elig_chip}",
                     unsafe_allow_html=True,
                 )
                 b1, b2, b3 = st.columns(3)
                 b1.metric("Size", f"{size_mult:.0%}")
-                b2.metric("Trades", str(brain.get("trades_today", 0)))
-                pnl_c = "normal" if daily_pnl >= 0 else "inverse"
-                b3.metric("P&L", f"{daily_pnl:+.2f}%", delta_color=pnl_c)
+                b2.metric("Trades today", str(brain.get("trades_today", 0)))
+                b3.metric("Session P&L", f"{daily_pnl:+.2f}%",
+                          delta_color="normal" if daily_pnl >= 0 else "inverse")
 
                 if kill:
-                    st.error("🛑 Kill switch active", icon="🛑")
-
-                # Strategy routing — one line
-                enabled  = brain.get("enabled_strategies", [])
-                disabled = brain.get("disabled_strategies", [])
-                if enabled or disabled:
-                    with st.expander(
-                        f"Routing: {len(enabled)} on · {len(disabled)} off",
-                        expanded=False,
-                    ):
-                        _dis_reasons = brain.get("disabled_strategies_reasons", {}) or {}
-                        for s in enabled:
-                            st.markdown(
-                                f"<span class='tx-pill green' style='margin:2px;display:inline-block'>{s}</span>",
-                                unsafe_allow_html=True,
-                            )
-                        for s in disabled:
-                            _r = _dis_reasons.get(s, "regime")
-                            st.markdown(
-                                f"<span class='tx-pill red' title='{_r}' "
-                                f"style='margin:2px;display:inline-block'>{s}</span>",
-                                unsafe_allow_html=True,
-                            )
-
-                reasons = brain.get("state_reasons", [])
-                if reasons:
-                    with st.expander("Why this state?", expanded=False):
-                        for r in reasons:
-                            st.caption(f"• {r}")
+                    st.error("🛑 Kill switch active — no new entries today.", icon="🛑")
 
             st.markdown("---")
 
             # ── Signal cards ──────────────────────────────────────────────────
-            st.markdown(
-                f"<div style='font-size:0.72rem;font-weight:700;text-transform:uppercase;"
-                f"letter-spacing:0.08em;color:var(--text-3);margin-bottom:8px'>"
-                f"Signals — {len(signals)} accepted · {raw_count} raw · {len(rejected)} rejected"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                f"Regime: {regime_chip(regime)}",
-                unsafe_allow_html=True,
-            )
+            _sig_header = f"{len(signals)} signal(s)"
+            if rejected:
+                _sig_header += f" · {len(rejected)} filtered out"
+            st.caption(_sig_header)
 
             if not signals and raw_count == 0:
-                empty_state(
-                    "No setups found",
-                    "Strategies found no qualifying conditions in current bars. "
-                    "Check diagnostics below.",
-                    icon="📭",
-                )
+                empty_state("No setups", "No qualifying conditions on the current bar.", icon="📭")
             elif not signals and raw_count > 0:
-                st.warning(
-                    f"{raw_count} raw signal(s) all rejected by brain.",
-                    icon="⚠️",
-                )
+                st.warning(f"{raw_count} signal(s) found but filtered by risk rules.", icon="⚠️")
             else:
                 for i, sig in enumerate(signals):
                     _render_signal_card(sig, i, symbol=symbol_input)
-                    brain_reason = sig.get("brain_reason", "")
-                    brain_size   = sig.get("brain_size_multiplier", 1.0)
-                    if brain_reason:
-                        st.caption(f"Brain: {brain_reason}  |  Size: {brain_size:.0%}")
 
             if rejected:
-                with st.expander(f"{len(rejected)} rejected", expanded=False):
+                with st.expander(f"{len(rejected)} filtered", expanded=False):
                     for sig in rejected:
                         st.caption(
                             f"**{sig.get('strategy')}** {sig.get('direction')} "
@@ -713,16 +530,16 @@ with tab_signals:
                             f"{sig.get('brain_reason', 'filtered')}"
                         )
 
-            # ── Export + diagnostics ──────────────────────────────────────────
-            st.markdown("---")
-            _exp_rows = [
-                {k: s.get(k) for k in ["strategy","direction","entry_price","stop_price",
-                                        "target_price","r_multiple","confidence","regime","signal_time"]}
-                for s in signals
-            ]
-            if _exp_rows:
+            # ── Export + diagnostics (only when useful) ───────────────────────
+            if signals:
+                st.markdown("---")
+                _exp_rows = [
+                    {k: s.get(k) for k in ["strategy","direction","entry_price","stop_price",
+                                            "target_price","r_multiple","confidence","signal_time"]}
+                    for s in signals
+                ]
                 st.download_button(
-                    "⬇ Export signals CSV",
+                    "⬇ Export CSV",
                     data=pd.DataFrame(_exp_rows).to_csv(index=False),
                     file_name=f"{symbol_input}_signals_{datetime.now(ET).strftime('%Y%m%d_%H%M')}.csv",
                     mime="text/csv",
@@ -730,14 +547,13 @@ with tab_signals:
                 )
 
             diag_data = result.get("diagnostics", {})
-            if diag_data:
-                with st.expander("Pipeline diagnostics", expanded=False):
+            _no_trades = not signals and raw_count == 0
+            if diag_data and _no_trades:
+                with st.expander("Why no signals? (diagnostics)", expanded=True):
                     _render_pipeline_diagnostics(diag_data)
 
-    # Auto-rerun schedule
+    # Auto-rerun when live toggle is on and market is open
     if auto_refresh and _mkt_is_open and st.session_state.get("_dt_signals_loaded"):
-        import time as _t2
-        _t2.sleep(0.5)
         st.rerun()
 
 
@@ -886,93 +702,34 @@ with tab_backtest:
                 for change in adj.get("changes", []):
                     st.markdown(f"• {change}")
 
-        # ── Quick signal counts — always visible, no scrolling needed ───────
+        # ── Pipeline diagnostics (only expand when there are no trades) ────────
         diag_data = bt_result.get("diagnostics", {})
+        _zero_trades = bt_result.get("metrics", {}).get("total_trades", 0) == 0
         if diag_data:
-            _dsig  = diag_data.get("signals", {})
-            _dbr   = diag_data.get("brain_filter", {})
-            _dex   = diag_data.get("execution", {})
-            _dregm = diag_data.get("regime", {})
-            _raw   = _dsig.get("raw_signals_generated", 0)
-            _acc   = _dbr.get("accepted_signals", _raw)
-            _exec  = _dex.get("trades_opened", bt_result.get("metrics", {}).get("total_trades", 0))
-            _rej   = _dbr.get("rejected_by_brain_total", 0)
-            _rskip = _dregm.get("days_skipped_by_regime", 0)
-            qs1, qs2, qs3, qs4, qs5 = st.columns(5)
-            qs1.metric("Raw Signals",    _raw,
-                       delta=f"Buy:{_dsig.get('raw_buy_signals',0)} Sell:{_dsig.get('raw_sell_signals',0)}",
-                       delta_color="off")
-            qs2.metric("Brain Accepted", _acc,
-                       delta=f"-{_rej} rejected" if _rej else "backtest mode (no live brain)",
-                       delta_color="inverse" if _rej > 0 else "off")
-            qs3.metric("Trades Executed", _exec)
-            qs4.metric("Regime-Blocked Days", _rskip)
-            _root = diag_data.get("diagnosis", {}).get("root_cause", "")
-            qs5.metric("Status", "✅ OK" if _exec > 0 else ("⚠️ Signals, no trades" if _raw > 0 else "❌ No signals"))
-            if _root and _exec == 0:
-                _fn = st.error if _raw == 0 else st.warning
-                _fn(f"**Why no trades:** {_root}")
-            # Explain regime-blocked rejections clearly
-            _rej_regime = _dbr.get("rejected_by_regime", 0)
-            if _rej_regime > 0 and _rej_regime == _rej:
-                st.info(
-                    f"**All {_rej} brain rejections were regime-blocked.** "
-                    "The brain classified each historical day's market state (TREND_UP/TREND_DOWN/CHOPPY) "
-                    "and the selected strategy is not allowed in those states. "
-                    "Try a strategy that works in CHOPPY markets (e.g. VWAPMeanReversion or BollingerMomentum), "
-                    "or run in Raw Strategy mode to see unfiltered results."
-                )
-
-        # ── Full pipeline diagnostics panel ──────────────────────────────────
-        if diag_data:
-            with st.expander("📊 Pipeline Diagnostics", expanded=bt_result.get("metrics", {}).get("total_trades", 0) == 0):
+            with st.expander("Signal pipeline" + (" — why no trades?" if _zero_trades else ""), expanded=_zero_trades):
                 _render_pipeline_diagnostics(diag_data, expanded=False)
 
-        # ── Zero-trades: rich explanation ─────────────────────────────────────
+        # ── Zero-trades explanation ───────────────────────────────────────────
         if bt_result.get("metrics", {}).get("total_trades", 0) == 0:
             exp = bt_result.get("explanation", {})
-            sel = bt_result.get("selection", {})
             alt = bt_result.get("recommended_alternative", "")
 
             if exp:
                 urgency = exp.get("urgency", "low")
                 urgency_fn = st.error if urgency == "high" else (st.warning if urgency == "medium" else st.info)
-                urgency_fn(
-                    f"**0 trades generated** — {exp.get('root_cause_label', 'No setups found')}. "
-                    f"Fit score: {exp.get('fit_score', 0):.0%}"
-                )
+                urgency_fn(f"{exp.get('root_cause_label', 'No setups found')} — {exp.get('why_no_trades', '')[:200]}")
 
-                with st.expander("Why no trades fired? (click to diagnose)", expanded=True):
-                    st.markdown(exp.get("why_no_trades", ""))
+                for rec in exp.get("recommendations", []):
+                    st.caption(f"• {rec}")
 
-                    st.markdown("#### Recommendations")
-                    for rec in exp.get("recommendations", []):
-                        st.markdown(f"• {rec}")
-
-                    if alt:
-                        st.markdown(f"#### Recommended alternative: **{alt}**")
-                        alt_period = exp.get("alternative_period", "90d")
-                        if st.button(
-                            f"Try {alt} on {bt_symbol} ({alt_period})",
-                            key=f"try_alt_{alt}",
-                        ):
-                            with st.spinner(f"Running {alt}…"):
-                                alt_result = run_backtest(bt_symbol, alt, alt_period, 10_000.0)
-                                st.session_state["bt_single_result"] = alt_result
-                                st.session_state["bt_mode_stored"] = "Raw Strategy"
-                            st.rerun()
-
-                if sel:
-                    st.markdown("#### Strategy fit scores for this symbol")
-                    scores = sel.get("symbol_fit_scores", {})
-                    score_rows = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-                    for strat_name, score in score_rows:
-                        bar_color = "#00d4aa" if score >= 0.6 else ("#FFD700" if score >= 0.35 else "#ff4b4b")
-                        st.markdown(
-                            f"**{strat_name}** — {score:.0%} "
-                            f"<span style='color:{bar_color}'>{'█' * int(score * 10)}</span>",
-                            unsafe_allow_html=True,
-                        )
+                if alt:
+                    alt_period = exp.get("alternative_period", "90d")
+                    if st.button(f"Try {alt} instead ({alt_period})", key=f"try_alt_{alt}", type="primary"):
+                        with st.spinner(f"Running {alt}…"):
+                            alt_result = run_backtest(bt_symbol, alt, alt_period, 10_000.0)
+                            st.session_state["bt_single_result"] = alt_result
+                            st.session_state["bt_mode_stored"] = "Raw Strategy"
+                        st.rerun()
             else:
                 # Fallback when no TradeExplainer output (brain-filtered path)
                 diag_root = diag_data.get("diagnosis", {}).get("root_cause", "") if diag_data else ""
@@ -987,12 +744,6 @@ with tab_backtest:
         m = bt_result.get("metrics", {})
         _metrics_row(m)
 
-        ex1, ex2, ex3, ex4 = st.columns(4)
-        ex1.metric("Best Hour", str(m.get("best_hour", "N/A")))
-        ex2.metric("Best DoW", str(m.get("best_day_of_week", "N/A")))
-        ex3.metric("Avg P&L/Trade", f"${m.get('avg_pnl_per_trade', 0):.2f}")
-        ex4.metric("Max Consec. Losses", str(m.get("max_consecutive_losses", 0)))
-
         eq_curve = bt_result.get("equity_curve", [])
         trades_list = bt_result.get("trades", [])
         if eq_curve and len(eq_curve) > 1:
@@ -1000,84 +751,63 @@ with tab_backtest:
 
         analysis = bt_result.get("analysis", {})
         if analysis:
-            st.markdown("---")
-            st.markdown("### Trade Analyzer")
-
-            strengths = analysis.get("strengths", [])
+            strengths  = analysis.get("strengths", [])
             weaknesses = analysis.get("weaknesses", [])
-            diagnosis = analysis.get("diagnosis", [])
+            for s in strengths:
+                st.success(s)
+            for w in weaknesses:
+                st.warning(w)
 
-            if strengths:
-                with st.expander("✅ Strengths", expanded=True):
-                    for s in strengths:
-                        st.success(s)
-            if weaknesses:
-                with st.expander("⚠️ Weaknesses", expanded=True):
-                    for w in weaknesses:
-                        st.warning(w)
-            if diagnosis:
-                with st.expander("🔍 Observations"):
-                    for d in diagnosis:
-                        st.info(d)
+            with st.expander("Detailed analysis", expanded=False):
+                ra1, ra2, ra3, ra4 = st.columns(4)
+                ra1.metric("Expectancy/trade", f"{analysis.get('expectancy', 0):+.3f}%")
+                ra2.metric("Payoff Ratio", f"{analysis.get('payoff_ratio', 0):.2f}:1")
+                ra3.metric("Avg Win", f"{analysis.get('avg_win_pct', 0):.3f}%")
+                ra4.metric("Avg Loss", f"−{analysis.get('avg_loss_pct', 0):.3f}%")
 
-            ra1, ra2, ra3, ra4 = st.columns(4)
-            ra1.metric("Expectancy/trade", f"{analysis.get('expectancy', 0):+.3f}%")
-            ra2.metric("Payoff Ratio", f"{analysis.get('payoff_ratio', 0):.2f}:1")
-            ra3.metric("Avg Win", f"{analysis.get('avg_win_pct', 0):.3f}%")
-            ra4.metric("Avg Loss", f"-{analysis.get('avg_loss_pct', 0):.3f}%")
+                ex1, ex2, ex3, ex4 = st.columns(4)
+                ex1.metric("Best Hour", str(m.get("best_hour", "N/A")))
+                ex2.metric("Best Day", str(m.get("best_day_of_week", "N/A")))
+                ex3.metric("Avg P&L/Trade", f"${m.get('avg_pnl_per_trade', 0):.2f}")
+                ex4.metric("Max Consec. Losses", str(m.get("max_consecutive_losses", 0)))
 
-            hold1, hold2 = st.columns(2)
-            hold1.metric("Avg Win Hold (bars)", f"{analysis.get('avg_win_hold_bars', 0):.1f}")
-            hold2.metric("Avg Loss Hold (bars)", f"{analysis.get('avg_loss_hold_bars', 0):.1f}")
+                regime_data = analysis.get("regime_breakdown", {})
+                if regime_data:
+                    st.markdown("**Performance by Regime**")
+                    df_regime = pd.DataFrame([
+                        {"Regime": k, "Trades": v["trades"], "Win%": v["win_rate"],
+                         "Avg P&L%": v["avg_pnl"], "Total P&L ($)": v["total_pnl"]}
+                        for k, v in regime_data.items()
+                    ])
+                    st.dataframe(df_regime, use_container_width=True, hide_index=True)
 
-            regime_data = analysis.get("regime_breakdown", {})
-            if regime_data:
-                st.markdown("#### Performance by Regime")
-                df_regime = pd.DataFrame([
-                    {"Regime": k, "Trades": v["trades"], "Win%": v["win_rate"],
-                     "Avg P&L%": v["avg_pnl"], "Total P&L ($)": v["total_pnl"]}
-                    for k, v in regime_data.items()
-                ])
-                st.dataframe(df_regime, use_container_width=True, hide_index=True)
-
-            hourly_data = analysis.get("hourly_performance", {})
-            if hourly_data:
-                st.markdown("#### Win Rate by Hour of Day")
-                hours = sorted(hourly_data.keys())
-                wr_vals = [hourly_data[h]["win_rate"] for h in hours]
-                trade_counts = [hourly_data[h]["trades"] for h in hours]
-                colors = ["#00d4aa" if w >= 55 else ("#FFD700" if w >= 45 else "#ff4b4b") for w in wr_vals]
-                fig_h = go.Figure(go.Bar(
-                    x=[f"{h}:00" for h in hours], y=wr_vals,
-                    marker_color=colors,
-                    text=[f"{c}T" for c in trade_counts],
-                    textposition="outside",
-                    hovertemplate="Hour %{x}<br>Win rate: %{y:.0f}%<br>Trades: %{text}<extra></extra>",
-                ))
-                # Reference lines: market open (9) and last-entry cutoff (15)
-                for _hr, _lbl, _clr in [(9, "Open 9:30", "#26C6DA"), (15, "Cutoff 15:15", "#FF9800")]:
-                    _hr_str = f"{_hr}:00"
-                    if _hr_str in [f"{h}:00" for h in hours]:
-                        fig_h.add_vline(x=_hr_str, line_dash="dash", line_color=_clr,
-                                        annotation_text=_lbl, annotation_position="top")
-                fig_h.update_layout(
-                    template="plotly_dark", height=280,
-                    margin=dict(l=0, r=0, t=20, b=0),
-                    yaxis=dict(title="Win%", range=[0, 112]),
-                    xaxis=dict(title="Entry Hour (ET)"),
-                    showlegend=False,
-                )
-                st.plotly_chart(fig_h, use_container_width=True)
-                st.caption("Green bars ≥55% win rate · Yellow 45–55% · Red <45% · Dashed lines: market open and last-entry cutoff")
-
-            outcome_data = analysis.get("outcome_breakdown", {})
-            if outcome_data:
-                st.markdown("#### Outcome Breakdown")
-                df_out = pd.DataFrame([
-                    {"Outcome": k, "Count": v["count"], "Win%": v["win_rate"], "Avg P&L%": v["avg_pnl_pct"]}
-                    for k, v in outcome_data.items()
-                ])
-                st.dataframe(df_out, use_container_width=True, hide_index=True)
+                hourly_data = analysis.get("hourly_performance", {})
+                if hourly_data:
+                    st.markdown("**Win Rate by Hour**")
+                    hours = sorted(hourly_data.keys())
+                    wr_vals = [hourly_data[h]["win_rate"] for h in hours]
+                    trade_counts = [hourly_data[h]["trades"] for h in hours]
+                    colors = ["#00d4aa" if w >= 55 else ("#FFD700" if w >= 45 else "#ff4b4b") for w in wr_vals]
+                    fig_h = go.Figure(go.Bar(
+                        x=[f"{h}:00" for h in hours], y=wr_vals,
+                        marker_color=colors,
+                        text=[f"{c}T" for c in trade_counts],
+                        textposition="outside",
+                        hovertemplate="Hour %{x}<br>Win rate: %{y:.0f}%<br>Trades: %{text}<extra></extra>",
+                    ))
+                    for _hr, _lbl, _clr in [(9, "Open 9:30", "#26C6DA"), (15, "Cutoff 15:15", "#FF9800")]:
+                        _hr_str = f"{_hr}:00"
+                        if _hr_str in [f"{h}:00" for h in hours]:
+                            fig_h.add_vline(x=_hr_str, line_dash="dash", line_color=_clr,
+                                            annotation_text=_lbl, annotation_position="top")
+                    fig_h.update_layout(
+                        template="plotly_dark", height=260,
+                        margin=dict(l=0, r=0, t=10, b=0),
+                        yaxis=dict(title="Win%", range=[0, 112]),
+                        xaxis=dict(title="Hour (ET)"),
+                        showlegend=False,
+                    )
+                    st.plotly_chart(fig_h, use_container_width=True)
 
         if trades_list:
             st.markdown("---")
@@ -1162,12 +892,7 @@ with tab_backtest:
 # TAB 3 — Position Sizer
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_sizer:
-    st.markdown("### Day Trade Position Sizer")
-    st.info(
-        "Day traders should risk **max 0.5–1% per trade** to survive "
-        "losing streaks. PDT rule: max 3 day trades per 5 rolling days "
-        "unless account > $25,000."
-    )
+    st.markdown("### Position Sizer")
 
     ps1, ps2 = st.columns(2)
     ps_account = ps1.number_input("Account Size ($)", value=25_000, step=1_000)
@@ -1700,9 +1425,35 @@ with tab_scanner:
         help="How many top-ranked candidates the pre-check runs on. 0 disables.",
     )
 
-    if st.button("Run Market Scan", key="run_market_scan_btn", type="primary"):
+    # ── Scan buttons ──────────────────────────────────────────────────────────
+    _scan_col1, _scan_col2 = st.columns([3, 1])
+    _run_scan = _scan_col1.button("▶ Run Market Scan", key="run_market_scan_btn", type="primary", use_container_width=True)
+    _force_refresh = _scan_col2.button(
+        "↺ Force fresh data", key="run_market_scan_force", use_container_width=True,
+        help="Clears the cached bulk price/volume snapshot so the next scan re-downloads all symbols. "
+             "Use this if you changed filter presets mid-session.",
+    )
+
+    if _force_refresh:
+        try:
+            from app.services.strategy.daytrading.scanners.daytrading_scanner import DayTradingScanner
+            DayTradingScanner.invalidate_bulk_cache()
+            st.toast("Bulk cache cleared — next scan will re-download all symbols.", icon="✅")
+        except Exception as _fe:
+            st.warning(f"Could not clear cache: {_fe}")
+
+    if _run_scan:
         scan_failed = False
-        with st.spinner("Scanning market — fetching bars, scoring, applying regime adjustments…"):
+        st.info(
+            "**Scan running in two phases:**\n\n"
+            "**Phase 1** — Bulk price+volume download for all symbols (~10–30s). "
+            "Symbols that fail the price/volume filter are eliminated immediately.\n\n"
+            "**Phase 2** — Deep fetch (ATR, gap, pre-market volume) on survivors only, "
+            "processed in chunks of 200 in parallel.\n\n"
+            "First scan of the day is slowest. Subsequent scans reuse the Phase 1 cache.",
+            icon="ℹ️",
+        )
+        with st.spinner("Phase 1: bulk price+volume filter across full universe…"):
             try:
                 ranked = _api.daytrading_scanner_watchlist(
                     max_symbols=int(ms_max),
@@ -1723,13 +1474,11 @@ with tab_scanner:
                 msg = str(e)
                 if "timed out" in msg.lower() or "timeout" in msg.lower():
                     st.error(
-                        "Market scan timed out. The full ~5,800-symbol universe with "
-                        "no cap can exceed the 10-min HTTP window. Try one of:\n\n"
-                        "• Set **Cap universe size** to 500–1500 for a fast scan.\n"
-                        "• Use an **Override universe** (comma-separated tickers) to "
-                        "limit the work.\n"
-                        "• Turn off **Run native pre-check on top-K** for the first "
-                        "scan, then re-enable it once the list is narrowed."
+                        "Scan timed out. With the two-phase engine this is rare — "
+                        "if it happens, try:\n"
+                        "• Turn off **Native pre-check** (biggest time saver)\n"
+                        "• Set **Cap universe size** to 1000–2000 for a faster run\n"
+                        "• Click **↺ Force fresh data** then re-run (stale cache can slow Phase 1)"
                     )
                 else:
                     st.error(f"Market scan failed: {e}")
@@ -1833,7 +1582,7 @@ with tab_scanner:
         "Symbols to arm", min_value=1, max_value=20, value=5, step=1, key="sfs_max",
     )
     sfs_dir = sb2.selectbox(
-        "Direction", ["long_only", "short_only", "both"], index=0, key="sfs_dir",
+        "Direction", ["long_only", "both", "short_only"], index=0, key="sfs_dir",
     )
     sfs_require_signal = sb3.checkbox(
         "Require active native signal", value=True, key="sfs_require_signal",
@@ -1936,30 +1685,14 @@ with tab_scanner:
 # TAB 6 — Config
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_config:
-    st.markdown("### Day Trading Notes")
-    st.warning(
-        "**PDT Rule**: Pattern Day Trader — if you make 4+ day trades in 5 "
-        "rolling business days, your broker may flag you as a PDT and require "
-        "a $25,000 minimum account balance. Max 3 day trades per 5 days for "
-        "accounts under $25k."
-    )
-    st.error(
-        "**NEVER hold overnight.** All positions generated by this module must "
-        "be closed by 3:45 PM ET. The system marks all signals as DAY orders."
-    )
-    st.info("**Recommended minimum account for day trading: $25,000+**")
-
-    st.markdown("---")
     st.markdown("### Strategy Configuration")
-
-    st.caption("Toggle changes are applied immediately in-memory and reset on server restart.")
+    st.caption("Enable/disable strategies. Changes apply immediately (in-memory, reset on server restart).")
     for strategy in ALL_STRATEGIES:
-        with st.expander(f"⚙️ {strategy.name}  —  {STRATEGY_DESCRIPTIONS.get(strategy.name, '')}"):
+        with st.expander(f"{strategy.name}  —  {STRATEGY_DESCRIPTIONS.get(strategy.name, '')}"):
             enabled_key  = f"cfg_enabled_{strategy.name}"
             _was_enabled = st.session_state.get(enabled_key, True)
             _now_enabled = st.toggle(f"Enable {strategy.name}", value=_was_enabled, key=enabled_key)
 
-            # Wire toggle to backend when it changes
             if _now_enabled != _was_enabled:
                 try:
                     api.daytrading_toggle_strategy(strategy.name, _now_enabled)
@@ -1968,9 +1701,9 @@ with tab_config:
                     st.warning(f"Could not update backend: {_te}")
 
             cfg = strategy.default_config
-            st.markdown("**Parameters (auto-tuned per symbol in live/backtest; defaults shown):**")
+            st.caption("Default parameters (auto-tuned per symbol in backtests):")
             cfg_df = pd.DataFrame(
-                [{"Parameter": k, "Default Value": v} for k, v in cfg.items()]
+                [{"Parameter": k, "Default": v} for k, v in cfg.items()]
             )
             st.dataframe(cfg_df, use_container_width=True, hide_index=True)
 
@@ -1985,94 +1718,150 @@ with tab_autotrader:
         st.session_state["at_trader"] = None
     if "at_status" not in st.session_state:
         st.session_state["at_status"] = {}
+    if "at_confirm_live" not in st.session_state:
+        st.session_state["at_confirm_live"] = False
+    if "at_confirm_flatten" not in st.session_state:
+        st.session_state["at_confirm_flatten"] = False
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # TOP CONTROL BAR — symbol, mode toggle, broker, start/stop/flatten
+    # ROW 1 — symbol + mode
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    cb1, cb2, cb3, cb4, cb5, cb6, cb7 = st.columns([2, 1, 1, 1, 1, 1, 1])
+    r1a, r1b, r1c = st.columns([3, 1, 1])
 
-    at_symbol = cb1.text_input(
-        "Symbol", value=st.session_state.get("signals_symbol", "AAPL"),
-        key="at_symbol", placeholder="AAPL, MTEN, SPY …",
+    at_symbol = r1a.text_input(
+        "Symbol to trade", value=st.session_state.get("signals_symbol", "AAPL"),
+        key="at_symbol", placeholder="AAPL, TSLA, SPY …",
     ).strip().upper() or "AAPL"
 
-    at_simulation = cb2.toggle(
-        "Simulation", value=True, key="at_simulation",
+    at_simulation = r1b.toggle(
+        "Paper (Simulation)", value=True, key="at_simulation",
         help=(
-            "ON = paper simulation: bot runs all logic, shows where it would buy/sell "
-            "and the P&L it would realize — no real orders placed.\n\n"
-            "OFF = live trading: real orders sent to the selected broker."
+            "ON (recommended) = paper/simulation mode — bot runs all logic and shows where it "
+            "would enter and exit, but NO real orders are placed. Safe for testing.\n\n"
+            "OFF = LIVE mode — real orders sent to your broker. Only turn off when ready to trade real money."
         ),
     )
 
-    at_dir = cb3.selectbox(
-        "Direction", ["Long only", "Both", "Short only"],
+    at_dir = r1c.selectbox(
+        "Trade direction", ["Long only", "Long & Short", "Short only"],
         index=0, key="at_dir",
+        help="Long only = only BUY setups. Long & Short = both directions. Short only = only SHORT setups.",
     )
 
-    at_tf = cb4.selectbox("Timeframe", ["5m", "1m", "15m"], index=0, key="at_tf")
-
-    start_pressed   = cb5.button("▶ Start", use_container_width=True, type="primary", key="at_start")
-    stop_pressed    = cb6.button("⏹ Stop",  use_container_width=True, key="at_stop")
-    flatten_pressed = cb7.button("🚨 Flatten", use_container_width=True, key="at_flatten")
-
-    # Mode indicator bar
+    # ── Mode banner ───────────────────────────────────────────────────────────
     if at_simulation:
         st.markdown(
-            "<div style='background:rgba(91,146,209,0.12);border:1px solid rgba(91,146,209,0.3);"
-            "border-radius:8px;padding:8px 14px;margin-bottom:8px;font-size:0.84rem'>"
-            "🔵 <b>SIMULATION MODE</b> — paper trading only. "
-            "The bot runs all strategy logic and shows exactly where it would enter, "
-            "manage stops, take profits, and exit. <b>No real orders are placed.</b> "
-            "Switch Simulation OFF + select a broker to go live."
+            "<div style='background:rgba(91,146,209,0.10);border:1px solid rgba(91,146,209,0.28);"
+            "border-radius:6px;padding:7px 14px;margin-bottom:6px;font-size:0.83rem'>"
+            "🔵 <b>PAPER / SIMULATION</b> — no real orders. Bot shows exactly where it would "
+            "enter, manage the stop, and exit. Switch off to go live."
             "</div>",
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            "<div style='background:rgba(208,122,122,0.12);border:1px solid rgba(208,122,122,0.4);"
-            "border-radius:8px;padding:8px 14px;margin-bottom:8px;font-size:0.84rem'>"
-            "🔴 <b>LIVE TRADING MODE</b> — real orders will be sent to your broker. "
-            "Verify broker routing and risk limits before starting."
+            "<div style='background:rgba(208,80,80,0.12);border:1px solid rgba(208,80,80,0.42);"
+            "border-radius:6px;padding:7px 14px;margin-bottom:6px;font-size:0.83rem'>"
+            "🔴 <b>LIVE TRADING</b> — real orders will be sent to your broker. "
+            "Confirm broker routing and risk limits before starting."
             "</div>",
             unsafe_allow_html=True,
         )
         render_broker_routing_toggle(key_suffix="at_live")
 
-    # ── Risk configuration (compact, collapsed by default when running) ───────
-    trader_running = bool(st.session_state.get("at_status", {}).get("running"))
-    with st.expander("⚙️ Risk & Strategy Config", expanded=not trader_running):
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ROW 2 — risk config strip (always visible, compact)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    with st.expander("⚙️ Risk settings", expanded=not bool(st.session_state.get("at_status", {}).get("running"))):
         rc1, rc2, rc3, rc4 = st.columns(4)
-        at_risk_pct   = rc1.number_input("Risk per trade %", 0.1, 5.0, 1.0, 0.1, key="at_risk",
-                                          help="% of capital risked per trade (stop distance × shares).")
-        at_max_loss   = rc2.number_input("Max daily loss %", 0.5, 10.0, 2.0, 0.5, key="at_maxloss",
-                                          help="Bot stops trading for the day when realized loss exceeds this.")
-        at_capital    = rc3.number_input("Capital ($)", 1000, 10_000_000, 10_000, 1000, key="at_capital")
-        at_max_trades = rc4.number_input("Max trades/day", 1, 20, 6, 1, key="at_maxtrades")
-
-        sc1, sc2, sc3 = st.columns(3)
-        at_partial_tp = sc1.toggle("Partial TP at +1R", value=True, key="at_partial",
-                                    help="Scale out 50% of position at 1× risk gained.")
-        at_trail_mode = sc2.selectbox("Trail stop mode", ["atr", "ema", "candle"], key="at_trail")
-        at_entry_mode = sc3.selectbox(
-            "Entry mode",
-            ["native_strategy", "legacy_entry_decider"],
-            index=0, key="at_entry_mode",
-            help=(
-                "native_strategy: uses the same strategy.generate_signals() as the backtest "
-                "(recommended — most consistent with what you see on the signals chart).\n\n"
-                "legacy_entry_decider: uses the older indicator-scoring entry path."
-            ),
+        at_capital    = rc1.number_input(
+            "Capital ($)", 1_000, 10_000_000, 10_000, 1_000, key="at_capital",
+            help="Total account capital the bot sizes positions against.",
+        )
+        at_risk_pct   = rc2.number_input(
+            "Risk per trade %", 0.1, 5.0, 1.0, 0.1, key="at_risk",
+            help="How much of your capital to risk on each trade (stop distance × shares). 0.5–1% is recommended.",
+        )
+        at_max_loss   = rc3.number_input(
+            "Daily loss limit %", 0.5, 10.0, 2.0, 0.5, key="at_maxloss",
+            help="Bot stops all new entries for the day once realized losses hit this % of capital.",
+        )
+        at_max_trades = rc4.number_input(
+            "Max trades/day", 1, 20, 6, 1, key="at_maxtrades",
+            help="Hard cap on entries per session. Bot goes idle after this count.",
         )
 
-    # ── Start / stop logic ────────────────────────────────────────────────────
+        sc1, sc2 = st.columns(2)
+        at_partial_tp = sc1.toggle(
+            "Scale out 50% at +1R", value=True, key="at_partial",
+            help="When the trade reaches 1× your initial risk in profit, the bot closes half the position and moves stop to breakeven. The remaining half runs with a trailing stop.",
+        )
+        _trail_label_map = {"ATR trail": "atr", "EMA9 trail": "ema", "Prior-bar-low trail": "candle"}
+        _trail_disp = sc2.selectbox(
+            "Trailing stop type", list(_trail_label_map.keys()), key="at_trail_disp",
+            help="ATR trail: stop follows price by 1×ATR. EMA9: stop is EMA9 line. Prior-bar-low: stop is the previous bar's low.",
+        )
+        at_trail_mode = _trail_label_map[_trail_disp]
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ROW 3 — Start / Stop / Flatten buttons
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    _trader_running = bool(st.session_state.get("at_status", {}).get("running"))
+    btn1, btn2, btn3, _spacer = st.columns([1, 1, 1, 3])
+
+    start_pressed   = btn1.button(
+        "▶ Start bot", use_container_width=True, type="primary", key="at_start",
+        disabled=_trader_running,
+        help="Start the auto trader for the selected symbol.",
+    )
+    stop_pressed    = btn2.button(
+        "⏹ Stop", use_container_width=True, key="at_stop",
+        disabled=not _trader_running,
+        help="Stop the bot. Any open position is left in place — use Flatten to close it.",
+    )
+    flatten_pressed = btn3.button(
+        "🚨 Flatten all", use_container_width=True, key="at_flatten",
+        help="Immediately close any open position at market price.",
+    )
+
+    # ── Live-mode confirmation gate ───────────────────────────────────────────
+    if start_pressed and not at_simulation and not st.session_state["at_confirm_live"]:
+        st.session_state["at_confirm_live"] = True
+        start_pressed = False  # hold — show confirm dialog first
+
+    if st.session_state["at_confirm_live"] and not at_simulation:
+        st.warning(
+            "⚠️ **You are about to start LIVE trading.** Real orders will be sent to your broker. "
+            f"Symbol: **{at_symbol}** · Risk/trade: **{at_risk_pct}%** · Daily loss limit: **{at_max_loss}%**",
+            icon="⚠️",
+        )
+        conf1, conf2 = st.columns(2)
+        if conf1.button("✅ Yes, go live", type="primary", key="at_confirm_yes"):
+            st.session_state["at_confirm_live"] = False
+            start_pressed = True
+        if conf2.button("Cancel", key="at_confirm_no"):
+            st.session_state["at_confirm_live"] = False
+
+    # ── Flatten confirmation gate ─────────────────────────────────────────────
+    if flatten_pressed and not st.session_state["at_confirm_flatten"]:
+        st.session_state["at_confirm_flatten"] = True
+        flatten_pressed = False
+
+    if st.session_state["at_confirm_flatten"]:
+        st.warning("⚠️ **Flatten all positions?** This closes any open trade at market immediately.", icon="⚠️")
+        flat1, flat2 = st.columns(2)
+        if flat1.button("🚨 Confirm flatten", type="primary", key="at_flat_yes"):
+            st.session_state["at_confirm_flatten"] = False
+            flatten_pressed = True
+        if flat2.button("Cancel", key="at_flat_no"):
+            st.session_state["at_confirm_flatten"] = False
+
+    # ── Start logic ───────────────────────────────────────────────────────────
     if start_pressed:
         try:
             from app.services.strategy.daytrading.autotrader import SingleStockTrader
-            from app.services.strategy.daytrading.autotrader.single_stock_trader import PolicyError
             from app.services.strategy.daytrading.brain.symbol_policy import get_policy, set_policy, SymbolPolicy, ENABLED
 
-            # Auto-enable policy so the bot can always trade what you pick
             _pol = get_policy(at_symbol)
             if not _pol.allows_live():
                 set_policy(at_symbol, SymbolPolicy(
@@ -2081,9 +1870,8 @@ with tab_autotrader:
                     wf_verdict=_pol.wf_verdict, wf_score=_pol.wf_score,
                 ))
 
-            dir_map = {"Long only": "long_only", "Short only": "short_only", "Both": "both"}
+            _dir_map = {"Long only": "long_only", "Long & Short": "both", "Short only": "short_only"}
 
-            # Broker: None = paper sim; real broker instance for live
             _broker = None
             _exec_svc = None
             _acct_id  = ""
@@ -2102,49 +1890,51 @@ with tab_autotrader:
                 broker=_broker,
                 execution_service=_exec_svc,
                 account_id=_acct_id,
-                direction_mode=dir_map[at_dir],
+                direction_mode=_dir_map[at_dir],
                 trail_mode=at_trail_mode,
                 partial_tp=at_partial_tp,
                 risk_per_trade_pct=at_risk_pct / 100,
                 max_daily_loss_pct=at_max_loss,
                 max_trades_per_day=int(at_max_trades),
                 initial_capital=float(at_capital),
-                entry_mode=at_entry_mode,
+                entry_mode="native_strategy",
                 on_trade_update=lambda s: st.session_state.update({"at_status": s}),
             )
-            # Stop previous trader if running
+
             old = st.session_state.get("at_trader")
             if old is not None:
                 try: old.stop()
                 except Exception: pass
 
             st.session_state["at_trader"] = trader
-            trader.start(force=True)   # force=True allows start outside RTH for testing
-            _mode_label = "SIMULATION" if at_simulation else "LIVE"
+            trader.start()
+            _mode_label = "PAPER/SIMULATION" if at_simulation else "LIVE"
             st.success(
-                f"✅ Bot started for **{at_symbol}** in **{_mode_label}** mode. "
-                f"Polling every 30s · EOD flatten at market close."
+                f"✅ Bot started — **{at_symbol}** · {_mode_label} · "
+                f"Polls every 30s · EOD flatten at market close."
             )
         except Exception as e:
             st.error(f"Failed to start: {e}", icon="❌")
 
+    # ── Stop logic ────────────────────────────────────────────────────────────
     if stop_pressed:
-        _trader = st.session_state.get("at_trader")
-        if _trader:
-            _trader.stop()
-            st.info("Bot stopped.")
+        _t = st.session_state.get("at_trader")
+        if _t:
+            _t.stop()
+            st.info("Bot stopped. Open positions are left in place — click Flatten to close them.")
         else:
             st.warning("No active bot.")
 
+    # ── Flatten logic ─────────────────────────────────────────────────────────
     if flatten_pressed:
-        _trader = st.session_state.get("at_trader")
-        if _trader:
-            _trader.force_flatten("Manual flatten from UI")
-            st.warning("🚨 Force flatten executed — all positions closed at market.")
+        _t = st.session_state.get("at_trader")
+        if _t:
+            _t.force_flatten("Manual flatten from UI")
+            st.warning("🚨 Flatten executed — all positions closed at market.")
         else:
-            st.warning("No active bot.")
+            st.warning("No active bot to flatten.")
 
-    # ── Refresh status from running trader ────────────────────────────────────
+    # ── Refresh status ────────────────────────────────────────────────────────
     _trader_obj = st.session_state.get("at_trader")
     if _trader_obj is not None:
         try:
@@ -2155,78 +1945,82 @@ with tab_autotrader:
     status = st.session_state.get("at_status", {})
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # MAIN AREA — chart (left) | position + log (right)
+    # MAIN AREA — chart (left) | position dashboard (right)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     chart_col, ctrl_col = st.columns([7, 3], gap="medium")
 
     with chart_col:
-        # ── Live TradingView chart with signal + trade markers ────────────────
-        # Pulls /chart/intraday which runs strategies server-side and returns
-        # marker positions with entry/stop/target. Refreshes every poll cycle.
-        _at_chart_sym = at_symbol
-        try:
-            _at_payload = api.intraday_chart(
-                _at_chart_sym,
-                timeframe=at_tf,
-                strategies="all",
-                include_rejected=True,
+        # Only load chart once bot has started (avoids unnecessary API calls)
+        _at_has_status = bool(status)
+        if not _at_has_status:
+            st.markdown(
+                "<div style='padding:80px 24px;text-align:center;"
+                "color:var(--text-3);font-size:0.9rem'>"
+                "Configure the symbol above and click <b>▶ Start bot</b> to begin.<br>"
+                "The live chart and position tracker will appear here."
+                "</div>",
+                unsafe_allow_html=True,
             )
-        except Exception as _cex:
-            _at_payload = None
-            st.warning(f"Chart load failed: {_cex}", icon="⚠️")
+        else:
+            try:
+                _at_payload = api.intraday_chart(
+                    at_symbol,
+                    timeframe="5m",
+                    strategies="all",
+                    include_rejected=True,
+                )
+            except Exception as _cex:
+                _at_payload = None
+                st.warning(f"Chart load failed: {_cex}", icon="⚠️")
 
-        if _at_payload:
-            # Inject bot trade markers (sim fills) on top of strategy signals
-            _bot_markers = []
-            _session_trades = status.get("session_trades", []) or []
-            for _t in _session_trades:
-                _fill_ts = _t.get("entry_time", "")
-                _exit_ts = _t.get("exit_time", "")
-                if _fill_ts and _t.get("entry_price"):
-                    _bot_markers.append({
-                        "time": _fill_ts, "side": _t.get("side", "BUY").upper(),
-                        "entry_price": _t.get("entry_price"), "strategy": "BOT ENTRY",
-                        "reason": f"Bot entered @ ${_t.get('entry_price',0):.2f}",
-                        "_accepted": True,
-                    })
-                if _exit_ts and _t.get("exit_price"):
-                    _exit_side = "SELL" if _t.get("side","BUY").upper() == "BUY" else "BUY"
-                    _bot_markers.append({
-                        "time": _exit_ts, "side": _exit_side,
-                        "entry_price": _t.get("exit_price"),
-                        "strategy": f"BOT EXIT ({_t.get('exit_reason','')[:20]})",
-                        "reason": (
-                            f"P&L: ${_t.get('pnl', 0):+.2f} ({_t.get('pnl_pct', 0):+.2f}%) — "
-                            f"{_t.get('exit_reason', '')}"
-                        ),
-                        "_accepted": True,
-                    })
-            # Merge bot fills into the payload's marker list
-            if _bot_markers:
-                _at_payload = dict(_at_payload)
-                _at_payload["markers"] = list(_at_payload.get("markers") or []) + _bot_markers
+            if _at_payload:
+                _bot_markers = []
+                _session_trades = status.get("session_trades", []) or []
+                for _t in _session_trades:
+                    _fill_ts = _t.get("entry_time", "")
+                    _exit_ts = _t.get("exit_time", "")
+                    if _fill_ts and _t.get("entry_price"):
+                        _bot_markers.append({
+                            "time": _fill_ts, "side": _t.get("side", "BUY").upper(),
+                            "entry_price": _t.get("entry_price"), "strategy": "BOT ENTRY",
+                            "reason": f"Bot entered @ ${_t.get('entry_price',0):.2f}",
+                            "_accepted": True,
+                        })
+                    if _exit_ts and _t.get("exit_price"):
+                        _exit_side = "SELL" if _t.get("side","BUY").upper() == "BUY" else "BUY"
+                        _bot_markers.append({
+                            "time": _exit_ts, "side": _exit_side,
+                            "entry_price": _t.get("exit_price"),
+                            "strategy": f"BOT EXIT ({_t.get('exit_reason','')[:20]})",
+                            "reason": (
+                                f"P&L: ${_t.get('pnl', 0):+.2f} ({_t.get('pnl_pct', 0):+.2f}%) — "
+                                f"{_t.get('exit_reason', '')}"
+                            ),
+                            "_accepted": True,
+                        })
+                if _bot_markers:
+                    _at_payload = dict(_at_payload)
+                    _at_payload["markers"] = list(_at_payload.get("markers") or []) + _bot_markers
 
-            lwc.render_strategy_chart(
-                _at_payload,
-                overlays_enabled=["vwap", "ema9", "ema21"],
-                show_trades=True,
-                show_rejected=True,
-                show_levels=True,     # draws entry/stop/target lines
-                height=540,
-            )
-            _mode_note = "SIMULATION — showing where bot would trade" if at_simulation else "LIVE — real orders"
-            st.caption(
-                f"▲ green = BUY signal  ·  ▼ red = SELL signal  ·  ✕ yellow = rejected  ·  "
-                f"BOT fills overlaid in same colors  ·  {_mode_note}  ·  "
-                "Click any marker for entry/stop/target detail"
-            )
+                lwc.render_strategy_chart(
+                    _at_payload,
+                    overlays_enabled=["vwap", "ema9", "ema21"],
+                    show_trades=True,
+                    show_rejected=True,
+                    show_levels=True,
+                    height=540,
+                )
+                _mode_note = "PAPER — showing where bot would trade" if at_simulation else "LIVE — real orders active"
+                st.caption(
+                    f"▲ green = BUY signal · ▼ red = SELL signal · ✕ yellow = rejected · "
+                    f"BOT fills shown in same colors · {_mode_note}"
+                )
 
     with ctrl_col:
-        # ── Bot state header ──────────────────────────────────────────────────
         if not status:
             empty_state(
-                "Bot not running",
-                "Configure a symbol above and click ▶ Start.",
+                "Bot not started",
+                "Set your symbol and risk settings above, then click ▶ Start bot.",
                 icon="🤖",
             )
         else:
@@ -2237,9 +2031,8 @@ with tab_autotrader:
             block_rsn  = status.get("block_reason", "")
             is_sim     = _trader_obj._broker is None if _trader_obj else True
 
-            # Mode + state chips
             mode_chip = (
-                "<span class='tx-pill blue'>SIMULATION</span>"
+                "<span class='tx-pill blue'>PAPER</span>"
                 if is_sim else
                 "<span class='tx-pill red'>LIVE</span>"
             )
@@ -2247,21 +2040,43 @@ with tab_autotrader:
                 f"{mode_chip} &nbsp; {regime_chip(at_regime)} &nbsp; {bot_state_chip(state_val, block_rsn)}",
                 unsafe_allow_html=True,
             )
-            st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
-            # P&L metrics
+            # ── P&L strip ─────────────────────────────────────────────────────
             pnl1, pnl2, pnl3 = st.columns(3)
             pnl1.metric("Unrealized", f"${unreal_pnl:+,.2f}",
                         delta_color="normal" if unreal_pnl >= 0 else "inverse")
             pnl2.metric("Realized",   f"${real_pnl:+,.2f}",
                         delta_color="normal" if real_pnl >= 0 else "inverse")
-            pnl3.metric("Total",      f"${unreal_pnl + real_pnl:+,.2f}",
-                        delta_color="normal" if (unreal_pnl + real_pnl) >= 0 else "inverse")
+            _total_pnl = unreal_pnl + real_pnl
+            pnl3.metric("Session P&L", f"${_total_pnl:+,.2f}",
+                        delta_color="normal" if _total_pnl >= 0 else "inverse")
+
+            # Session counters
+            ss1, ss2 = st.columns(2)
+            ss1.metric("Trades today", status.get("trades_today", 0))
+            ss2.metric("Consec. losses", status.get("consecutive_losses", 0))
+            hb = status.get("heartbeat_age_s", 0) or 0
+            hb_ok = hb < 120
+            st.caption(
+                f"{'🟢' if hb_ok else '🔴'} Heartbeat {hb:.0f}s ago · "
+                f"{'Running' if status.get('running') else 'Stopped'}"
+            )
 
             st.markdown("---")
 
-            # ── Active position panel ─────────────────────────────────────────
+            # ── Active position ───────────────────────────────────────────────
             if state_val in ("LONG", "SHORT", "PARTIAL_EXIT_TAKEN", "TRAILING"):
+                _side_color = "rgba(0,212,130,0.15)" if state_val != "SHORT" else "rgba(255,80,80,0.12)"
+                st.markdown(
+                    f"<div style='background:{_side_color};border-radius:6px;padding:8px 12px;"
+                    f"font-size:0.69rem;font-weight:700;text-transform:uppercase;"
+                    f"letter-spacing:0.08em;color:var(--text-3);margin-bottom:8px'>"
+                    f"{'LONG' if state_val != 'SHORT' else 'SHORT'} position — {at_symbol}"
+                    f"{'  ·  TRAILING' if state_val == 'TRAILING' else ''}"
+                    f"{'  ·  SCALING OUT' if state_val == 'PARTIAL_EXIT_TAKEN' else ''}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
                 entry_px = status.get("entry_price", 0) or 0
                 curr_px  = status.get("current_price", 0) or status.get("last_price", 0) or 0
                 stop_px  = status.get("current_stop", 0) or 0
@@ -2269,43 +2084,36 @@ with tab_autotrader:
                 r_val    = status.get("r_multiple")
                 qty      = status.get("qty", 0) or 0
 
-                st.markdown(
-                    f"<div style='font-size:0.69rem;font-weight:700;text-transform:uppercase;"
-                    f"letter-spacing:0.08em;color:var(--text-3);margin-bottom:6px'>"
-                    f"Active position — {status.get('side','—')} {at_symbol}</div>",
-                    unsafe_allow_html=True,
-                )
                 p1, p2 = st.columns(2)
-                p1.metric("Entry",   f"${entry_px:.2f}")
+                p1.metric("Entry", f"${entry_px:.2f}")
                 p2.metric("Current", f"${curr_px:.2f}",
                           delta=f"{curr_px - entry_px:+.2f}" if curr_px and entry_px else None,
                           delta_color="normal" if curr_px >= entry_px else "inverse")
                 p3, p4 = st.columns(2)
-                p3.metric("Stop",   f"${stop_px:.2f}",
-                          delta=f"−${abs(curr_px - stop_px):.2f} risk" if curr_px and stop_px else None,
+                p3.metric("Stop", f"${stop_px:.2f}",
+                          delta=f"−${abs(curr_px - stop_px):.2f} at risk" if curr_px and stop_px else None,
                           delta_color="off")
                 p4.metric("Target", f"${tgt_px:.2f}",
-                          delta=f"+${abs(tgt_px - curr_px):.2f} reward" if curr_px and tgt_px else None,
+                          delta=f"+${abs(tgt_px - curr_px):.2f} to go" if curr_px and tgt_px else None,
                           delta_color="off")
                 p5, p6 = st.columns(2)
                 p5.metric("R Multiple", f"{r_val:+.2f}R" if r_val is not None else "—")
-                p6.metric("Qty", f"{qty:g}")
+                p6.metric("Shares", f"{qty:g}")
 
-                # Time in trade + scenario analysis
                 _entry_time = status.get("entry_time", "")
                 if _entry_time:
                     try:
                         _et_ts = datetime.fromisoformat(_entry_time.replace("Z", "+00:00"))
-                        _mins = int((datetime.now(ET) - _et_ts.astimezone(ET)).total_seconds() // 60)
+                        _mins  = int((datetime.now(ET) - _et_ts.astimezone(ET)).total_seconds() // 60)
                         _max_profit = abs(tgt_px - entry_px) * qty if tgt_px and entry_px else 0
                         _max_loss   = abs(entry_px - stop_px) * qty if entry_px and stop_px else 0
                         st.caption(
                             f"⏱ {_mins}m in trade · "
-                            f"If target: **${_max_profit:,.0f}** · "
-                            f"If stopped: **−${_max_loss:,.0f}**"
+                            f"Full target: **${_max_profit:,.0f}** · "
+                            f"Stop out: **−${_max_loss:,.0f}**"
                         )
                         if state_val == "TRAILING":
-                            st.caption(f"Trail mode: {status.get('active_trail_mode','—')}")
+                            st.caption(f"Trail: {status.get('active_trail_mode','—')} mode")
                     except Exception:
                         pass
 
@@ -2316,7 +2124,7 @@ with tab_autotrader:
                     st.markdown(
                         f"{eligibility_chip('cooldown')} "
                         f"<span style='color:var(--text-3);font-size:0.82rem'>"
-                        f"{cooldown_left} bar(s) before next entry</span>",
+                        f"Waiting {cooldown_left} bar(s) before next entry</span>",
                         unsafe_allow_html=True,
                     )
                 elif no_trade_reason:
@@ -2328,32 +2136,21 @@ with tab_autotrader:
                 else:
                     st.markdown(
                         f"{eligibility_chip('idle')} "
-                        f"<span style='color:var(--text-3);font-size:0.82rem'>Scanning for setup…</span>",
+                        f"<span style='color:var(--text-3);font-size:0.82rem'>Scanning for a setup…</span>",
                         unsafe_allow_html=True,
                     )
 
             elif state_val == "BLOCKED":
-                _block_rsn = status.get("block_reason", "Risk limit hit")
-                st.error(f"BLOCKED — {_block_rsn}", icon="🚫")
+                st.error(f"BLOCKED — {status.get('block_reason', 'Daily risk limit hit')}", icon="🚫")
 
             st.markdown("---")
 
-            # ── Session stats ─────────────────────────────────────────────────
-            ss1, ss2 = st.columns(2)
-            ss1.metric("Trades today",    status.get("trades_today", 0))
-            ss2.metric("Consec. losses",  status.get("consecutive_losses", 0))
-            hb = status.get("heartbeat_age_s", 0) or 0
-            hb_label = f"{hb:.0f}s ago" if hb < 120 else f"⚠️ {hb:.0f}s — may be stale"
-            st.caption(f"Heartbeat: {hb_label} · Running: {'✅' if status.get('running') else '⏸'}")
-
-            st.markdown("---")
-
-            # ── Closed trades table ───────────────────────────────────────────
+            # ── Closed trades ─────────────────────────────────────────────────
             session_trades = status.get("session_trades", []) or []
             if session_trades:
                 st.markdown(
-                    "<div style='font-size:0.69rem;font-weight:700;text-transform:uppercase;"
-                    "letter-spacing:0.08em;color:var(--text-3);margin-bottom:6px'>"
+                    f"<div style='font-size:0.69rem;font-weight:700;text-transform:uppercase;"
+                    f"letter-spacing:0.08em;color:var(--text-3);margin-bottom:6px'>"
                     f"Closed trades today ({len(session_trades)})</div>",
                     unsafe_allow_html=True,
                 )
@@ -2368,7 +2165,7 @@ with tab_autotrader:
                         "Qty":    _t.get("qty", 0),
                         "P&L $":  _pnl,
                         "P&L %":  _t.get("pnl_pct", 0),
-                        "Reason": (_t.get("exit_reason") or "")[:25],
+                        "Reason": (_t.get("exit_reason") or "")[:28],
                     })
                 st.dataframe(
                     pd.DataFrame(_trade_rows).style.map(
@@ -2383,15 +2180,17 @@ with tab_autotrader:
                         "Entry": st.column_config.NumberColumn("Entry", format="$%.2f", width="small"),
                         "Exit":  st.column_config.NumberColumn("Exit",  format="$%.2f", width="small"),
                         "Qty":   st.column_config.NumberColumn("Qty",   format="%.1f",  width="small"),
-                        "P&L $": st.column_config.NumberColumn("P&L $", format="$%+.2f",width="small"),
-                        "P&L %": st.column_config.NumberColumn("P&L %", format="%+.2f%%",width="small"),
+                        "P&L $": st.column_config.NumberColumn("P&L $", format="$%+.2f", width="small"),
+                        "P&L %": st.column_config.NumberColumn("P&L %", format="%+.2f%%", width="small"),
                     },
                 )
+            else:
+                st.caption("No closed trades yet this session.")
 
             # ── Decision log ──────────────────────────────────────────────────
             log = status.get("decision_log", []) or []
             if log:
-                with st.expander(f"Decision log ({len(log)} entries)", expanded=False):
+                with st.expander(f"Activity log ({len(log)} events)", expanded=False):
                     _ICONS = {
                         "ENTRY LONG": "🟢", "ENTRY SHORT": "🔴",
                         "EXIT": "✅", "EXIT LONG": "✅", "EXIT SHORT": "✅",
@@ -2420,11 +2219,315 @@ with tab_autotrader:
                             f"`{_entry.get('time','')[-8:]}` {_icon} **{_event}**{_extra} — {_reason}"
                         )
 
-    # ── Auto-refresh while bot is running ─────────────────────────────────────
+    # ── Auto-refresh while bot is running (no sleep — let Streamlit pace it) ──
     if status.get("running"):
-        import time as _t
-        _t.sleep(0.3)
         st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB — 📖 Strategy Rules
+# Complete entry + exit rule reference for every active intraday strategy.
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_rules:
+    from _theme import section as _sec
+
+    _sec(
+        "Intraday Strategy Rules",
+        "Complete entry and exit conditions for all 6 active strategies. "
+        "The bot applies every filter listed — signals only fire when ALL conditions are met.",
+    )
+
+    # ── Common concepts ───────────────────────────────────────────────────────
+    with st.expander("Common concepts (ATR, VWAP, R:R, Regime)", expanded=False):
+        st.markdown("""
+**ATR (Average True Range)** — measures volatility as a dollar amount. All stops and targets are sized as multiples of ATR so they adapt to each stock's actual movement.
+
+**VWAP (Volume-Weighted Average Price)** — the fair-value anchor for the day. Strategies use it to distinguish "above fair value" (bullish) from "below fair value" (bearish).
+
+**R:R (Risk:Reward)** — ratio of potential profit to potential loss. Every strategy requires at least 1.5:1 — if you risk $100 you must be targeting at least $150.
+
+**R-multiple** — how many times your initial risk you've made or lost. +1R = you made exactly what you risked. The bot scales out at +1R (partial TP) and trails the rest.
+
+**Regime** — the platform classifies the market each morning:
+- **BULL_OPEN** = SPY above prior close AND above VWAP → momentum strategies fire
+- **BEAR_OPEN** = SPY below prior close AND below VWAP → reversal and short strategies fire
+- **CHOPPY** = neither condition clearly met → only mean-reversion (VWAP, EMA bounce) run
+
+**Scale-out (partial exit)** — when the bot hits +1R it sells 33-50% of the position and moves stop to breakeven on the remainder. This locks in a guaranteed profit while letting the rest run.
+
+**Trailing stop** — after reaching +1.5R, the stop follows the price up (for longs). The trail type (ATR / EMA9 / prior-bar-low) is set in the bot config.
+""")
+
+    st.markdown("---")
+
+    # ── Strategy 1: ORB ───────────────────────────────────────────────────────
+    with st.expander("**1. Opening Range Breakout (ORBBreakout)** — 5m bars · Long only · BULL_OPEN", expanded=True):
+        col_entry, col_exit = st.columns(2)
+        with col_entry:
+            st.markdown("#### 🟢 Entry conditions (ALL must be true)")
+            st.markdown("""
+| Check | Requirement |
+|---|---|
+| **Regime** | BULL_OPEN only (skips BEAR/CHOPPY) |
+| **Time window** | First 2 hours after open (before 11:30 ET) |
+| **Price** | Close > ORB high by 0.1% buffer |
+| **RSI** | RSI(14) ≥ 52 |
+| **Volume** | Volume > **1.8×** 20-bar average |
+| **Structure** | Previous bar's low > bar-before-that low (higher lows) |
+| **ORB size** | ORB height / ATR ≤ 2.5× (rejects untradeable wide ranges) |
+| **R:R** | Reward ≥ **2.0×** Risk |
+
+**What to look for on Webull:** First 15-minute candle forms a clear range. Price consolidates then breaks above with a volume surge (green volume bar taller than the average). RSI on the 5m chart should be above 50 and climbing.
+""")
+        with col_exit:
+            st.markdown("#### 🔴 Exit / stop rules")
+            st.markdown("""
+| Level | Rule |
+|---|---|
+| **Stop** | Entry − 0.75–1.2×ATR (never below ORB low) |
+| **Target 1 (33%)** | ORB high + 0.8× ORB height |
+| **Target 2 (33%)** | ORB high + 1.5× ORB height |
+| **Target 3 (runner)** | ORB high + 2.0× ORB height |
+| **Breakeven** | Stop moves to entry after +1R |
+| **Trail** | Prior-bar-low trail after +1.5R |
+| **Max hold** | 48 bars (4 hours) |
+| **EOD** | Force flat at 3:45 PM ET |
+
+**Stop is below ORB low** — if price falls back into the opening range, the trade thesis is broken.
+""")
+
+    # ── Strategy 2: VWAP Mean Reversion ──────────────────────────────────────
+    with st.expander("**2. VWAP Mean Reversion (VWAPMeanReversion)** — 5m bars · Long + Short"):
+        col_entry, col_exit = st.columns(2)
+        with col_entry:
+            st.markdown("#### 🟢 Long entry (ALL must be true)")
+            st.markdown("""
+| Check | Requirement |
+|---|---|
+| **Regime** | BULL_OPEN or TREND_UP (no CHOPPY) |
+| **Time window** | +15 min to +5 hours after open |
+| **VWAP distance** | Price is at least **0.4×ATR below VWAP** |
+| **RSI** | RSI(14) < **38** (oversold) |
+| **Prior bar** | Previous close was above VWAP |
+| **Bar color** | Current bar closes green (close > open) |
+| **Reversal wick** | Lower wick ≥ 40% of bar range |
+| **Volume** | Volume > **1.3×** 20-bar average |
+| **VWAP slope** | VWAP not in strong downtrend (slope ≤ 0.02%/bar) |
+| **R:R** | Reward ≥ **1.5×** Risk |
+
+**Short** (BEAR_OPEN): mirror image — price 0.4×ATR above VWAP, RSI > 62, bar closes red, upper wick ≥ 40%.
+
+**What to look for:** Price dips sharply below the VWAP line, RSI goes below 38, then a candle shows a long lower tail (rejection wick) and closes green. This is the signal.
+""")
+        with col_exit:
+            st.markdown("#### 🔴 Exit / stop rules")
+            st.markdown("""
+| Level | Rule |
+|---|---|
+| **Stop** | Entry − 0.8–1.2×ATR |
+| **Target 1 (50%)** | VWAP (the mean-reversion target) |
+| **Target 2 (runner)** | VWAP + 0.9×ATR |
+| **Breakeven** | Stop moves to entry at +1R |
+| **Trail** | EMA9 trail after reaching VWAP |
+| **Max hold** | 36 bars (3 hours) |
+
+**Core idea:** You're fading an overextension. Target is VWAP itself — once price reverts to fair value, the trade is largely complete.
+""")
+
+    # ── Strategy 3: EMA Momentum ──────────────────────────────────────────────
+    with st.expander("**3. EMA Momentum (EMAMomentum)** — 15m bars · Long + Short · Setup A + B"):
+        col_entry, col_exit = st.columns(2)
+        with col_entry:
+            st.markdown("#### 🟢 Setup A — Fresh EMA crossover")
+            st.markdown("""
+| Check | Requirement |
+|---|---|
+| **Regime** | BULL_OPEN only (for longs) |
+| **Time** | +30 min to +4.5 hours |
+| **EMA cross** | EMA9 crossed above EMA21 this bar |
+| **MACD** | MACD histogram > 0 |
+| **RSI** | 40 ≤ RSI(14) ≤ 70 |
+| **VWAP** | Close > VWAP |
+| **R:R** | ≥ **1.8×** |
+
+#### 🟢 Setup B — EMA bounce (trend continuation)
+| Check | Requirement |
+|---|---|
+| **EMA aligned** | EMA9 already above EMA21 |
+| **Pullback** | Bar low within 0.3×ATR of EMA9 |
+| **Reclaim** | Close > EMA9 |
+| **MACD** | Histogram > 0 |
+| **RSI** | 40 ≤ RSI ≤ 70 |
+| **VWAP** | Close > VWAP |
+| **Allowed in CHOPPY** | Yes (at 85% confidence) |
+
+**Short versions** (BEAR_OPEN): mirror — EMA9 crosses below EMA21, RSI 30–60, close < VWAP.
+""")
+        with col_exit:
+            st.markdown("#### 🔴 Exit / stop rules")
+            st.markdown("""
+| Level | Rule |
+|---|---|
+| **Stop** | Bar low − 0.3×ATR (never > 1.2×ATR from entry) |
+| **Target 1 (33%)** | Entry + 1.2×ATR |
+| **Target 2 (33%)** | Entry + 2.0×ATR |
+| **Target 3 (runner)** | Entry + 2.5×ATR |
+| **Breakeven** | Stop to entry at +1R |
+| **Trail** | ATR trail after +1.5R |
+| **Max hold** | 40 bars |
+
+**Setup A fires once per crossover.** Setup B can fire multiple times as price bounces off the EMA during a trend day.
+""")
+
+    # ── Strategy 4: Opening Gap Fade ─────────────────────────────────────────
+    with st.expander("**4. Opening Gap Fade (OpeningGapFade)** — 15m bars · Long + Short · Any regime"):
+        col_entry, col_exit = st.columns(2)
+        with col_entry:
+            st.markdown("#### 🟢 Entry conditions (ALL must be true)")
+            st.markdown("""
+| Check | Requirement |
+|---|---|
+| **Regime** | Any (including CHOPPY) |
+| **Time** | First 60 minutes only (one trade/day) |
+| **Gap size** | **0.5% to 2.5%** above or below prior close |
+| **Not news** | Opening volume ≤ **1.8×** per-bar average (no news catalyst) |
+| **First bar direction** | Bearish first bar for gap-up (fade), bullish for gap-down |
+| **First bar body** | Body ≥ 40% of bar range (not a doji) |
+| **RSI** | RSI > 62 for gap-up short, RSI < 38 for gap-down long |
+| **5m confirmation** | Optional: first 5m candle in the same fade direction |
+| **R:R** | ≥ **1.5×** |
+
+**Best setup:** Stock gaps up 1–2% on no news. First 15m candle is a bearish engulfing or red candle. RSI above 62. Enter short — fading back toward the prior close.
+
+**What to watch for on Webull:** Check if there's a news catalyst (earnings, PR). If yes — skip, this strategy doesn't work on news gaps. Only trade "vacuum gaps."
+""")
+        with col_exit:
+            st.markdown("#### 🔴 Exit / stop rules")
+            st.markdown("""
+| Level | Rule |
+|---|---|
+| **Stop** | Beyond gap extreme by max(0.35%, 0.5×ATR) |
+| **Target** | 60% of gap filled (partial fill) |
+| **Scale 1 (50%)** | 30% of gap filled |
+| **Scale 2 (runner)** | 60% of gap filled |
+| **Breakeven** | After 30% gap fill |
+| **Max hold** | Until 11:00 AM ET (gap must fill fast or abandon) |
+
+**Stop is beyond the gap high/low** — if price pushes through the gap extreme, the fade thesis fails.
+""")
+
+    # ── Strategy 5: Supertrend ────────────────────────────────────────────────
+    with st.expander("**5. Supertrend Trend-Follow (SupertrendTrend)** — 5m bars · Long + Short · BULL/BEAR"):
+        col_entry, col_exit = st.columns(2)
+        with col_entry:
+            st.markdown("#### 🟢 Entry conditions (ALL must be true)")
+            st.markdown("""
+| Check | Requirement |
+|---|---|
+| **Regime** | BULL_OPEN or BEAR_OPEN (trending days only) |
+| **Time** | Before last 45 min of session |
+| **15m macro bias** | 15m Supertrend bullish (ST direction = +1) |
+| **5m ST direction** | 5m Supertrend also bullish |
+| **5m pullback** | Bar low within **0.8×ATR** of 5m ST line or EMA13 |
+| **Reclaim** | Close > open (bullish reclaim candle) |
+| **RSI** | 45 ≤ RSI(14) ≤ 70 |
+| **Volume** | Volume ≥ **1.1×** 20-bar average |
+| **R:R** | ≥ **1.5×** |
+
+**Short version** (BEAR_OPEN): 15m ST bearish → 5m pullback to ST resistance → bearish reclaim (close < open) → RSI 30–55.
+
+**What to look for:** Strong trending day. Price pulls back to the Supertrend line on the 5-minute chart, then the next bar reclaims above it and closes green. That's your entry.
+""")
+        with col_exit:
+            st.markdown("#### 🔴 Exit / stop rules")
+            st.markdown("""
+| Level | Rule |
+|---|---|
+| **Stop** | 5m Supertrend line − 0.1×ATR (dynamic, moves with trend) |
+| **Stop cap** | Never wider than 1.2×ATR from entry |
+| **Target 1 (33%)** | Entry + 1.0R |
+| **Target 2 (33%)** | Entry + 1.8R |
+| **Runner** | Trails 5m Supertrend line |
+| **Breakeven** | At +1R |
+| **Max hold** | 48 bars |
+
+**The stop is the 5m Supertrend line itself.** As the trend continues the line moves up (for longs), ratcheting the stop higher automatically. If price crosses the ST line, the trade exits.
+""")
+
+    # ── Strategy 6: NR Squeeze ────────────────────────────────────────────────
+    with st.expander("**6. NR Squeeze Breakout (NRSqueezeBreakout)** — 5m bars · Long + Short"):
+        col_entry, col_exit = st.columns(2)
+        with col_entry:
+            st.markdown("#### 🟢 Entry conditions (ALL must be true)")
+            st.markdown("""
+| Check | Requirement |
+|---|---|
+| **Regime** | Long: not BEAR/TREND_DOWN · Short: not BULL/TREND_UP |
+| **Time** | Before last 30 min of session |
+| **BB squeeze** | Band width in lowest **40th percentile** of last 20 bars |
+| **NR bar** | Prior bar is narrowest range in last 7 bars (US) / 5 bars (NSE) |
+| **Breakout** | Close above upper BB band by ≥ 0.05% (US) / 0.10% (NSE) |
+| **Close position** | Close in top **60%** of bar range (bullish strength) |
+| **EMA9** | Close > EMA9 |
+| **RSI** | 52 ≤ RSI(14) ≤ 82 |
+| **Volume** | Volume ≥ **1.5×** 20-bar average |
+| **R:R** | ≥ **1.5×** |
+
+**Short version**: close below lower BB, RSI 18–48, close in lower 60% of bar, volume ≥ 1.5×.
+
+**What to look for on Webull:** Bollinger Bands squeezing tight (almost touching). Then a sudden expansion candle with high volume breaks out of the band. The prior candle should have been very narrow (NR7 bar). This is the coiled spring releasing.
+""")
+        with col_exit:
+            st.markdown("#### 🔴 Exit / stop rules")
+            st.markdown("""
+| Level | Rule |
+|---|---|
+| **Stop** | NR bar low − 0.5×ATR (or 0.8×ATR for wide bar) |
+| **Stop cap** | Never wider than 1.5×ATR from entry |
+| **Target 1 (33%)** | Entry + 1.0R |
+| **Target 2 (33%)** | Entry + 1.8R |
+| **Target 3 (runner)** | Entry + 2.5R (EMA9 trail) |
+| **Breakeven** | At +1R |
+| **Trail** | EMA9 trail on runner |
+| **Max hold** | 60 bars (5 hours) |
+
+**Stop is below the NR bar** (the quiet bar before the breakout). If price falls back into the consolidation, the breakout failed.
+""")
+
+    st.markdown("---")
+
+    # ── Quick cheat sheet ─────────────────────────────────────────────────────
+    _sec("Quick Setup Cheat Sheet", "Match what you see on Webull to the right strategy.", level=3)
+
+    _scenarios = [
+        ("Stock gaps up 1% at open, no news, first 15m bar is bearish",
+         "OpeningGapFade SHORT", "Short the gap fade. Enter on first bearish 15m bar + RSI > 62.", "red"),
+        ("Stock breaks above the first 15m range with high volume, BULL regime",
+         "ORBBreakout LONG", "Wait for the breakout candle. RSI must be above 52, volume 1.8×.", "green"),
+        ("Stock pulls back to VWAP, RSI drops below 38, green reversal wick",
+         "VWAPMeanReversion LONG", "Classic mean-reversion. Target is VWAP. Works on trending days.", "green"),
+        ("15m Supertrend bullish, 5m pulls back to the orange ST line, reclaims",
+         "SupertrendTrend LONG", "Trend continuation. Stop is the 5m Supertrend line itself.", "green"),
+        ("EMA9 crosses above EMA21 on 15m chart, MACD histogram turns positive",
+         "EMAMomentum Setup A", "Fresh crossover. Enter on the crossover bar if above VWAP.", "green"),
+        ("Bollinger Bands squeezing tight, NR7 bar forms, then explosive breakout candle",
+         "NRSqueezeBreakout", "Coiled spring. Volume must be 1.5×+ on the breakout bar.", "green"),
+        ("Market in CHOPPY regime, no clear trend",
+         "VWAPMeanReversion or EMAMomentum Setup B only",
+         "Most strategies are disabled in CHOPPY. Only VWAP reversion and EMA bounces run.", "amber"),
+    ]
+
+    for _scenario, _strategy, _action, _color in _scenarios:
+        _pill_color = {"green": "var(--pos)", "red": "var(--neg)", "amber": "var(--warn)"}.get(_color, "var(--text-2)")
+        st.markdown(
+            f"<div style='border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-bottom:8px'>"
+            f"<div style='font-size:0.82rem;color:var(--text-2);margin-bottom:4px'>📊 {_scenario}</div>"
+            f"<div style='font-weight:700;color:{_pill_color};font-size:0.88rem'>→ {_strategy}</div>"
+            f"<div style='font-size:0.78rem;color:var(--text-3);margin-top:3px'>{_action}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
 
 
 # ── Symbol Policy tab ─────────────────────────────────────────────────────────

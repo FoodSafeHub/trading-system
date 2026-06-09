@@ -110,8 +110,14 @@ class PaperBroker(BrokerBase):
         global _paper_cash
 
         broker_order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
-        # Use real market price for fill
-        fill_price = order.limit_price or await self._get_real_price(order.symbol)
+        # Use real market price + realistic slippage (0.05% adverse) for market orders.
+        # This makes paper P&L more conservative and closer to live execution.
+        _raw_price = order.limit_price or await self._get_real_price(order.symbol)
+        if not order.limit_price:
+            _slip = 0.0005  # 0.05%
+            fill_price = round(_raw_price * (1 + _slip if order.side == "BUY" else 1 - _slip), 4)
+        else:
+            fill_price = _raw_price
         cost = fill_price * order.quantity
 
         if order.side == "BUY":
