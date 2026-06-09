@@ -51,6 +51,24 @@ from _components import (  # noqa: E402
 
 apply_theme("Day Trading")
 
+# ── Currency helpers ──────────────────────────────────────────────────────────
+def _sym_currency(symbol: str) -> str:
+    """Return '₹' for NSE symbols, '$' for everything else."""
+    try:
+        from app.services.markets import is_india_symbol
+        return "₹" if is_india_symbol(symbol) else "$"
+    except Exception:
+        return "$"
+
+def _fmt_money(value: float, symbol: str, decimals: int = 2) -> str:
+    cur = _sym_currency(symbol)
+    return f"{cur}{value:,.{decimals}f}"
+
+def _fmt_money_signed(value: float, symbol: str, decimals: int = 2) -> str:
+    cur = _sym_currency(symbol)
+    sign = "+" if value >= 0 else ""
+    return f"{sign}{cur}{value:,.{decimals}f}"
+
 # ── Page header + data-source health pill ────────────────────────────────────
 _ds_label, _ds_color = "ok", "green"
 try:
@@ -146,9 +164,10 @@ def _render_signal_card(sig: dict, idx: int, symbol: str = "") -> None:
         entry = sig.get("entry_price", 0)
         stop  = sig.get("stop_price", 0)
         tgt   = sig.get("target_price", 0)
-        c1.metric("Entry",  f"${entry:.2f}")
-        c2.metric("Stop",   f"${stop:.2f}",  delta=f"−${abs(entry-stop):.2f}" if entry else None, delta_color="inverse")
-        c3.metric("Target", f"${tgt:.2f}",   delta=f"+${abs(tgt-entry):.2f}"  if entry else None, delta_color="normal")
+        _sc = _sym_currency(symbol or sig.get("symbol", ""))
+        c1.metric("Entry",  f"{_sc}{entry:.2f}")
+        c2.metric("Stop",   f"{_sc}{stop:.2f}",  delta=f"−{_sc}{abs(entry-stop):.2f}" if entry else None, delta_color="inverse")
+        c3.metric("Target", f"{_sc}{tgt:.2f}",   delta=f"+{_sc}{abs(tgt-entry):.2f}"  if entry else None, delta_color="normal")
         c4.metric("R:R",    f"{rr:.1f}:1")
 
         st.progress(min(confidence, 1.0), text=f"Confidence: {confidence:.0%}")
@@ -187,7 +206,7 @@ def _cached_scan(symbols_str: str) -> list:
     return run_scan(syms)
 
 
-def _equity_chart(equity_curve: list, trades: list) -> go.Figure:
+def _equity_chart(equity_curve: list, trades: list, symbol: str = "") -> go.Figure:
     """Equity track for day-trading backtests as OHLC candles with WIN/LOSS markers.
 
     The runner returns a flat list of floats (one per trade close); we synthesise
@@ -268,7 +287,7 @@ def _equity_chart(equity_curve: list, trades: list) -> go.Figure:
         hovermode="x unified",
     )
     fig.update_xaxes(gridcolor=charts.GRID, zeroline=False)
-    fig.update_yaxes(gridcolor=charts.GRID, zeroline=False, tickprefix="$")
+    fig.update_yaxes(gridcolor=charts.GRID, zeroline=False, tickprefix=_sym_currency(symbol))
     return fig
 
 
@@ -327,29 +346,28 @@ def _render_pipeline_diagnostics(diag: dict, expanded: bool = False) -> None:
                 st.code(step, language=None)
 
 
-def _metrics_row(m: dict) -> None:
+def _metrics_row(m: dict, symbol: str = "") -> None:
+    _c = _sym_currency(symbol)
     cols = st.columns(8)
-    cols[0].metric("Net P&L", f"${m.get('net_pnl', m.get('total_pnl', 0)):,.0f}")
+    cols[0].metric("Net P&L", f"{_c}{m.get('net_pnl', m.get('total_pnl', 0)):,.0f}")
     cols[1].metric("Return", f"{m.get('total_return_pct', 0):.1f}%")
     cols[2].metric("Win Rate", f"{m.get('win_rate', 0):.1f}%")
     cols[3].metric("Profit Factor", f"{m.get('profit_factor', 0):.2f}")
     cols[4].metric("Max Drawdown", f"{m.get('max_drawdown_pct', 0):.1f}%")
     cols[5].metric("Sharpe", f"{m.get('sharpe_ratio', 0):.2f}")
     cols[6].metric("Trades", str(m.get("total_trades", 0)))
-    _hold_bars = m.get("avg_hold_bars", 0)
-    cols[7].metric("Avg Hold", f"≈{int(_hold_bars * 5)} min")
+    cols[7].metric("Avg Hold", f"≈{int(m.get('avg_hold_bars', 0) * 5)} min")
 
-    # P&L cost breakdown — only shown when commission/slippage data is present
     gross = m.get("gross_pnl")
     comm = m.get("total_commission", 0.0)
     slippage = m.get("total_slippage", 0.0)
     if gross is not None and (comm > 0 or slippage > 0):
         net = m.get("net_pnl", m.get("total_pnl", 0))
         st.markdown(
-            f"Gross P&L: **${gross:,.2f}** &nbsp;|&nbsp; "
-            f"Commission: **-${comm:,.2f}** &nbsp;|&nbsp; "
-            f"Slippage: **-${slippage:,.2f}** &nbsp;|&nbsp; "
-            f"Net P&L: **${net:,.2f}**"
+            f"Gross P&L: **{_c}{gross:,.2f}** &nbsp;|&nbsp; "
+            f"Commission: **-{_c}{comm:,.2f}** &nbsp;|&nbsp; "
+            f"Slippage: **-{_c}{slippage:,.2f}** &nbsp;|&nbsp; "
+            f"Net P&L: **{_c}{net:,.2f}**"
         )
 
 
@@ -575,7 +593,7 @@ with tab_backtest:
     bt_period = bc2.selectbox(
         "Period", ["30d", "60d", "90d", "180d", "730d"], index=1, key="bt_period"
     )
-    bt_capital = bc3.number_input("Capital ($)", value=10_000, step=1_000, key="bt_capital")
+    bt_capital = bc3.number_input(f"Capital ({_sym_currency(bt_symbol)})", value=10_000, step=1_000, key="bt_capital")
 
     # Profile button — placed next to symbol
     profile_btn = bc4.button("📊 Profile Symbol", key="profile_btn", use_container_width=True)
@@ -692,7 +710,7 @@ with tab_backtest:
     # ── Render results (persisted in session_state) ───────────────────────────
     _stored_mode = st.session_state.get("bt_mode_stored", "")
 
-    def _render_single_result(bt_result: dict) -> None:
+    def _render_single_result(bt_result: dict, _sym: str = "") -> None:
         if not bt_result:
             return
         if "error" in bt_result:
@@ -747,12 +765,12 @@ with tab_backtest:
             return
 
         m = bt_result.get("metrics", {})
-        _metrics_row(m)
+        _metrics_row(m, _sym)
 
         eq_curve = bt_result.get("equity_curve", [])
         trades_list = bt_result.get("trades", [])
         if eq_curve and len(eq_curve) > 1:
-            st.plotly_chart(_equity_chart(eq_curve, trades_list), use_container_width=True)
+            st.plotly_chart(_equity_chart(eq_curve, trades_list, _sym), use_container_width=True)
 
         analysis = bt_result.get("analysis", {})
         if analysis:
@@ -773,7 +791,8 @@ with tab_backtest:
                 ex1, ex2, ex3, ex4 = st.columns(4)
                 ex1.metric("Best Hour", str(m.get("best_hour", "N/A")))
                 ex2.metric("Best Day", str(m.get("best_day_of_week", "N/A")))
-                ex3.metric("Avg P&L/Trade", f"${m.get('avg_pnl_per_trade', 0):.2f}")
+                _c = _sym_currency(_sym)
+                ex3.metric("Avg P&L/Trade", f"{_c}{m.get('avg_pnl_per_trade', 0):.2f}")
                 ex4.metric("Max Consec. Losses", str(m.get("max_consecutive_losses", 0)))
 
                 regime_data = analysis.get("regime_breakdown", {})
@@ -781,7 +800,7 @@ with tab_backtest:
                     st.markdown("**Performance by Regime**")
                     df_regime = pd.DataFrame([
                         {"Regime": k, "Trades": v["trades"], "Win%": v["win_rate"],
-                         "Avg P&L%": v["avg_pnl"], "Total P&L ($)": v["total_pnl"]}
+                         "Avg P&L%": v["avg_pnl"], f"Total P&L ({_c})": v["total_pnl"]}
                         for k, v in regime_data.items()
                     ])
                     st.dataframe(df_regime, use_container_width=True, hide_index=True)
@@ -817,6 +836,9 @@ with tab_backtest:
         if trades_list:
             st.markdown("---")
             st.markdown("### Trade Log")
+            _c = _sym_currency(_sym)
+            _price_fmt = f"{_c}%.2f"
+            _pnl_fmt   = f"{_c}%+.2f"
             df_trades = pd.DataFrame(trades_list)
             display_cols = [
                 "date", "direction", "entry_price", "exit_price",
@@ -831,6 +853,12 @@ with tab_backtest:
                     subset=["pnl", "pnl_pct"],
                 ),
                 use_container_width=True,
+                column_config={
+                    "entry_price": st.column_config.NumberColumn("Entry", format=_price_fmt),
+                    "exit_price":  st.column_config.NumberColumn("Exit",  format=_price_fmt),
+                    "pnl":         st.column_config.NumberColumn("P&L",   format=_pnl_fmt),
+                    "pnl_pct":     st.column_config.NumberColumn("P&L %", format="%+.2f%%"),
+                },
             )
 
     if _stored_mode == "Side-by-Side Comparison":
@@ -845,11 +873,12 @@ with tab_backtest:
             st.caption("Same period, same symbol. Brain applies market state routing, risk limits, and execution checks.")
 
             if comparison:
+                _cc = _sym_currency(bt_symbol)
                 label_map = {
                     "total_trades": "Total Trades",
                     "win_rate": "Win Rate %",
                     "profit_factor": "Profit Factor",
-                    "total_pnl": "Total P&L ($)",
+                    "total_pnl": f"Total P&L ({_cc})",
                     "max_drawdown_pct": "Max Drawdown %",
                     "sharpe_ratio": "Sharpe Ratio",
                 }
@@ -872,7 +901,7 @@ with tab_backtest:
             col_raw, col_brain = st.columns(2)
             with col_raw:
                 st.markdown("#### Raw Strategy")
-                _render_single_result(raw_result)
+                _render_single_result(raw_result, bt_symbol)
             with col_brain:
                 st.markdown("#### Brain-Filtered")
                 bfm = brain_result.get("metrics", {})
@@ -883,14 +912,14 @@ with tab_backtest:
                     else:
                         st.info("Brain filter removed all trades in this period — strategy not aligned with market state rules.")
                 else:
-                    _render_single_result(brain_result)
+                    _render_single_result(brain_result, bt_symbol)
 
     elif _stored_mode in ("Raw Strategy", "Brain-Filtered"):
         result = st.session_state.get("bt_single_result", {})
         if result is not None:
             label = "🧠 Brain-Filtered Results" if _stored_mode == "Brain-Filtered" else "Raw Strategy Results"
             st.markdown(f"### {label}")
-            _render_single_result(result)
+            _render_single_result(result, bt_symbol)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -977,13 +1006,15 @@ with tab_compare:
     ca1, ca2, ca3 = st.columns(3)
     ca_symbol = ca1.text_input("Symbol", value="SPY", key="ca_symbol").upper()
     ca_period = ca2.selectbox("Period", ["30d", "60d", "90d"], index=1, key="ca_period")
-    ca_capital = ca3.number_input("Capital ($)", value=10_000, step=1_000, key="ca_capital")
+    _ca_cur = _sym_currency(ca_symbol)
+    ca_capital = ca3.number_input(f"Capital ({_ca_cur})", value=10_000, step=1_000, key="ca_capital")
 
     if st.button("▶ Compare All Strategies", key="run_compare"):
         with st.spinner(f"Running all {len(ALL_STRATEGIES)} strategies on {ca_symbol}…"):
             results = _cached_backtest_all(ca_symbol, ca_period, float(ca_capital))
 
         if results:
+            _ca_cur2 = _sym_currency(ca_symbol)
             df_compare = pd.DataFrame(results)
             df_compare.insert(0, "Rank", range(1, len(df_compare) + 1))
 
@@ -1003,7 +1034,7 @@ with tab_compare:
                 "trades": "Trades",
                 "win_rate": "Win%",
                 "profit_factor": "Profit Factor",
-                "total_pnl": "Total P&L ($)",
+                "total_pnl": f"Total P&L ({_ca_cur2})",
                 "avg_pnl_pct": "Avg P&L%",
                 "sharpe_ratio": "Sharpe",
                 "max_drawdown_pct": "Max DD%",
@@ -1013,7 +1044,7 @@ with tab_compare:
             df_compare = df_compare.rename(columns=rename)
 
             _show_cols = ["Rank", "Strategy", "Trades", "Win%", "Profit Factor",
-                          "Total P&L ($)", "Avg P&L%", "Sharpe", "Max DD%",
+                          f"Total P&L ({_ca_cur2})", "Avg P&L%", "Sharpe", "Max DD%",
                           "Best Hour", "Best DoW", "Status"]
             _show_cols = [c for c in _show_cols if c in df_compare.columns]
             st.dataframe(df_compare[_show_cols], use_container_width=True, hide_index=True)
@@ -1175,7 +1206,7 @@ with tab_watchlist:
                                         "Trades": _st,
                                         "Win%": f"{_swr:.0f}%",
                                         "PF": f"{_spf:.2f}",
-                                        "P&L ($)": f"${sr.get('total_pnl', 0):,.0f}",
+                                        f"P&L ({_sym_currency(row.get('symbol',''))})": f"{_sym_currency(row.get('symbol',''))}{sr.get('total_pnl', 0):,.0f}",
                                         "Status": "✅" if (_spf >= 1.5 and _swr >= 50) else
                                                   ("🟡" if (_spf >= 1.0 and _swr >= 40) else
                                                    ("⚪" if _st == 0 else "🔴")),
@@ -2127,12 +2158,13 @@ with tab_autotrader:
 
             # ── P&L strip ─────────────────────────────────────────────────────
             pnl1, pnl2, pnl3 = st.columns(3)
-            pnl1.metric("Unrealized", f"${unreal_pnl:+,.2f}",
+            _at_cur = _sym_currency(at_symbol)
+            pnl1.metric("Unrealized", f"{_at_cur}{unreal_pnl:+,.2f}",
                         delta_color="normal" if unreal_pnl >= 0 else "inverse")
-            pnl2.metric("Realized",   f"${real_pnl:+,.2f}",
+            pnl2.metric("Realized",   f"{_at_cur}{real_pnl:+,.2f}",
                         delta_color="normal" if real_pnl >= 0 else "inverse")
             _total_pnl = unreal_pnl + real_pnl
-            pnl3.metric("Session P&L", f"${_total_pnl:+,.2f}",
+            pnl3.metric("Session P&L", f"{_at_cur}{_total_pnl:+,.2f}",
                         delta_color="normal" if _total_pnl >= 0 else "inverse")
 
             # Session counters
@@ -2169,16 +2201,16 @@ with tab_autotrader:
                 qty      = status.get("qty", 0) or 0
 
                 p1, p2 = st.columns(2)
-                p1.metric("Entry", f"${entry_px:.2f}")
-                p2.metric("Current", f"${curr_px:.2f}",
+                p1.metric("Entry", f"{_at_cur}{entry_px:.2f}")
+                p2.metric("Current", f"{_at_cur}{curr_px:.2f}",
                           delta=f"{curr_px - entry_px:+.2f}" if curr_px and entry_px else None,
                           delta_color="normal" if curr_px >= entry_px else "inverse")
                 p3, p4 = st.columns(2)
-                p3.metric("Stop", f"${stop_px:.2f}",
-                          delta=f"−${abs(curr_px - stop_px):.2f} at risk" if curr_px and stop_px else None,
+                p3.metric("Stop", f"{_at_cur}{stop_px:.2f}",
+                          delta=f"−{_at_cur}{abs(curr_px - stop_px):.2f} at risk" if curr_px and stop_px else None,
                           delta_color="off")
-                p4.metric("Target", f"${tgt_px:.2f}",
-                          delta=f"+${abs(tgt_px - curr_px):.2f} to go" if curr_px and tgt_px else None,
+                p4.metric("Target", f"{_at_cur}{tgt_px:.2f}",
+                          delta=f"+{_at_cur}{abs(tgt_px - curr_px):.2f} to go" if curr_px and tgt_px else None,
                           delta_color="off")
                 p5, p6 = st.columns(2)
                 p5.metric("R Multiple", f"{r_val:+.2f}R" if r_val is not None else "—")
@@ -2261,10 +2293,10 @@ with tab_autotrader:
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "Entry": st.column_config.NumberColumn("Entry", format="$%.2f", width="small"),
-                        "Exit":  st.column_config.NumberColumn("Exit",  format="$%.2f", width="small"),
+                        "Entry": st.column_config.NumberColumn("Entry", format=f"{_at_cur}%.2f", width="small"),
+                        "Exit":  st.column_config.NumberColumn("Exit",  format=f"{_at_cur}%.2f", width="small"),
                         "Qty":   st.column_config.NumberColumn("Qty",   format="%.1f",  width="small"),
-                        "P&L $": st.column_config.NumberColumn("P&L $", format="$%+.2f", width="small"),
+                        "P&L $": st.column_config.NumberColumn(f"P&L {_at_cur}", format=f"{_at_cur}%+.2f", width="small"),
                         "P&L %": st.column_config.NumberColumn("P&L %", format="%+.2f%%", width="small"),
                     },
                 )
