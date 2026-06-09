@@ -32,13 +32,13 @@ apply_theme("Trading System")
 # than a flat list. Group labels use the .tx-nav-group CSS class from _theme.py.
 with st.sidebar:
     nav_group("Overview")
-    # (Home, P/L sit in this group — auto-ordered by Streamlit page numbering)
     nav_group("Research")
-    # Strategy, Charts, Backtest, Perplexity
     nav_group("Trading")
-    # Scanner, Day Trading, India
     nav_group("Risk & Ops")
-    # Risk, Notifications, Schwab, Webull
+
+    st.markdown("---")
+    from _server_controls import render_restart_button
+    render_restart_button(key="sidebar_restart_api")
 
 # ── Load everything once ─────────────────────────────────────────────────────
 def _safe(call, default):

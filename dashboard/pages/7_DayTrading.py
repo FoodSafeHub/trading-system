@@ -72,7 +72,12 @@ page_header(
     ),
 )
 
-render_broker_routing_toggle(key_suffix="daytrading")
+_br_col, _restart_col = st.columns([6, 1])
+with _br_col:
+    render_broker_routing_toggle(key_suffix="daytrading")
+with _restart_col:
+    from _server_controls import render_restart_button as _render_restart
+    _render_restart(key="dt_restart_api")
 
 STRATEGY_DESCRIPTIONS = {
     "ORBBreakout":         "Opening Range Breakout — breaks above/below the first 15m range with volume.",
