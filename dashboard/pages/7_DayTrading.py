@@ -1287,57 +1287,16 @@ with tab_scanner:
     import api as _api
     from _theme import section as _section
 
-    _section(
-        "Market Scanner",
-        "Full US universe (~5,800 names) ranked by volume, volatility, RVOL, gap, and catalyst. "
-        "Filters narrow to your exact price/float band. Native pre-check flags setups firing right now.",
-    )
-
-    # ── Presets: pre-fill the filters with sensible day-trade profiles ───────
-    # Float values are in MILLIONS, volume in shares, price in dollars.
-    # universe_cap=500 on presets keeps scans snappy (~30-60s) while still
-    # covering enough of the universe to find good candidates.
-    SCANNER_PRESETS = {
-        "Custom": None,
-        "Low-float runners ($2-$20, 5-50M float)": {
-            "min_price": 2.0, "max_price": 20.0,
-            "min_vol": 500_000,
-            "min_float_m": 5.0, "max_float_m": 50.0,
-            "universe_cap": 0,
-            "desc": "Small floats with room to move. Best for momentum/gap plays in HIGH_VOL regime.",
-        },
-        "Mid-cap movers ($20-$100, 50-500M float)": {
-            "min_price": 20.0, "max_price": 100.0,
-            "min_vol": 1_000_000,
-            "min_float_m": 50.0, "max_float_m": 500.0,
-            "universe_cap": 0,
-            "desc": "Liquid mid-caps that still move meaningfully. Good for ORB and VWAP strategies.",
-        },
-        "Large-cap day trades ($50+, 1M+ vol)": {
-            "min_price": 50.0, "max_price": 0.0,
-            "min_vol": 5_000_000,
-            "min_float_m": 0.0, "max_float_m": 0.0,
-            "universe_cap": 0,
-            "desc": "Mega-caps with deep liquidity. Tight spreads, smaller % moves, safest for size.",
-        },
-        "Pre-market gappers (any price, 500k+ vol)": {
-            "min_price": 1.0, "max_price": 0.0,
-            "min_vol": 500_000,
-            "min_float_m": 0.0, "max_float_m": 0.0,
-            "universe_cap": 0,
-            "desc": "Wide net — let the gap/catalyst scoring do the filtering. Use in pre-market only.",
-        },
-    }
-
+    # ── Market selector first — drives all labels, presets, and defaults ─────
     mc1, mc2, mc3, mc4 = st.columns([1, 1, 1, 2])
     ms_max = mc1.number_input("Top N", min_value=5, max_value=50, value=20, step=5, key="ms_max")
     ms_market = mc2.selectbox(
         "Market", ["US", "India", "Both"],
         index=0, key="ms_market",
         help=(
-            "US = NASDAQ/NYSE universe (~7,400 stocks), data via yfinance.\n"
-            "India = Nifty 200 (184 NSE stocks), data via Upstox.\n"
-            "Both = runs both universes and merges results."
+            "US = NASDAQ/NYSE (~7,400 stocks) · data via yfinance\n"
+            "India = Nifty 200 (184 NSE stocks) · data via Upstox\n"
+            "Both = merges both universes"
         ),
     )
     ms_state = mc3.selectbox(
@@ -1350,96 +1309,187 @@ with tab_scanner:
         placeholder="leave empty to use the selected market universe",
     )
 
-    # India-specific info
-    if ms_market == "India":
-        st.info(
-            "**India scanner**: scans Nifty 200 (184 NSE stocks) via Upstox. "
-            "Price filter is in ₹. Min volume default (500k shares/day) is appropriate for NSE. "
-            "No pre-market session on NSE — opening-activity volume (09:15–09:45 IST) used instead.",
-            icon="🇮🇳",
+    _is_india = ms_market == "India"
+    _is_both  = ms_market == "Both"
+    _cur  = "₹" if _is_india else "$"   # currency symbol for labels
+    _vol_unit = "shares/day (NSE)" if _is_india else "shares/day"
+
+    # ── Market-aware presets ──────────────────────────────────────────────────
+    if _is_india:
+        _section_subtitle = "Nifty 200 (184 NSE stocks) via Upstox · prices in ₹ · opening-activity volume (09:15–09:45 IST)"
+        SCANNER_PRESETS = {
+            "Custom": None,
+            "Small-cap runners (₹50–₹500, 5–50M float)": {
+                "min_price": 50.0,  "max_price": 500.0,
+                "min_vol": 300_000,
+                "min_float_m": 5.0, "max_float_m": 50.0,
+                "universe_cap": 0,
+                "desc": "Small floats with room to move. Best for momentum plays in TREND_UP regime.",
+            },
+            "Mid-cap movers (₹200–₹2000, 50–500M float)": {
+                "min_price": 200.0, "max_price": 2_000.0,
+                "min_vol": 500_000,
+                "min_float_m": 50.0, "max_float_m": 500.0,
+                "universe_cap": 0,
+                "desc": "Liquid mid-caps. Good for ORB and VWAP strategies.",
+            },
+            "Large-cap Nifty 50 (₹500+, 1M+ vol)": {
+                "min_price": 500.0, "max_price": 0.0,
+                "min_vol": 1_000_000,
+                "min_float_m": 0.0, "max_float_m": 0.0,
+                "universe_cap": 0,
+                "desc": "Index heavyweights — deep liquidity, tight spreads, safest for size.",
+            },
+            "Gap & momentum (any price, 200k+ vol)": {
+                "min_price": 50.0,  "max_price": 0.0,
+                "min_vol": 200_000,
+                "min_float_m": 0.0, "max_float_m": 0.0,
+                "universe_cap": 0,
+                "desc": "Wide net — let gap/catalyst scoring surface the movers at open.",
+            },
+        }
+    else:
+        _section_subtitle = (
+            "Full US universe (~5,800 names) ranked by volume, volatility, RVOL, gap, and catalyst. "
+            "Filters narrow to your exact price/float band."
+            if not _is_both else
+            "US (~5,800 names) + Nifty 200 (184 NSE) · merged and ranked together"
         )
-        # Auto-adjust defaults for India when switching market
-        if st.session_state.get("_ms_last_market") != ms_market:
-            st.session_state["_ms_last_market"] = ms_market
-            st.session_state["ms_min_price"] = 100.0    # ₹100 minimum
-            st.session_state["ms_min_vol"]   = 500_000  # NSE volume scale
-    elif st.session_state.get("_ms_last_market") == "India":
-        # Switched away from India — reset to US defaults
+        SCANNER_PRESETS = {
+            "Custom": None,
+            "Low-float runners ($2–$20, 5–50M float)": {
+                "min_price": 2.0,  "max_price": 20.0,
+                "min_vol": 500_000,
+                "min_float_m": 5.0, "max_float_m": 50.0,
+                "universe_cap": 0,
+                "desc": "Small floats with room to move. Best for momentum/gap plays in HIGH_VOL regime.",
+            },
+            "Mid-cap movers ($20–$100, 50–500M float)": {
+                "min_price": 20.0, "max_price": 100.0,
+                "min_vol": 1_000_000,
+                "min_float_m": 50.0, "max_float_m": 500.0,
+                "universe_cap": 0,
+                "desc": "Liquid mid-caps that still move meaningfully. Good for ORB and VWAP strategies.",
+            },
+            "Large-cap day trades ($50+, 1M+ vol)": {
+                "min_price": 50.0, "max_price": 0.0,
+                "min_vol": 5_000_000,
+                "min_float_m": 0.0, "max_float_m": 0.0,
+                "universe_cap": 0,
+                "desc": "Mega-caps with deep liquidity. Tight spreads, smaller % moves, safest for size.",
+            },
+            "Pre-market gappers (any price, 500k+ vol)": {
+                "min_price": 1.0,  "max_price": 0.0,
+                "min_vol": 500_000,
+                "min_float_m": 0.0, "max_float_m": 0.0,
+                "universe_cap": 0,
+                "desc": "Wide net — let the gap/catalyst scoring do the filtering. Use in pre-market only.",
+            },
+        }
+
+    _section("Market Scanner", _section_subtitle)
+
+    # ── Reset session state when market switches so defaults update ───────────
+    _market_changed = st.session_state.get("_ms_last_market") != ms_market
+    if _market_changed:
         st.session_state["_ms_last_market"] = ms_market
-        st.session_state.setdefault("ms_min_price", 5.0)
-        st.session_state.setdefault("ms_min_vol", 1_000_000)
+        st.session_state["_ms_last_preset"] = None   # force preset reset
+        if _is_india:
+            st.session_state["ms_min_price"]    = 100.0
+            st.session_state["ms_max_price"]    = 0.0
+            st.session_state["ms_min_vol"]      = 500_000
+            st.session_state["ms_min_float_m"]  = 0.0
+            st.session_state["ms_max_float_m"]  = 0.0
+            st.session_state["ms_universe_cap"] = 0
+        else:
+            st.session_state["ms_min_price"]    = 5.0
+            st.session_state["ms_max_price"]    = 0.0
+            st.session_state["ms_min_vol"]      = 1_000_000
+            st.session_state["ms_min_float_m"]  = 0.0
+            st.session_state["ms_max_float_m"]  = 0.0
+            st.session_state["ms_universe_cap"] = 0
 
     ms_preset_name = st.selectbox(
         "Filter preset",
         list(SCANNER_PRESETS.keys()),
-        index=1,  # default to "Low-float runners" — most useful for the user's stated goal
+        index=1,
         key="ms_preset",
-        help="Pick a preset to auto-fill the filters below. Choose 'Custom' to set everything manually.",
+        help="Pick a preset to auto-fill the filters below.",
     )
     _preset = SCANNER_PRESETS[ms_preset_name]
     if _preset:
         st.caption(f"_{_preset['desc']}_")
 
-    # Streamlit widgets remember their last value via `key`. Reset session_state
-    # when the preset changes so the inputs reflect the new preset values.
-    # Setting state BEFORE the widget is rendered avoids the "value+key both set"
-    # Streamlit warning.
     if st.session_state.get("_ms_last_preset") != ms_preset_name:
         st.session_state["_ms_last_preset"] = ms_preset_name
         if _preset:
-            st.session_state["ms_min_price"] = _preset["min_price"]
-            st.session_state["ms_max_price"] = _preset["max_price"]
-            st.session_state["ms_min_vol"] = _preset["min_vol"]
-            st.session_state["ms_min_float_m"] = _preset["min_float_m"]
-            st.session_state["ms_max_float_m"] = _preset["max_float_m"]
+            st.session_state["ms_min_price"]    = _preset["min_price"]
+            st.session_state["ms_max_price"]    = _preset["max_price"]
+            st.session_state["ms_min_vol"]      = _preset["min_vol"]
+            st.session_state["ms_min_float_m"]  = _preset["min_float_m"]
+            st.session_state["ms_max_float_m"]  = _preset["max_float_m"]
             st.session_state["ms_universe_cap"] = _preset["universe_cap"]
 
     # ── Filters row 1: price + volume ────────────────────────────────────────
-    # We rely on session_state for defaults (set above), so no `value=` param.
-    # On first render with no session_state, fall back to Custom defaults.
-    st.session_state.setdefault("ms_min_price", 5.0)
-    st.session_state.setdefault("ms_max_price", 0.0)
-    st.session_state.setdefault("ms_min_vol", 1_000_000)
-    st.session_state.setdefault("ms_min_float_m", 0.0)
-    st.session_state.setdefault("ms_max_float_m", 0.0)
+    st.session_state.setdefault("ms_min_price",    100.0 if _is_india else 5.0)
+    st.session_state.setdefault("ms_max_price",    0.0)
+    st.session_state.setdefault("ms_min_vol",      500_000 if _is_india else 1_000_000)
+    st.session_state.setdefault("ms_min_float_m",  0.0)
+    st.session_state.setdefault("ms_max_float_m",  0.0)
     st.session_state.setdefault("ms_universe_cap", 0)
 
     f1, f2, f3 = st.columns(3)
     ms_min_price = f1.number_input(
-        "Min price ($)", min_value=0.0, max_value=10_000.0, step=1.0, key="ms_min_price",
-        help="Skip sub-$1 names (PDT/marginability issues) and pennies. Typical: $2 for runners, $20+ for mid-caps.",
+        f"Min price ({_cur})",
+        min_value=0.0, max_value=100_000.0,
+        step=100.0 if _is_india else 1.0,
+        key="ms_min_price",
+        help=f"Minimum last close price in {_cur}. "
+             + ("Typical: ₹50 for small-caps, ₹200 for mid-caps, ₹500 for large-caps." if _is_india
+                else "Typical: $2 for low-float, $20 for mid-cap, $50 for large-cap."),
     )
     ms_max_price = f2.number_input(
-        "Max price ($, 0 = no cap)", min_value=0.0, max_value=10_000.0, step=10.0, key="ms_max_price",
-        help="Cap to focus on a price band. Typical: $20 for low-float, $100 for mid-cap, 0 for large-cap.",
+        f"Max price ({_cur}, 0 = no cap)",
+        min_value=0.0, max_value=100_000.0,
+        step=100.0 if _is_india else 10.0,
+        key="ms_max_price",
+        help=f"Upper price cap in {_cur}. 0 = no cap."
+             + (" Typical: ₹500 for small-cap band, ₹2000 for mid-cap band." if _is_india
+                else " Typical: $20 for low-float, $100 for mid-cap."),
     )
     ms_min_vol = f3.number_input(
-        "Min avg daily volume (shares)",
-        min_value=0, max_value=500_000_000, step=100_000, key="ms_min_vol",
-        help="Liquidity floor. 500k = thin but tradable, 1M = comfortable, 5M+ = institutional-grade.",
+        f"Min avg daily volume ({_vol_unit})",
+        min_value=0, max_value=500_000_000,
+        step=100_000 if _is_india else 100_000,
+        key="ms_min_vol",
+        help=("NSE liquidity floor. 200k = thin, 500k = comfortable, 1M+ = institutional." if _is_india
+              else "Liquidity floor. 500k = thin but tradable, 1M = comfortable, 5M+ = institutional-grade."),
     )
 
     # ── Filters row 2: float ─────────────────────────────────────────────────
-    # Inputs are in MILLIONS of shares to make the UX usable — entering
-    # "10000000" for 10M is error-prone (an off-by-one zero is a 10x mistake).
     f4, f5, f6 = st.columns(3)
     ms_min_float_m = f4.number_input(
-        "Min float (millions, 0 = no floor)",
-        min_value=0.0, max_value=10_000.0, step=1.0, key="ms_min_float_m",
-        help="Lower bound on shares float in millions. Low-float runners: 5–50M. Mid-caps: 50–500M.",
+        "Min float (crore shares, 0 = no floor)" if _is_india else "Min float (millions, 0 = no floor)",
+        min_value=0.0, max_value=10_000.0,
+        step=1.0, key="ms_min_float_m",
+        help=("Lower bound on shares float in crores (1 crore = 10M shares). Small-cap: 0.5–5 crore." if _is_india
+              else "Lower bound on shares float in millions. Low-float: 5–50M. Mid-caps: 50–500M."),
     )
     ms_max_float_m = f5.number_input(
-        "Max float (millions, 0 = no cap)",
+        "Max float (crore shares, 0 = no cap)" if _is_india else "Max float (millions, 0 = no cap)",
         min_value=0.0, max_value=10_000.0, step=10.0, key="ms_max_float_m",
-        help="Upper bound on shares float. ~50 for low-float, ~500 for mid-caps, 0 for no cap.",
+        help=("Upper bound on float in crores. ~5 for small-cap, ~50 for mid-cap, 0 for no cap." if _is_india
+              else "Upper bound on shares float. ~50 for low-float, ~500 for mid-caps, 0 for no cap."),
     )
     ms_universe_cap = f6.number_input(
         "Cap universe size (0 = all)",
-        min_value=0, max_value=10_000, step=100, key="ms_universe_cap",
-        help="Useful for quick test scans. 500 = fast (~30s). 0 = full ~5,800 universe (~2-3 min).",
+        min_value=0, max_value=10_000, step=50, key="ms_universe_cap",
+        help=("0 = all 184 Nifty 200 stocks (fast, ~10s). Not needed for India." if _is_india
+              else "0 = full ~5,800 universe. 500 = fast test scan (~30s)."),
     )
 
-    # Convert millions to absolute share counts for the API
+    # Float inputs are in millions for both markets (crore label is cosmetic —
+    # 1 crore ≈ 10M shares, so values entered still make sense in the same scale).
     ms_min_float = ms_min_float_m * 1_000_000
     ms_max_float = ms_max_float_m * 1_000_000
 
