@@ -12,6 +12,9 @@ import streamlit as st
 
 apply_theme("Notifications")
 
+from _sidebar import render_sidebar
+render_sidebar()
+
 # ── Load counts for the stat band ─────────────────────────────────────────────
 try:
     _cnt = api.notifications_unread_count() or {}

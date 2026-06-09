@@ -22,6 +22,9 @@ from _components import page_header, stat_band  # noqa: E402
 
 apply_theme("Perplexity Strategies")
 
+from _sidebar import render_sidebar
+render_sidebar()
+
 page_header(
     "Perplexity Swing Strategies",
     subtitle=(

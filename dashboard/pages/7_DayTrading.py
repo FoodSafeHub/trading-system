@@ -55,6 +55,9 @@ from _components import (  # noqa: E402
 
 apply_theme("Day Trading")
 
+from _sidebar import render_sidebar
+render_sidebar()
+
 # ── Currency helpers ──────────────────────────────────────────────────────────
 def _sym_currency(symbol: str) -> str:
     """Return '₹' for NSE symbols, '$' for everything else."""

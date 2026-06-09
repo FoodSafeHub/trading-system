@@ -29,6 +29,9 @@ def _usd(v) -> str:
 
 apply_theme("Schwab")
 
+from _sidebar import render_sidebar
+render_sidebar()
+
 # ── Status data ────────────────────────────────────────────────────────────────
 status   = _safe(api.schwab_status, {"state": "error"})
 state    = status.get("state", "error")

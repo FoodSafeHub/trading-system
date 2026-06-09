@@ -221,6 +221,9 @@ def _show_candidates(candidates: list, *, key_prefix: str = "cands") -> None:
 # ── Page setup ────────────────────────────────────────────────────────────────
 apply_theme("Market Scanner")
 
+from _sidebar import render_sidebar
+render_sidebar()
+
 page_header(
     "Market Scanner",
     subtitle=(

@@ -58,6 +58,9 @@ def _status_tag(v: str) -> str:
 
 apply_theme("Orders")
 
+from _sidebar import render_sidebar
+render_sidebar()
+
 page_header(
     "Orders",
     subtitle="Order history from the local database and live broker. Routed through the full risk engine.",

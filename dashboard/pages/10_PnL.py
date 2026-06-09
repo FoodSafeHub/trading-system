@@ -19,6 +19,9 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 apply_theme("P/L")
+
+from _sidebar import render_sidebar
+render_sidebar()
 page_header(
     "P&L Dashboard",
     subtitle=(

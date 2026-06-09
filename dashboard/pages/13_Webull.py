@@ -52,6 +52,9 @@ def _usd(v) -> str:
 
 apply_theme("Webull")
 
+from _sidebar import render_sidebar
+render_sidebar()
+
 # ── Status data ────────────────────────────────────────────────────────────────
 status    = _safe(api.webull_status, {"state": "error"})
 state     = status.get("state", "error")

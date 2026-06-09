@@ -10,6 +10,9 @@ from _components import page_header, stat_band, eligibility_chip, blocker_chip, 
 from _broker_routing import render_broker_routing_toggle
 
 apply_theme("Strategy & Signals")
+
+from _sidebar import render_sidebar
+render_sidebar()
 page_header("Strategy & Signals", subtitle="Active symbol assignments, consensus signals, broker routing")
 
 # Live US + India session clocks. A Zerodha (₹) symbol only trades when the

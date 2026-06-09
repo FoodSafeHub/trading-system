@@ -15,6 +15,9 @@ import pandas as pd
 from app.services.recommendations.winner import score_strategies
 
 apply_theme("Backtest")
+
+from _sidebar import render_sidebar
+render_sidebar()
 page_header(
     "Strategy Backtester",
     subtitle="Simulates how a strategy would have performed on historical data — no real money involved.",

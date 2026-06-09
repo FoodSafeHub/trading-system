@@ -10,6 +10,9 @@ import streamlit as st
 
 apply_theme("Risk & Safety")
 
+from _sidebar import render_sidebar
+render_sidebar()
+
 # ── Load status once ──────────────────────────────────────────────────────────
 try:
     s = api.risk_status()

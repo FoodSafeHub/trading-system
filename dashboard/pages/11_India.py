@@ -24,6 +24,9 @@ from _components import page_header, stat_band
 
 apply_theme("India (Zerodha)")
 
+from _sidebar import render_sidebar
+render_sidebar()
+
 page_header(
     "India — Zerodha",
     subtitle="India-only cockpit · Orders via Zerodha · Market data via Upstox · All values in ₹",

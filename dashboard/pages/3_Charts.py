@@ -43,6 +43,9 @@ from _components import page_header, filter_cols  # noqa: E402
 
 apply_theme("Charts")
 
+from _sidebar import render_sidebar
+render_sidebar()
+
 page_header(
     "Price Charts",
     subtitle=(

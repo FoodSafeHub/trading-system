@@ -12,7 +12,7 @@ import sys, os; sys.path.insert(0, os.path.dirname(__file__))
 import api
 from _theme import (
     apply_theme, section, divider, kpi_row, pill,
-    money, currency_symbol, empty_state, nav_group,
+    money, currency_symbol, empty_state,
 )
 from _components import page_header, stat_band, metric_band, risk_gauge_html
 
@@ -27,18 +27,8 @@ ET = ZoneInfo("America/New_York")
 
 apply_theme("Trading System")
 
-# ── Sidebar nav grouping ──────────────────────────────────────────────────────
-# Inject section labels into the sidebar so the 14 pages feel organised rather
-# than a flat list. Group labels use the .tx-nav-group CSS class from _theme.py.
-with st.sidebar:
-    nav_group("Overview")
-    nav_group("Research")
-    nav_group("Trading")
-    nav_group("Risk & Ops")
-
-    st.markdown("---")
-    from _server_controls import render_restart_button
-    render_restart_button(key="sidebar_restart_api")
+from _sidebar import render_sidebar
+render_sidebar()
 
 # ── Load everything once ─────────────────────────────────────────────────────
 def _safe(call, default):
