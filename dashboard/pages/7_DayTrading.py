@@ -2063,6 +2063,18 @@ with tab_autotrader:
         )
         at_trail_mode = _trail_label_map[_trail_disp]
 
+        at_tight_trail = st.toggle(
+            "🛡️ Tight trail on sell signal (ride momentum)", value=True, key="at_tight_trail",
+            help=(
+                "When a momentum-fade SELL signal fires on a profitable position, "
+                "instead of immediately market-selling, the bot arms a TIGHT trailing "
+                "stop floored at the signal price. This rides any further momentum "
+                "while guaranteeing the exit is never BELOW the sell-signal price — "
+                "so you book the profit the signal identified, plus any extra upside. "
+                "OFF = old behaviour (immediate market sell on every exit signal)."
+            ),
+        )
+
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # ROW 3 — Start / Stop / Flatten buttons
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2160,6 +2172,7 @@ with tab_autotrader:
                 max_trades_per_day=int(at_max_trades),
                 initial_capital=float(at_capital),
                 entry_mode="native_strategy",
+                tight_trail_on_exit_signal=bool(at_tight_trail),
                 on_trade_update=lambda s: st.session_state.update({"at_status": s}),
             )
 
@@ -2380,6 +2393,18 @@ with tab_autotrader:
                     except Exception:
                         pass
 
+                # ── Tight-trail-on-exit-signal banner ─────────────────────────
+                if status.get("tight_trail_armed"):
+                    _floor = status.get("tight_trail_floor")
+                    _at_cur2 = _sym_currency(at_symbol)
+                    st.success(
+                        f"🛡️ **Tight trail armed** — a sell signal fired, but instead of "
+                        f"market-selling we're riding the momentum. "
+                        f"Guaranteed exit floor: **{_at_cur2}{_floor:.2f}** "
+                        f"(will never exit below this). Stop ratchets up as price rises.",
+                        icon="🛡️",
+                    )
+
             elif state_val == "FLAT":
                 cooldown_left   = status.get("cooldown_bars_remaining", 0) or 0
                 no_trade_reason = status.get("last_no_trade_reason", "") or ""
@@ -2484,6 +2509,8 @@ with tab_autotrader:
                         "MOVE_STOP": "🔧", "PARTIAL_EXIT": "📤",
                         "NO_TRADE": "⬜", "BLOCKED": "🚫",
                         "TRAIL_ACTIVATED": "🔵", "RESET": "🔄", "COOLDOWN": "⏳",
+                        "TIGHT_TRAIL_ARMED": "🛡️", "TIGHT_TRAIL_MOVE": "🔼",
+                        "TIGHT_TRAIL_HOLD": "🤚",
                     }
                     for _entry in reversed(log[-50:]):
                         _event  = _entry.get("event", "")

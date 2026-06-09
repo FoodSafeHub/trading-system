@@ -127,6 +127,13 @@ class TradeStateMachine:
     first_target: float = 0.0
     trailing_stop: float = 0.0
 
+    # Tight-trail-on-exit-signal: when a sell-signal arms a profit-protecting
+    # trail instead of an immediate market exit, this floors the stop at the
+    # signal price so a LONG never exits below (SHORT never above) it.
+    tight_trail_armed: bool = False
+    tight_trail_floor: float = 0.0   # signal price the trail must never cross
+    tight_trail_signal_reason: str = ""
+
     # Excursion tracking
     max_favorable_excursion: float = 0.0   # highest unrealised gain reached
     max_adverse_excursion: float = 0.0     # deepest unrealised loss reached
@@ -292,6 +299,9 @@ class TradeStateMachine:
         self.current_stop = 0.0
         self.first_target = 0.0
         self.trailing_stop = 0.0
+        self.tight_trail_armed = False
+        self.tight_trail_floor = 0.0
+        self.tight_trail_signal_reason = ""
         self.strategy = ""
         self.entry_reason = ""
         self.exit_plan = None

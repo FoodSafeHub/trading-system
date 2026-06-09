@@ -88,6 +88,7 @@ class SingleStockTrader:
         native_strategies: list[str] | None = None,
         execution_service=None,   # ExecutionService | None — required for live orders
         account_id: str = "",     # broker account ID passed to ExecutionService
+        tight_trail_on_exit_signal: bool = True,  # ride momentum after a sell signal
     ):
         self.symbol = symbol.upper()
         self._broker = broker
@@ -96,6 +97,11 @@ class SingleStockTrader:
         self.direction_mode = direction_mode
         self.initial_capital = initial_capital
         self.on_trade_update = on_trade_update  # callback for UI updates
+        # When True, a momentum-fade exit signal does NOT immediately market-sell.
+        # Instead it arms a tight trailing stop FLOORED at the signal price, so we
+        # ride any further momentum while guaranteeing we never exit below the
+        # price where the sell signal fired.
+        self.tight_trail_on_exit_signal = tight_trail_on_exit_signal
 
         # Entry-path mode: "legacy_entry_decider" (default, unchanged behavior)
         # or "native_strategy" (delegate to strategy.generate_signals).
@@ -242,6 +248,9 @@ class SingleStockTrader:
                     self._last_market_state_str, tsm.strategy or ""
                 ),
                 "active_trail_mode": self._active_trail_mode or "—",
+                "tight_trail_armed": tsm.tight_trail_armed,
+                "tight_trail_floor": round(tsm.tight_trail_floor, 4) if tsm.tight_trail_armed else None,
+                "tight_trail_signal_reason": tsm.tight_trail_signal_reason,
                 "running": self._running,
                 "heartbeat_age_s": round(heartbeat_age_s, 0),
                 "block_reason": tsm.block_reason,
@@ -646,11 +655,40 @@ class SingleStockTrader:
             self._log("TRAIL_ACTIVATED", pm_update.reason, "info")
             self._notify_update()
 
+        # ── Tight-trail update: once armed, ratchet the floor as price rises ──
+        # The floor (signal price) is the worst case; the trail can only improve.
+        if self.tsm.tight_trail_armed:
+            self._update_tight_trail(df_5m, df_1m, ms_str)
+
         # ── Exit manager: decide whether to close ─────────────────────────────
         ex_decision = self.exit_manager.evaluate(self.tsm, df_5m, df_1m, ms_str)
         if ex_decision.action == "FULL_EXIT":
             price = ex_decision.exit_price or self._last_price()
-            self._execute_full_exit(price, ex_decision.reason)
+
+            # Momentum-fade exit (fade_signals populated) → instead of an
+            # immediate market sell, arm a tight profit-protecting trail floored
+            # at the signal price so we ride any further momentum but never exit
+            # below where the sell signal fired. Hard stops / trailing-stop hits
+            # (no fade_signals) always execute immediately.
+            _is_momentum_fade = bool(getattr(ex_decision, "fade_signals", None))
+            if self.tsm.tight_trail_armed and _is_momentum_fade:
+                # Already riding a tight trail — repeated fade signals are
+                # expected; let the trailing floor govern the exit, don't force.
+                self._log(
+                    "TIGHT_TRAIL_HOLD",
+                    f"Repeat fade signal while tight trail armed "
+                    f"(floor={self.tsm.tight_trail_floor:.2f}) — holding for momentum",
+                    "debug",
+                )
+            elif (
+                self.tight_trail_on_exit_signal
+                and _is_momentum_fade
+                and not self.tsm.tight_trail_armed
+                and self._position_in_profit()
+            ):
+                self._arm_tight_trail(price, ex_decision.reason, ex_decision.fade_signals)
+            else:
+                self._execute_full_exit(price, ex_decision.reason)
 
         elif ex_decision.action == "PARTIAL_EXIT":
             if _partial_exits_this_bar > 0:
@@ -770,6 +808,94 @@ class SingleStockTrader:
             "info",
         )
         self._notify_update()
+
+    # ── Tight-trail-on-exit-signal ────────────────────────────────────────────
+
+    def _position_in_profit(self) -> bool:
+        """True if the open position is currently profitable vs entry."""
+        if not self.tsm.has_position:
+            return False
+        price = self._last_price()
+        if price <= 0:
+            return False
+        if self.tsm.side == "LONG":
+            return price > self.tsm.entry_price
+        return price < self.tsm.entry_price
+
+    def _arm_tight_trail(self, signal_price: float, fade_reason: str,
+                         fade_signals: list[str]) -> None:
+        """Convert a momentum-fade SELL signal into a profit-protecting tight trail.
+
+        Instead of an immediate market sell, we set a tight trailing stop floored
+        at ``signal_price`` (the price the sell signal fired at). For a LONG, the
+        stop can only ratchet UP from here — so the worst-case exit is exactly the
+        signal price (never below it), and any further momentum is captured.
+        """
+        floor = round(signal_price, 4)
+        self.tsm.tight_trail_armed = True
+        self.tsm.tight_trail_floor = floor
+        self.tsm.tight_trail_signal_reason = fade_reason
+
+        # Set the initial trailing stop AT the floor (signal price). For a LONG
+        # this is below current price; if price reverses immediately we exit here,
+        # locking the profit the sell signal identified.
+        self.tsm.current_stop = floor
+        self.tsm.trailing_stop = floor
+        if self.tsm.state != State.TRAILING:
+            self.tsm.transition(State.TRAILING, "Tight trail armed on exit signal")
+        self._active_trail_mode = "tight_signal_floor"
+
+        _sig = ", ".join(fade_signals) if fade_signals else fade_reason
+        self._log(
+            "TIGHT_TRAIL_ARMED",
+            f"Sell signal at {floor:.2f} → armed tight trail (floor={floor:.2f}, "
+            f"riding momentum). Will NOT exit below {floor:.2f}. Signals: {_sig}",
+            "info",
+        )
+        self._notify_update()
+
+    def _update_tight_trail(self, df_5m, df_1m, ms_str: str) -> None:
+        """Ratchet the tight trail upward (LONG) / downward (SHORT) as price moves.
+
+        Uses a tight candle-based trail but NEVER lets the stop fall below the
+        armed floor (the original sell-signal price).
+        """
+        price = self._last_price()
+        if price <= 0:
+            return
+
+        # Compute a tight candle trail from the current bar structure
+        try:
+            from app.services.strategy.daytrading.autotrader.position_manager import (
+                _candle_trail,
+            )
+            cand = _candle_trail(price, self.tsm.side, df_5m)
+        except Exception:
+            cand = None
+
+        floor = self.tsm.tight_trail_floor
+        new_stop = self.tsm.current_stop
+
+        if self.tsm.side == "LONG":
+            # Trail can only go up; never below the signal-price floor
+            candidate = max(floor, cand) if cand else floor
+            if candidate > new_stop:
+                new_stop = candidate
+        else:  # SHORT
+            candidate = min(floor, cand) if cand else floor
+            if candidate < new_stop:
+                new_stop = candidate
+
+        if new_stop != self.tsm.current_stop:
+            self.tsm.current_stop = round(new_stop, 4)
+            self.tsm.trailing_stop = self.tsm.current_stop
+            self._log(
+                "TIGHT_TRAIL_MOVE",
+                f"Tight trail → {self.tsm.current_stop:.2f} "
+                f"(floor={floor:.2f}, price={price:.2f}) — locking momentum gains",
+                "debug",
+            )
+            self._notify_update()
 
     def _place_order(self, action: str, qty: float) -> float:
         """Submit an entry order. Returns fill price (0.0 on failure).

@@ -57,6 +57,7 @@ class AutoTraderConfig:
     # NativeStrategyEntry for the supported strategy list.
     entry_mode: str = "legacy_entry_decider"   # legacy_entry_decider | native_strategy
     native_strategies: list[str] | None = None
+    tight_trail_on_exit_signal: bool = True    # arm tight trail on momentum-fade exit
 
     # Filled by the manager after start():
     started_at_et: str | None = None
@@ -169,6 +170,7 @@ class AutoTraderManager:
                     initial_capital=config.initial_capital,
                     entry_mode=config.entry_mode,
                     native_strategies=config.native_strategies,
+                    tight_trail_on_exit_signal=config.tight_trail_on_exit_signal,
                 )
                 try:
                     trader.start()

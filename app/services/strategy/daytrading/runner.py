@@ -1513,6 +1513,7 @@ def run_simulation_backtest(
     max_daily_loss_pct: float = 2.0,
     max_trades_per_day: int = 6,
     strategy_name: str | None = None,
+    tight_trail_on_exit_signal: bool = True,
 ) -> dict[str, Any]:
     """
     Replay the exact auto-trader logic bar-by-bar on historical data.
@@ -1730,14 +1731,49 @@ def run_simulation_backtest(
                         from app.services.strategy.daytrading.autotrader.trade_state import State as _State
                         tsm.transition(_State.TRAILING, pm.reason)
 
+                # Tight-trail update: once armed, ratchet the floor as price moves.
+                if getattr(tsm, "tight_trail_armed", False):
+                    _tt_floor = tsm.tight_trail_floor
+                    _cand = _candle_trail_sim(curr_close, tsm.side, hist_now_5m)
+                    if tsm.side == "LONG":
+                        _new = max(_tt_floor, _cand) if _cand else _tt_floor
+                        if _new > tsm.current_stop:
+                            tsm.current_stop = round(_new, 4)
+                    else:
+                        _new = min(_tt_floor, _cand) if _cand else _tt_floor
+                        if _new < tsm.current_stop:
+                            tsm.current_stop = round(_new, 4)
+
                 # Exit manager: stop hit, trail hit, EOD, momentum fade
                 em = exit_manager.evaluate(tsm, hist_now_5m, None, ms_str)
+                _is_fade = bool(getattr(em, "fade_signals", None))
                 if em.action == "FULL_EXIT":
-                    exit_px = em.exit_price or curr_close
-                    pnl = _sim_close(tsm, exit_px, em.reason, bar_ts, initial_capital, day_trades)
-                    equity += pnl; equity_curve.append(equity)
-                    last_exit_loss = pnl < 0; bars_since_exit = 0
-                    exit_manager.reset(); position_manager.reset(); tsm.reset_after_exit()
+                    # Momentum-fade exit on a profitable position → arm tight trail
+                    # floored at the signal price instead of selling immediately.
+                    _in_profit = (
+                        (curr_close > tsm.entry_price) if tsm.side == "LONG"
+                        else (curr_close < tsm.entry_price)
+                    )
+                    if (
+                        tight_trail_on_exit_signal and _is_fade
+                        and not getattr(tsm, "tight_trail_armed", False)
+                        and _in_profit
+                    ):
+                        tsm.tight_trail_armed = True
+                        tsm.tight_trail_floor = round(curr_close, 4)
+                        tsm.tight_trail_signal_reason = em.reason
+                        tsm.current_stop = round(curr_close, 4)
+                        from app.services.strategy.daytrading.autotrader.trade_state import State as _State
+                        if tsm.state != _State.TRAILING:
+                            tsm.transition(_State.TRAILING, "Tight trail armed (sim)")
+                    elif getattr(tsm, "tight_trail_armed", False) and _is_fade:
+                        pass  # already trailing — let the floor govern, don't force-exit
+                    else:
+                        exit_px = em.exit_price or curr_close
+                        pnl = _sim_close(tsm, exit_px, em.reason, bar_ts, initial_capital, day_trades)
+                        equity += pnl; equity_curve.append(equity)
+                        last_exit_loss = pnl < 0; bars_since_exit = 0
+                        exit_manager.reset(); position_manager.reset(); tsm.reset_after_exit()
                 elif em.action == "MOVE_STOP" and em.new_stop:
                     tsm.current_stop = em.new_stop
                 elif em.action == "PARTIAL_EXIT":
@@ -1750,6 +1786,19 @@ def run_simulation_backtest(
 
     # ── Build output ──────────────────────────────────────────────────────────
     return _build_sim_metrics(all_trades, equity_curve, initial_capital, symbol, period, strategy_name)
+
+
+def _candle_trail_sim(close: float, side: str, df) -> float | None:
+    """Prior-bar candle trail for the simulation tight-trail (mirrors PositionManager)."""
+    try:
+        if df is None or len(df) < 2:
+            return None
+        prev = df.iloc[-2]
+        if side == "LONG":
+            return round(float(prev["Low"]) * 0.9995, 4)
+        return round(float(prev["High"]) * 1.0005, 4)
+    except Exception:
+        return None
 
 
 def _sim_close(tsm, exit_price: float, reason: str, bar_ts,
