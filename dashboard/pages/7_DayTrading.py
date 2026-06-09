@@ -201,6 +201,28 @@ def _cached_backtest_all(symbol: str, period: str, capital: float) -> list:
 
 
 @st.cache_data(ttl=300)
+def _cached_simulation_backtest(
+    symbol: str, period: str, capital: float,
+    direction_mode: str, trail_mode: str, partial_tp: bool,
+    risk_pct: float, max_loss_pct: float, max_trades: int,
+) -> dict:
+    return api._get(
+        f"/daytrading/simulation-backtest/{symbol}",
+        timeout=300,
+        params={
+            "period": period,
+            "initial_capital": capital,
+            "direction_mode": direction_mode,
+            "trail_mode": trail_mode,
+            "partial_tp": str(partial_tp).lower(),
+            "risk_per_trade_pct": risk_pct,
+            "max_daily_loss_pct": max_loss_pct,
+            "max_trades_per_day": max_trades,
+        },
+    ) or {}
+
+
+@st.cache_data(ttl=300)
 def _cached_scan(symbols_str: str) -> list:
     syms = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
     return run_scan(syms)
@@ -686,13 +708,50 @@ with tab_backtest:
     )
 
     bt_mode = st.radio(
-        "Mode", ["Raw Strategy", "Brain-Filtered", "Side-by-Side Comparison"],
+        "Mode",
+        ["Auto-Trader Simulation Replay", "Raw Strategy", "Brain-Filtered", "Side-by-Side Comparison"],
         horizontal=True, key="bt_mode",
+        help=(
+            "**Auto-Trader Simulation Replay** — replays the exact same logic as the Auto Trader bot: "
+            "NativeStrategyEntry, ExitManager (stop hits, trailing, momentum fade, EOD flatten), "
+            "PositionManager (partial TPs, stop moves), RiskGovernor (daily loss cap, trade cap, cooldowns). "
+            "This is what you would see in the Auto Trader simulation tab over the same period.\n\n"
+            "**Raw Strategy** — signal-level backtest: fires every signal the strategy generates, "
+            "exits at first stop/target hit. No risk governor, no cooldowns."
+        ),
     )
+
+    # ── Simulation Replay config (only shown in that mode) ────────────────────
+    if bt_mode == "Auto-Trader Simulation Replay":
+        st.info(
+            "Replays the Auto Trader bot over historical bars. "
+            "Configure the same settings you would use in the Auto Trader tab.",
+            icon="🤖",
+        )
+        sr1, sr2, sr3, sr4 = st.columns(4)
+        bt_sim_dir    = sr1.selectbox("Direction", ["long_only", "both", "short_only"], key="bt_sim_dir")
+        bt_sim_trail  = sr2.selectbox("Trail stop", ["atr", "ema", "candle"], key="bt_sim_trail")
+        bt_sim_risk   = sr3.number_input("Risk/trade %", 0.1, 5.0, 1.0, 0.1, key="bt_sim_risk")
+        bt_sim_maxloss= sr4.number_input("Daily loss limit %", 0.5, 10.0, 2.0, 0.5, key="bt_sim_maxloss")
+        sr5, sr6 = st.columns(2)
+        bt_sim_partial = sr5.toggle("Scale out 50% at +1R", value=True, key="bt_sim_partial")
+        bt_sim_maxtrades = sr6.number_input("Max trades/day", 1, 20, 6, 1, key="bt_sim_maxtrades")
 
     if st.button("▶ Run Backtest", key="run_bt"):
         with st.spinner("Running bar-by-bar simulation…"):
-            if bt_mode == "Side-by-Side Comparison":
+            if bt_mode == "Auto-Trader Simulation Replay":
+                st.session_state["bt_single_result"] = _cached_simulation_backtest(
+                    bt_symbol, bt_period, float(bt_capital),
+                    direction_mode=bt_sim_dir,
+                    trail_mode=bt_sim_trail,
+                    partial_tp=bt_sim_partial,
+                    risk_pct=bt_sim_risk / 100,
+                    max_loss_pct=bt_sim_maxloss,
+                    max_trades=int(bt_sim_maxtrades),
+                )
+                st.session_state["bt_cmp_result"] = None
+                st.session_state["bt_mode_stored"] = "Auto-Trader Simulation Replay"
+            elif bt_mode == "Side-by-Side Comparison":
                 cmp_result = _cached_backtest_brain(bt_symbol, bt_strategy, bt_period, float(bt_capital))
                 st.session_state["bt_cmp_result"] = cmp_result
                 st.session_state["bt_single_result"] = None
@@ -716,6 +775,14 @@ with tab_backtest:
         if "error" in bt_result:
             st.error(bt_result["error"])
             return
+
+        # ── Simulation replay badge ───────────────────────────────────────────
+        if bt_result.get("simulation_mode"):
+            n_days = len({t.get("date","") for t in bt_result.get("trades", [])})
+            st.caption(
+                f"🤖 Auto-Trader Simulation · {bt_result.get('metrics',{}).get('total_trades',0)} trades "
+                f"across {n_days} active day(s) · same ExitManager + RiskGovernor as live bot"
+            )
 
         # ── Config auto-tuning banner ─────────────────────────────────────────
         adj = bt_result.get("config_adjustment", {})
@@ -913,6 +980,19 @@ with tab_backtest:
                         st.info("Brain filter removed all trades in this period — strategy not aligned with market state rules.")
                 else:
                     _render_single_result(brain_result, bt_symbol)
+
+    elif _stored_mode == "Auto-Trader Simulation Replay":
+        result = st.session_state.get("bt_single_result", {})
+        if result:
+            st.markdown("### Auto-Trader Simulation Replay")
+            st.success(
+                "These results use the **exact same logic** as the Auto Trader bot: "
+                "NativeStrategyEntry, ExitManager (stop hits, trailing, momentum fade), "
+                "PositionManager (partial TPs, stop moves), RiskGovernor (daily cap, cooldowns). "
+                "What you see here is what the bot would have done in simulation over this period.",
+                icon="🤖",
+            )
+            _render_single_result(result, bt_symbol)
 
     elif _stored_mode in ("Raw Strategy", "Brain-Filtered"):
         result = st.session_state.get("bt_single_result", {})

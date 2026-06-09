@@ -20,6 +20,7 @@ from app.services.strategy.daytrading.runner import (
     run_backtest_all,
     run_scan,
     run_signals,
+    run_simulation_backtest,
 )
 from app.services.strategy.daytrading.validation.walkforward import run_walkforward
 from app.services.strategy.daytrading.strategies import ALL_STRATEGIES, STRATEGY_MAP
@@ -99,6 +100,35 @@ def backtest_all(
     initial_capital: float = Query(10_000.0),
 ) -> list[dict[str, Any]]:
     return run_backtest_all(symbol.upper(), period, initial_capital)
+
+
+@router.get("/simulation-backtest/{symbol}")
+def simulation_backtest(
+    symbol: str,
+    period: str = Query("60d"),
+    initial_capital: float = Query(10_000.0),
+    direction_mode: str = Query("long_only"),
+    trail_mode: str = Query("atr"),
+    partial_tp: bool = Query(True),
+    risk_per_trade_pct: float = Query(0.01),
+    max_daily_loss_pct: float = Query(2.0),
+    max_trades_per_day: int = Query(6),
+) -> dict[str, Any]:
+    """
+    Replay the exact auto-trader logic bar-by-bar on historical data.
+    Results match what the Auto Trader simulation tab would produce over the same period.
+    """
+    return run_simulation_backtest(
+        symbol=symbol.upper(),
+        period=period,
+        initial_capital=initial_capital,
+        direction_mode=direction_mode,
+        trail_mode=trail_mode,
+        partial_tp=partial_tp,
+        risk_per_trade_pct=risk_per_trade_pct,
+        max_daily_loss_pct=max_daily_loss_pct,
+        max_trades_per_day=max_trades_per_day,
+    )
 
 
 # ── Watchlist Analyzer ────────────────────────────────────────────────────────

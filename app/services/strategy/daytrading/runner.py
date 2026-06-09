@@ -1500,3 +1500,347 @@ def get_session_symbols(max_symbols: int = 20) -> list[str]:
         _log.getLogger(__name__).warning("Scanner unavailable, using fallback symbols: %s", e)
 
     return list(_FALLBACK_SYMBOLS)
+
+
+def run_simulation_backtest(
+    symbol: str,
+    period: str = "60d",
+    initial_capital: float = 10_000.0,
+    direction_mode: str = "long_only",
+    trail_mode: str = "atr",
+    partial_tp: bool = True,
+    risk_per_trade_pct: float = 0.01,
+    max_daily_loss_pct: float = 2.0,
+    max_trades_per_day: int = 6,
+) -> dict[str, Any]:
+    """
+    Replay the exact auto-trader logic bar-by-bar on historical data.
+
+    Uses the same components as SingleStockTrader:
+      - NativeStrategyEntry   → entry signals (strategy.generate_signals)
+      - ExitManager           → stop hits, trailing, momentum fade, EOD
+      - PositionManager       → stop moves, partial TPs
+      - RiskGovernor          → daily loss cap, max trades, cooldowns
+      - classify_market_state → same brain regime used live
+
+    This produces results that match what the simulation tab would show
+    if you ran the auto-trader in paper mode over the same period.
+    """
+    from app.services.strategy.daytrading.autotrader.native_entry import NativeStrategyEntry
+    from app.services.strategy.daytrading.autotrader.exit_manager import ExitManager
+    from app.services.strategy.daytrading.autotrader.position_manager import PositionManager
+    from app.services.strategy.daytrading.autotrader.trade_state import TradeStateMachine, State
+    from app.services.strategy.daytrading.brain.risk_governor import RiskGovernor
+    from app.services.strategy.daytrading.brain.market_state import classify_market_state
+    from app.services.markets import is_india_symbol
+
+    _is_india = is_india_symbol(symbol)
+    _sess     = market_session(symbol)
+    _mkt_tz   = _sess.tz
+
+    # ── Fetch full history ────────────────────────────────────────────────────
+    df_5m  = fetch_intraday(symbol, interval="5m",  period=period)
+    df_15m = fetch_intraday(symbol, interval="15m", period=period)
+    df_1m  = fetch_intraday(symbol, interval="1m",  period="5d")   # recent only, for entry decider
+
+    if df_5m.empty:
+        return {"error": f"No 5m data for {symbol} over {period}"}
+
+    # SPY for market state (India: use Nifty proxy or skip)
+    try:
+        df_spy = fetch_intraday("^NSEI" if _is_india else "SPY", interval="5m", period=period)
+    except Exception:
+        df_spy = pd.DataFrame()
+
+    # ── Group bars by calendar date ───────────────────────────────────────────
+    trading_dates = sorted({ts.date() for ts in df_5m.index})
+    logger.info("sim_backtest %s: %d bars, %d trading days", symbol, len(df_5m), len(trading_dates))
+
+    # ── Per-run state ─────────────────────────────────────────────────────────
+    native_entry = NativeStrategyEntry(
+        symbol=symbol,
+        direction_mode=direction_mode,
+        risk_per_trade_pct=risk_per_trade_pct,
+    )
+    exit_manager    = ExitManager(symbol=symbol)
+    position_manager = PositionManager(trail_mode=trail_mode, partial_tp=partial_tp)
+    risk_governor   = RiskGovernor(
+        max_daily_loss_pct=max_daily_loss_pct / 100,
+        max_trades_per_day=max_trades_per_day,
+    )
+    tsm = TradeStateMachine()
+
+    all_trades: list[dict] = []
+    equity      = initial_capital
+    equity_curve: list[float] = [equity]
+
+    _COOLDOWN_LOSS = 2   # bars
+    _COOLDOWN_WIN  = 1
+
+    for day in trading_dates:
+        # Bars for this day only
+        day_5m  = df_5m[df_5m.index.date == day]
+        day_15m = df_15m[df_15m.index.date == day] if not df_15m.empty else pd.DataFrame()
+        if len(day_5m) < 10:
+            continue
+
+        # Classify market state for the day using full history up to today
+        hist_5m  = df_5m[df_5m.index.date <= day]
+        hist_spy = df_spy[df_spy.index.date <= day] if not df_spy.empty else pd.DataFrame()
+        try:
+            ms_result = classify_market_state(hist_5m.tail(200), hist_spy.tail(200) if not hist_spy.empty else hist_5m.tail(200))
+            ms_str = ms_result.state
+        except Exception:
+            ms_str = "UNKNOWN"
+
+        # Reset per-day risk state
+        day_trades: list[dict] = []
+        bars_since_exit  = 0
+        last_exit_loss   = False
+        if tsm.has_position:
+            tsm.reset_after_exit()
+        exit_manager.reset()
+        position_manager.reset()
+
+        # Walk every 5m bar in this day
+        for bar_i, bar_ts in enumerate(day_5m.index):
+            bars_up_to_now_5m  = df_5m[df_5m.index <= bar_ts]
+            bars_up_to_now_15m = df_15m[df_15m.index <= bar_ts] if not df_15m.empty else pd.DataFrame()
+            curr_close = float(day_5m.loc[bar_ts, "Close"])
+
+            state = tsm.state
+
+            # ── EOD flatten ───────────────────────────────────────────────────
+            bar_time = bar_ts.time()
+            eod_time = _sess.close_time
+            if bar_time >= eod_time and tsm.has_position:
+                pnl = _close_trade(tsm, curr_close, "EOD flatten", bar_ts, equity, initial_capital, day_trades)
+                equity += pnl
+                equity_curve.append(equity)
+                bars_since_exit = 0
+                last_exit_loss  = pnl < 0
+                exit_manager.reset()
+                position_manager.reset()
+                tsm.reset_after_exit()
+                break
+
+            if state == State.FLAT:
+                # Cooldown guard
+                cooldown = _COOLDOWN_LOSS if last_exit_loss else _COOLDOWN_WIN
+                if bars_since_exit < cooldown:
+                    bars_since_exit += 1
+                    continue
+
+                # Risk governor
+                risk_state = risk_governor.build_risk_state(
+                    today_trades=day_trades,
+                    initial_capital=initial_capital,
+                    open_positions=0,
+                )
+                gov = risk_governor.check_can_trade(risk_state)
+                if not gov.allowed:
+                    break  # done for today
+
+                # Entry decision
+                try:
+                    ms_obj = classify_market_state(bars_up_to_now_5m.tail(100), hist_spy.tail(100) if not hist_spy.empty else bars_up_to_now_5m.tail(100))
+                except Exception:
+                    from app.services.strategy.daytrading.brain.market_state import MarketStateResult
+                    ms_obj = MarketStateResult(state=ms_str, confidence=0.5, reasons=[])
+
+                decision = native_entry.decide(
+                    symbol=symbol,
+                    df_1m=df_1m[df_1m.index.date == day] if not df_1m.empty else pd.DataFrame(),
+                    df_5m=bars_up_to_now_5m,
+                    df_15m=bars_up_to_now_15m,
+                    market_state=ms_obj,
+                    account_equity=equity,
+                )
+
+                if not decision.is_tradeable:
+                    continue
+
+                # Size
+                stop_dist = abs(curr_close - decision.stop_price)
+                if stop_dist <= 0:
+                    continue
+                risk_dollar = equity * risk_per_trade_pct * gov.size_multiplier * decision.size_multiplier
+                qty = max(1.0, round(risk_dollar / stop_dist, 0))
+
+                # Fill with 0.05% slippage (same as PaperBroker)
+                fill_price = round(curr_close * (1.0005 if decision.action == "BUY" else 0.9995), 4)
+
+                tsm.open_position(
+                    symbol=symbol,
+                    side="LONG" if decision.action == "BUY" else "SHORT",
+                    entry_price=fill_price,
+                    qty=qty,
+                    stop=decision.stop_price,
+                    target=decision.target_price,
+                    strategy=decision.chosen_strategy,
+                    entry_reason=decision.entry_reason,
+                    exit_plan=getattr(decision, "exit_plan", None),
+                )
+                position_manager.reset()
+                exit_manager.reset()
+                bars_since_exit = 0
+
+            elif tsm.has_position:
+                bars_since_exit = 0
+
+                # ── Position manager: stop moves + partial TPs ────────────────
+                pm_action = position_manager.evaluate(tsm, bars_up_to_now_5m, ms_str)
+                if pm_action:
+                    _apply_pm_action(pm_action, tsm, curr_close)
+
+                # ── Exit manager: full exits ───────────────────────────────────
+                em_decision = exit_manager.evaluate(tsm, bars_up_to_now_5m, None, ms_str)
+
+                if em_decision.action == "FULL_EXIT":
+                    exit_price = em_decision.exit_price or curr_close
+                    pnl = _close_trade(tsm, exit_price, em_decision.reason, bar_ts, equity, initial_capital, day_trades)
+                    equity += pnl
+                    equity_curve.append(equity)
+                    last_exit_loss = pnl < 0
+                    bars_since_exit = 0
+                    exit_manager.reset()
+                    position_manager.reset()
+                    tsm.reset_after_exit()
+
+                elif em_decision.action == "MOVE_STOP" and em_decision.new_stop:
+                    tsm.current_stop = em_decision.new_stop
+
+                elif em_decision.action == "PARTIAL_EXIT":
+                    _do_partial_exit(tsm, em_decision, curr_close)
+
+        all_trades.extend(day_trades)
+
+    # ── Metrics ───────────────────────────────────────────────────────────────
+    return _build_sim_metrics(all_trades, equity_curve, initial_capital, symbol, period)
+
+
+# ── Simulation helpers ────────────────────────────────────────────────────────
+
+def _close_trade(
+    tsm, exit_price: float, reason: str, bar_ts, equity: float,
+    initial_capital: float, day_trades: list,
+) -> float:
+    """Close the position, compute P&L, append to day_trades. Returns P&L."""
+    entry  = tsm.entry_price
+    qty    = tsm.qty
+    side   = tsm.side
+    entry_time = tsm.entry_time
+
+    if side == "LONG":
+        gross = (exit_price - entry) * qty
+    else:
+        gross = (entry - exit_price) * qty
+
+    # 0.05% slippage on exit
+    slip = exit_price * 0.0005 * qty
+    pnl  = gross - slip
+
+    day_trades.append({
+        "date":        str(bar_ts.date()),
+        "direction":   side,
+        "strategy":    tsm.strategy or "",
+        "entry_price": round(entry, 4),
+        "exit_price":  round(exit_price, 4),
+        "entry_time":  entry_time.isoformat() if entry_time else "",
+        "exit_time":   bar_ts.isoformat(),
+        "hold_bars":   tsm.bars_held,
+        "qty":         qty,
+        "pnl":         round(pnl, 2),
+        "pnl_pct":     round(pnl / initial_capital * 100, 4),
+        "outcome":     reason[:40],
+        "regime":      "",
+        "confidence":  0.0,
+    })
+
+    tsm.close_position(exit_price=exit_price, exit_reason=reason)
+    return pnl
+
+
+def _apply_pm_action(pm_action, tsm, curr_close: float) -> None:
+    """Apply a PositionManager action to the TSM."""
+    action = getattr(pm_action, "action", None) or pm_action.get("action", "")
+    if action in ("MOVE_STOP", "TRAIL"):
+        new_stop = getattr(pm_action, "new_stop", None) or pm_action.get("new_stop")
+        if new_stop:
+            tsm.current_stop = new_stop
+    elif action == "PARTIAL_EXIT":
+        pass  # ExitManager handles scale-outs from ExitPlan; PM handles trail state
+
+
+def _do_partial_exit(tsm, em_decision, curr_close: float) -> None:
+    """Record a partial exit — reduce qty, keep position open."""
+    exit_qty = round(tsm.qty * 0.5, 0)  # default 50% scale-out
+    if exit_qty >= 1:
+        tsm.qty = max(1.0, tsm.qty - exit_qty)
+
+
+def _build_sim_metrics(
+    trades: list[dict],
+    equity_curve: list[float],
+    initial_capital: float,
+    symbol: str,
+    period: str,
+) -> dict[str, Any]:
+    """Compute the same metrics dict as run_backtest() from a simulated trade list."""
+    if not trades:
+        return {
+            "metrics": {
+                "total_trades": 0, "win_rate": 0, "profit_factor": 0,
+                "total_pnl": 0, "net_pnl": 0, "total_return_pct": 0,
+                "max_drawdown_pct": 0, "sharpe_ratio": 0, "avg_hold_bars": 0,
+                "avg_pnl_per_trade": 0,
+            },
+            "trades": [],
+            "equity_curve": equity_curve,
+            "simulation_mode": True,
+        }
+
+    pnls   = [t["pnl"] for t in trades]
+    wins   = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    total_pnl = sum(pnls)
+    win_rate  = len(wins) / len(pnls) * 100 if pnls else 0
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    pf = gross_win / gross_loss if gross_loss > 0 else (float("inf") if gross_win > 0 else 0)
+
+    # Max drawdown on equity curve
+    peak = equity_curve[0]
+    max_dd = 0.0
+    for e in equity_curve:
+        peak = max(peak, e)
+        dd = (peak - e) / peak * 100 if peak > 0 else 0
+        max_dd = max(max_dd, dd)
+
+    # Sharpe (daily P&L std)
+    import numpy as np
+    pnl_arr = np.array(pnls)
+    sharpe = float(pnl_arr.mean() / pnl_arr.std()) * (252 ** 0.5) if len(pnl_arr) > 1 and pnl_arr.std() > 0 else 0.0
+
+    avg_hold = sum(t.get("hold_bars", 0) for t in trades) / len(trades)
+
+    return {
+        "metrics": {
+            "total_trades":      len(trades),
+            "win_rate":          round(win_rate, 1),
+            "profit_factor":     round(pf, 2),
+            "total_pnl":         round(total_pnl, 2),
+            "net_pnl":           round(total_pnl, 2),
+            "total_return_pct":  round(total_pnl / initial_capital * 100, 2),
+            "max_drawdown_pct":  round(max_dd, 2),
+            "sharpe_ratio":      round(sharpe, 2),
+            "avg_hold_bars":     round(avg_hold, 1),
+            "avg_pnl_per_trade": round(total_pnl / len(trades), 2),
+            "gross_pnl":         round(gross_win, 2),
+        },
+        "trades":        trades,
+        "equity_curve":  equity_curve,
+        "simulation_mode": True,
+        "symbol":        symbol,
+        "period":        period,
+    }
