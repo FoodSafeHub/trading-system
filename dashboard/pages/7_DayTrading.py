@@ -2077,15 +2077,42 @@ with tab_autotrader:
         at_symbol_routed = at_symbol
 
     # ── Mode banner ───────────────────────────────────────────────────────────
+    # Market-open state for this symbol (drives the idle explanation below).
+    try:
+        from app.services.strategy.daytrading.market_open import (
+            is_market_open as _is_mkt_open, market_session as _mkt_sess, IST as _IST_TZ,
+        )
+        _at_mkt_open = bool(_is_mkt_open(at_symbol_routed))
+        _at_sess = _mkt_sess(at_symbol_routed)
+        _at_tz_label = "IST" if _at_sess.tz is _IST_TZ else "ET"
+        _at_open_str = _at_sess.open_time.strftime("%H:%M")
+        _at_close_str = _at_sess.close_time.strftime("%H:%M")
+    except Exception:
+        _at_mkt_open, _at_tz_label = False, "ET"
+        _at_open_str, _at_close_str = "09:30", "15:45"
+
     if at_simulation:
         st.markdown(
             "<div style='background:rgba(91,146,209,0.10);border:1px solid rgba(91,146,209,0.28);"
             "border-radius:6px;padding:7px 14px;margin-bottom:6px;font-size:0.83rem'>"
-            "🔵 <b>PAPER / SIMULATION</b> — no real orders. Bot shows exactly where it would "
-            "enter, manage the stop, and exit. Switch off to go live."
+            "🔵 <b>PAPER / SIMULATION (live)</b> — no real orders, but this is a <b>real-time</b> "
+            "paper run: it waits for live bars and only acts when a fresh signal fires on the "
+            "current bar, exactly like the live bot. It does <b>not</b> fast-replay history.<br>"
+            "→ For a historical replay (instant results over 60 days), use "
+            "<b>Research → Backtest → Auto-Trader Simulation Replay</b>."
             "</div>",
             unsafe_allow_html=True,
         )
+        # Tell the user plainly when the market is closed so "0 trades" makes sense.
+        if not _at_mkt_open:
+            st.warning(
+                f"⏸ **Market is closed for {at_symbol_routed}** "
+                f"(session {_at_open_str}–{_at_close_str} {_at_tz_label}). "
+                "The bot will stay idle and place no trades until the market opens — "
+                "this is why you see 0 trades. Run it during market hours, or use the "
+                "Backtest replay for an out-of-hours test.",
+                icon="⏸",
+            )
     else:
         st.markdown(
             "<div style='background:rgba(208,80,80,0.12);border:1px solid rgba(208,80,80,0.42);"

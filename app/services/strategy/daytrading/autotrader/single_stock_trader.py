@@ -147,8 +147,11 @@ class SingleStockTrader:
         self._last_market_state_str = "UNKNOWN"
         self._last_heartbeat: datetime = datetime.now(ET)
 
-        # Safety: cooldown and re-entry lockout
-        self._bars_since_exit: int = 0           # increments each bar after exit
+        # Safety: cooldown and re-entry lockout.
+        # Seed high so a brand-new bot is NOT held in a phantom cooldown on its
+        # very first bar (there was no prior exit to cool down from). The real
+        # cooldown is set to 0 only after an actual exit in _execute_full_exit.
+        self._bars_since_exit: int = 999
         self._last_exit_was_loss: bool = False
 
         # Trade log (all today's decisions, not just closed trades)

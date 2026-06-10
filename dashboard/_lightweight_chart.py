@@ -226,6 +226,8 @@ def render_strategy_chart(
         "warning": payload.get("warning") or "",
         "data_source": payload.get("data_source") or "—",
         "fallback_anchored": int(payload.get("fallback_anchored") or 0),
+        "market_tz": payload.get("market_tz") or "America/New_York",
+        "tz_label": payload.get("tz_label") or "ET",
     }
     cfg_json = json.dumps(config)
 
@@ -508,9 +510,20 @@ async function main() {
     } else {
       return String(t);
     }
-    return Number.isNaN(d.getTime())
-      ? String(t)
-      : d.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+    if (Number.isNaN(d.getTime())) return String(t);
+    // Display in the symbol's market timezone (IST for NSE, ET for US) rather
+    // than UTC. CFG.market_tz is an IANA zone; CFG.tz_label is the short label.
+    const tz = (CFG && CFG.market_tz) || "America/New_York";
+    const label = (CFG && CFG.tz_label) || "ET";
+    try {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", hour12: false,
+      }).formatToParts(d).reduce((a, p) => (a[p.type] = p.value, a), {});
+      return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} ${label}`;
+    } catch (e) {
+      return d.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+    }
   }
   function renderExplain(m, idx, total) {
     const pill = m._accepted

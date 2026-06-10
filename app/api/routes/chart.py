@@ -333,6 +333,15 @@ def intraday_chart(
         1 for m in accepted_markers + rejected_markers if m.get("anchor_fallback")
     )
 
+    # Market timezone for display — IST for NSE symbols, ET for US.
+    try:
+        from app.services.strategy.daytrading.market_open import market_session, IST
+        _sess = market_session(sym)
+        _market_tz = "Asia/Kolkata" if _sess.tz is IST else "America/New_York"
+        _tz_label = "IST" if _sess.tz is IST else "ET"
+    except Exception:
+        _market_tz, _tz_label = "America/New_York", "ET"
+
     return {
         "symbol": sym,
         "timeframe": timeframe,
@@ -350,6 +359,8 @@ def intraday_chart(
         "data_source": data_source,
         "fallback_anchored": fallback_anchored,
         "strategy_timeframes": ["5m", "15m"],
+        "market_tz": _market_tz,
+        "tz_label": _tz_label,
     }
 
 
