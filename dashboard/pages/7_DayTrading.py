@@ -431,15 +431,30 @@ def _metrics_row(m: dict, symbol: str = "") -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_signals:
     # ── Top control bar ───────────────────────────────────────────────────────
-    ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([3, 1, 1, 1])
+    ctrl1, ctrlm, ctrl2, ctrl3, ctrl4 = st.columns([3, 1, 1, 1, 1])
     symbol_input = ctrl1.text_input(
         "Symbol", value="SPY", key="signals_symbol",
-        placeholder="AAPL, TSLA, SPY …",
+        placeholder="AAPL, RELIANCE, ADANIPOWER …",
     ).upper().strip() or "SPY"
+    sig_market = ctrlm.selectbox(
+        "Market", ["Auto", "US", "India"], index=0, key="signals_market",
+        help="Auto detects NSE names → Upstox. Force India for NSE symbols not auto-detected.",
+    )
     tf_pick       = ctrl2.selectbox("Timeframe", ["5m", "1m", "15m"], index=0, key="signals_tf")
     auto_refresh  = ctrl3.toggle("Auto-refresh", value=False, key="signals_auto_refresh",
                                  help="Re-runs signals every time the market is open.")
     get_btn = ctrl4.button("🔄 Refresh", use_container_width=True)
+
+    # Resolve routed symbol (append .NS when India forced but not auto-detected)
+    try:
+        from app.services.markets import is_india_symbol as _is_india_sig
+        _sig_auto_india = bool(_is_india_sig(symbol_input))
+    except Exception:
+        _sig_auto_india = False
+    if sig_market == "India" and not _sig_auto_india:
+        symbol_input = f"{symbol_input}.NS"
+    if (sig_market == "India") or (sig_market == "Auto" and _sig_auto_india):
+        st.caption(f"🇮🇳 {symbol_input} → NSE / Upstox · IST session · ₹")
 
     # ── Market status strip ───────────────────────────────────────────────────
     _mkt_is_open = is_market_open(symbol_input)
@@ -1986,12 +2001,24 @@ with tab_autotrader:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # ROW 1 — symbol + mode
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    r1a, r1b, r1c = st.columns([3, 1, 1])
+    r1a, r1m, r1b, r1c = st.columns([3, 1, 1, 1])
 
     at_symbol = r1a.text_input(
         "Symbol to trade", value=st.session_state.get("signals_symbol", "AAPL"),
-        key="at_symbol", placeholder="AAPL, TSLA, SPY …",
+        key="at_symbol", placeholder="AAPL, RELIANCE, ADANIPOWER …",
     ).strip().upper() or "AAPL"
+
+    at_market = r1m.selectbox(
+        "Market", ["Auto", "US", "India"],
+        index=0, key="at_market",
+        help=(
+            "Auto = detect from the symbol (NSE names like RELIANCE/ADANIPOWER → India/Upstox, "
+            "everything else → US).\n\n"
+            "US = force US routing (yfinance/TwelveData/Webull).\n\n"
+            "India = force NSE routing via Upstox. Use this if a valid NSE symbol "
+            "isn't being auto-detected."
+        ),
+    )
 
     at_simulation = r1b.toggle(
         "Paper (Simulation)", value=True, key="at_simulation",
@@ -2007,6 +2034,37 @@ with tab_autotrader:
         index=0, key="at_dir",
         help="Long only = only BUY setups. Long & Short = both directions. Short only = only SHORT setups.",
     )
+
+    # Resolve market: explicit choice overrides auto-detection. When India is
+    # forced (or auto-detected), surface it so the user knows data → Upstox.
+    try:
+        from app.services.markets import is_india_symbol as _is_india_sym
+        _auto_is_india = bool(_is_india_sym(at_symbol))
+    except Exception:
+        _auto_is_india = False
+    _resolved_india = (at_market == "India") or (at_market == "Auto" and _auto_is_india)
+    if _resolved_india:
+        st.caption(
+            f"🇮🇳 **{at_symbol}** routed as an **NSE / India** symbol — "
+            f"data via **Upstox**, session 09:15–15:30 IST, exits in ₹."
+            + (" (auto-detected)" if at_market == "Auto" else " (forced India)")
+        )
+    elif at_market == "US" and _auto_is_india:
+        st.warning(
+            f"⚠️ **{at_symbol}** looks like an NSE symbol but you forced **US** routing — "
+            "data will be fetched from US providers and will likely fail. "
+            "Switch Market to **India** or **Auto**.",
+            icon="⚠️",
+        )
+
+    # The symbol actually sent to the data/trading layer. When the user forces
+    # India on a name the auto-detector misses, append ".NS" so the whole
+    # pipeline (chart, fetch_intraday, autotrader) routes to Upstox. The Upstox
+    # instrument resolver strips ".NS" back to the bare symbol.
+    if at_market == "India" and not _auto_is_india:
+        at_symbol_routed = f"{at_symbol}.NS"
+    else:
+        at_symbol_routed = at_symbol
 
     # ── Mode banner ───────────────────────────────────────────────────────────
     if at_simulation:
@@ -2134,10 +2192,10 @@ with tab_autotrader:
             from app.services.strategy.daytrading.autotrader import SingleStockTrader
             from app.services.strategy.daytrading.brain.symbol_policy import get_policy, set_policy, SymbolPolicy, ENABLED
 
-            _pol = get_policy(at_symbol)
+            _pol = get_policy(at_symbol_routed)
             if not _pol.allows_live():
-                set_policy(at_symbol, SymbolPolicy(
-                    symbol=at_symbol, status=ENABLED, override_live=True,
+                set_policy(at_symbol_routed, SymbolPolicy(
+                    symbol=at_symbol_routed, status=ENABLED, override_live=True,
                     reason=f"Auto-enabled for bot run {datetime.now(ET).strftime('%H:%M ET')}",
                     wf_verdict=_pol.wf_verdict, wf_score=_pol.wf_score,
                 ))
@@ -2160,7 +2218,7 @@ with tab_autotrader:
                 _exec_svc = ExecutionService(_broker)
 
             trader = SingleStockTrader(
-                symbol=at_symbol,
+                symbol=at_symbol_routed,
                 broker=_broker,
                 execution_service=_exec_svc,
                 account_id=_acct_id,
@@ -2239,7 +2297,7 @@ with tab_autotrader:
         else:
             try:
                 _at_payload = api.intraday_chart(
-                    at_symbol,
+                    at_symbol_routed,
                     timeframe="5m",
                     strategies="all",
                     include_rejected=True,

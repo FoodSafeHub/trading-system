@@ -169,8 +169,27 @@ _VALID_TIMEFRAMES = {"5m": ("5d", "5m"), "15m": ("60d", "15m"), "1m": ("2d", "1m
 
 
 def _fetch_with_source(symbol: str, interval: str, period: str) -> tuple[pd.DataFrame, str]:
-    """Same fallback path as runner.fetch_intraday, but reports which source
-    produced the bars. Returns (df, "twelvedata"|"yfinance"|"none")."""
+    """Fetch intraday bars and report which source produced them.
+
+    Mirrors runner.fetch_intraday's routing:
+      - India (NSE) symbols → Upstox ONLY (no fall-through to US providers,
+        which return 429 / "possibly delisted" for NSE names).
+      - US symbols → Twelve Data → yfinance fallback.
+
+    Returns (df, "upstox"|"twelvedata"|"yfinance"|"none").
+    """
+    # India (NSE): route to Upstox and short-circuit the US provider chain.
+    try:
+        from app.services.markets import is_india_symbol
+        if is_india_symbol(symbol):
+            from app.services.marketdata import upstox_data
+            ind = upstox_data.fetch_bars(symbol, interval=interval, period=period)
+            return (ind, "upstox") if not ind.empty else (ind, "none")
+    except Exception:
+        # If India detection / Upstox import fails, fall through to US chain
+        # rather than erroring the whole chart request.
+        pass
+
     df = _fetch_twelvedata(symbol, interval, period)
     if not df.empty:
         return df, "twelvedata"

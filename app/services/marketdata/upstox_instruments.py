@@ -112,13 +112,23 @@ def _ensure_map() -> None:
 def resolve(symbol: str) -> Optional[str]:
     """Return the Upstox instrument_key for a ticker, or None if unknown.
 
-    Accepts ``"RELIANCE"`` (defaults to NSE) or ``"BSE:TCS"``.
+    Accepts ``"RELIANCE"`` (defaults to NSE), ``"BSE:TCS"``, ``"NSE:RELIANCE"``,
+    and yfinance-style suffixes ``"RELIANCE.NS"`` / ``"TCS.BO"``.
     """
     sym = (symbol or "").upper().strip()
     if not sym:
         return None
+    # Strip yfinance-style exchange suffixes (.NS = NSE, .BO = BSE) so any
+    # India symbol form resolves. Map the suffix to the exchange prefix.
+    _suffix_exch = None
+    if sym.endswith(".NS"):
+        sym, _suffix_exch = sym[:-3], "NSE"
+    elif sym.endswith(".BO"):
+        sym, _suffix_exch = sym[:-3], "BSE"
     if ":" in sym:
         exch, tsym = sym.split(":", 1)
+    elif _suffix_exch:
+        exch, tsym = _suffix_exch, sym
     else:
         exch, tsym = "NSE", sym
     _ensure_map()
