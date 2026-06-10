@@ -645,9 +645,19 @@ with tab_signals:
                 with st.expander("Why no signals? (diagnostics)", expanded=True):
                     _render_pipeline_diagnostics(diag_data)
 
-    # Auto-rerun when live toggle is on and market is open
+    # Auto-refresh when live toggle is on and market is open.
+    # Use a timed refresh (not a tight st.rerun loop) so the chart iframe is not
+    # re-mounted faster than it can tear down — a tight loop renders duplicate
+    # stacked charts and hammers the chart API.
     if auto_refresh and _mkt_is_open and st.session_state.get("_dt_signals_loaded"):
-        st.rerun()
+        try:
+            from streamlit_autorefresh import st_autorefresh  # type: ignore
+            st_autorefresh(interval=60_000, key="signals_autorefresh")
+        except Exception:
+            import streamlit.components.v1 as _components
+            _components.html(
+                "<meta http-equiv='refresh' content='60'>", height=0,
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2615,9 +2625,19 @@ with tab_autotrader:
                             f"`{_entry.get('time','')[-8:]}` {_icon} **{_event}**{_extra} — {_reason}"
                         )
 
-    # ── Auto-refresh while bot is running (no sleep — let Streamlit pace it) ──
+    # ── Auto-refresh while bot is running ─────────────────────────────────────
+    # Refresh on a fixed 30s cadence (matches the bot's bar-poll interval).
+    # A tight st.rerun() loop re-mounts the chart iframe before the previous one
+    # is torn down, which renders TWO stacked charts and hammers the chart API.
     if status.get("running"):
-        st.rerun()
+        try:
+            from streamlit_autorefresh import st_autorefresh  # type: ignore
+            st_autorefresh(interval=30_000, key="at_autorefresh")
+        except Exception:
+            import streamlit.components.v1 as _components
+            _components.html(
+                "<meta http-equiv='refresh' content='30'>", height=0,
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

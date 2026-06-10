@@ -36,3 +36,4 @@ pytest-cov>=5.0.0
 
 # ── Dev tools ─────────────────────────────────────────────────
 python-dotenv>=1.0.1
+streamlit-autorefresh
