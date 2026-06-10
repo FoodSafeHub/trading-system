@@ -110,6 +110,108 @@ def _quantize_for_broker(shares: float) -> float:
     return float(whole) if whole >= 1 else 0.0
 
 
+def _reconcile_trail_stops(
+    loop, broker, account_id: str,
+    current_positions: dict[str, float],
+    assignments: list[dict],
+    live_prices: dict[str, float],
+    svc_for,
+) -> None:
+    """Safety net: arm a tight trail for any held position that has a recent
+    SELL signal but no resting protective SELL stop.
+
+    Catches the gap where a SELL signal fired (scheduler OR scanner discovery)
+    on a held position but no trailing stop ended up resting — e.g. a prior
+    cycle's broker fetch failed, or the SELL was scanner-only. Runs at the end
+    of the live cycle so it can't conflict with the entry/exit loop above.
+
+    Idempotent: tighten_trail_on_sell cancels any resting SELL stop first, so a
+    symbol that already has a healthy trail just gets it re-placed at the same
+    level. Assigned-symbol immunity is irrelevant here because this only ACTS
+    on held positions and uses the assignment's own trail_pct when present.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    from app.models.signals import Signal
+    from app.models.orders import Order
+
+    held = {s: q for s, q in current_positions.items() if q and q >= 1.0}
+    if not held:
+        return
+
+    # Look back 3 days for the latest SELL signal per held symbol.
+    cutoff = _dt.utcnow() - _td(days=3)
+    asgn_by_symbol = {a["symbol"].upper(): a for a in assignments}
+
+    # Broker working SELL stops — fetched ONCE (source of truth; DB may lag).
+    broker_protected: set[str] = set()
+    try:
+        bro = loop.run_until_complete(broker.list_orders(account_id, status="working"))
+        for o in (bro or []):
+            if (getattr(o, "side", "").upper() == "SELL"
+                    and getattr(o, "order_type", "").upper() in ("STOP", "TRAILING_STOP")):
+                broker_protected.add(getattr(o, "symbol", "").upper())
+    except Exception as exc:
+        logger.debug("[scheduler] Trail reconcile: broker order fetch failed: %s", exc)
+
+    with SessionLocal() as db:
+        # Symbols that already have a resting SELL stop in our DB — skip those.
+        resting = {
+            o.symbol.upper()
+            for o in db.query(Order).filter(
+                Order.symbol.in_(list(held.keys())),
+                Order.side == "SELL",
+                Order.order_type.in_(["STOP", "TRAILING_STOP"]),
+                Order.status.in_(["submitted", "working"]),
+            ).all()
+        }
+        resting |= broker_protected
+
+        for symbol, qty in held.items():
+            if symbol in resting:
+                continue  # already protected (DB or broker)
+            # Most recent SELL signal for this held symbol (any source).
+            sig = (
+                db.query(Signal)
+                .filter(
+                    Signal.symbol == symbol.upper(),
+                    Signal.direction == "SELL",
+                    Signal.price_at_signal.isnot(None),
+                    Signal.created_at >= cutoff,
+                )
+                .order_by(Signal.created_at.desc())
+                .first()
+            )
+            if sig is None:
+                continue
+
+            asgn = asgn_by_symbol.get(symbol)
+            trail_pct = float((asgn.get("tight_trail_pct") if asgn else None) or 2.0)
+            sig_price = live_prices.get(symbol) or float(sig.price_at_signal)
+
+            exec_svc, exec_acct = svc_for((asgn or {}).get("broker", "default") or "default")
+            logger.info(
+                "[scheduler] Trail reconcile: %s held=%.4f has SELL signal "
+                "(%s @ $%.2f) but no resting trail — arming %.1f%% trail.",
+                symbol, qty, sig.strategy_name, sig_price, trail_pct,
+            )
+            try:
+                ok = loop.run_until_complete(exec_svc.tighten_trail_on_sell(
+                    symbol=symbol,
+                    quantity=qty,
+                    account_id=exec_acct,
+                    signal_price=sig_price,
+                    trail_pct=trail_pct,
+                    source="scheduler",
+                    idempotency_suffix=f"reconcile-{symbol}-{int(sig_price * 100)}",
+                    signal_id=sig.id,
+                ))
+                if ok and not sig.acted_on:
+                    sig.acted_on = True
+                    db.commit()
+            except Exception as exc:
+                logger.warning("[scheduler] Trail reconcile failed for %s: %s", symbol, exc)
+
+
 def _live_position_state(symbol: str, df, held_qty: float):
     """Build the PositionState the trailing-stop overlay needs for a LIVE bar.
 
@@ -797,6 +899,19 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                     signal_id=sig_id,
                     estimated_price=entry_p or None,
                 ))
+
+            # ── Safety net: arm trails for held positions that got a SELL
+            # signal but have no resting protective stop (failed prior cycle,
+            # scanner-only SELL, etc.). Live cycles only.
+            if not dry_run:
+                try:
+                    _reconcile_trail_stops(
+                        loop, broker, account_id,
+                        current_positions, assignments, live_prices,
+                        _svc_for,
+                    )
+                except Exception as exc:
+                    logger.warning("[scheduler] Trail reconcile pass failed: %s", exc)
         finally:
             loop.close()
 
