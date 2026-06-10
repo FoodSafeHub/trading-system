@@ -308,6 +308,7 @@ class ExecutionService:
         signal_price: float,
         *,
         trail_pct: float = 2.0,
+        floor_buffer_pct: float = 0.25,
         source: str = "scheduler",
         idempotency_suffix: str = "",
         signal_id: Optional[int] = None,
@@ -325,11 +326,18 @@ class ExecutionService:
         the post-signal upside. 1% was too tight for mid/high-vol names (KO,
         NVDA) and got shaken out by normal daily wicks.
 
+        floor_buffer_pct (default 0.25%): the protective floor is set a touch
+        ABOVE the signal price (signal × (1 + buffer)) so that a floor-triggered
+        exit clears commission/slippage and is net-positive versus the signal,
+        not merely break-even. The trailing stop is NEVER allowed to sit below
+        this floor — so we can ride further upside but can never close the
+        position below (signal price + buffer).
+
         signal_id: the Signal row id for this SELL signal. Linked to the trail
         order so PnL audit can show signal_price vs actual exit price.
 
-        Returns True if the tight trail was placed, False if it fell back to
-        a market sell (e.g. broker unavailable).
+        Returns True if the protective order was placed, False on failure
+        (no fallback market sell — see below).
         """
         # Step 1: cancel any resting sell-side stops
         try:
@@ -350,19 +358,81 @@ class ExecutionService:
                 "— placing tight trail anyway", symbol, exc,
             )
 
-        # Step 2: place tight trailing stop, linked to the SELL signal row
-        suffix = idempotency_suffix or str(int(signal_price * 100))
-        trail_req = OrderRequest(
-            symbol=symbol,
-            side="SELL",
-            order_type="TRAILING_STOP",
-            quantity=quantity,
-            trail_type="PERCENT",
-            trail_value=round(trail_pct, 2),
-            time_in_force="GTC",
-            source=source,  # type: ignore[arg-type]
-            idempotency_key=f"sell-trail-{symbol}-{suffix}",
+        # Step 2: place the protective SELL order with a floor at the signal price.
+        #
+        # The existing behaviour (arm a tight trail instead of market-selling on a
+        # SELL signal) is preserved. The ONLY change is a hard floor: the stop is
+        # never allowed below the signal price + a small buffer.
+        #
+        # Why a floor: a native PERCENT trailing stop trails from the CURRENT
+        # price, so when the SELL signal fires while price is at/near the signal
+        # level, the trail's initial trigger sits BELOW the signal price. A
+        # reversal then closes the position below the signal — booking a loss vs
+        # the price the strategy told us to exit at.
+        #
+        # The floor sits a touch ABOVE the signal (× (1 + buffer)) so a
+        # floor-triggered exit clears commission/slippage and is net-positive.
+        #
+        # If the native trail would start ABOVE the floor (price already ran up),
+        # we use the native trailing stop for smooth trailing. Otherwise we place
+        # a plain STOP at the floor; the 15-min chandelier-trail job ratchets that
+        # STOP upward as the high rises, so we still capture upside but can never
+        # close below the floor.
+        floor_price = round(signal_price * (1.0 + floor_buffer_pct / 100.0), 2)
+
+        current_price = 0.0
+        try:
+            quotes = await self.broker.get_quotes([symbol])
+            q = quotes.get(symbol.upper()) or quotes.get(symbol)
+            if q is not None:
+                current_price = float(q.last or q.bid or q.ask or 0.0)
+        except Exception as exc:
+            logger.warning(
+                "[exec] tighten_trail %s: quote fetch failed (%s) — "
+                "defaulting to floor STOP for safety", symbol, exc,
+            )
+
+        trail_initial_stop = (
+            current_price * (1.0 - trail_pct / 100.0) if current_price > 0 else 0.0
         )
+        use_floor = (trail_initial_stop <= 0.0) or (trail_initial_stop < floor_price)
+
+        suffix = idempotency_suffix or str(int(signal_price * 100))
+        if use_floor:
+            trail_req = OrderRequest(
+                symbol=symbol,
+                side="SELL",
+                order_type="STOP",
+                quantity=quantity,
+                stop_price=floor_price,
+                time_in_force="GTC",
+                source=source,  # type: ignore[arg-type]
+                idempotency_key=f"sell-trail-{symbol}-{suffix}",
+            )
+            logger.info(
+                "[exec] tighten_trail %s: native %.1f%% trail would start @ $%.2f "
+                "(below floor $%.2f = signal $%.2f + %.2f%%) — placing STOP at the "
+                "floor instead. Chandelier job ratchets it up as price rises.",
+                symbol, trail_pct, trail_initial_stop, floor_price,
+                signal_price, floor_buffer_pct,
+            )
+        else:
+            trail_req = OrderRequest(
+                symbol=symbol,
+                side="SELL",
+                order_type="TRAILING_STOP",
+                quantity=quantity,
+                trail_type="PERCENT",
+                trail_value=round(trail_pct, 2),
+                time_in_force="GTC",
+                source=source,  # type: ignore[arg-type]
+                idempotency_key=f"sell-trail-{symbol}-{suffix}",
+            )
+            logger.info(
+                "[exec] tighten_trail %s: native %.1f%% trail starts @ $%.2f "
+                "(>= floor $%.2f) — using native trailing stop.",
+                symbol, trail_pct, trail_initial_stop, floor_price,
+            )
         try:
             resp = await self.broker.place_order(trail_req, account_id)
             # Persist with signal_id so PnL audit can join signal_price → exit_price
@@ -378,14 +448,18 @@ class ExecutionService:
                 entity_type="order",
                 entity_id=stop_order.id,
                 description=(
-                    f"SELL TRAILING_STOP {symbol} x{quantity} trail={trail_pct}% "
-                    f"(assigned strategy SELL signal @ ${signal_price:.2f}, signal_id={signal_id})"
+                    f"SELL {trail_req.order_type} {symbol} x{quantity} "
+                    f"{'trail=' + str(trail_pct) + '%' if trail_req.order_type == 'TRAILING_STOP' else 'floor=$' + format(floor_price, '.2f')} "
+                    f"(assigned strategy SELL signal @ ${signal_price:.2f}, "
+                    f"floor ${floor_price:.2f} = signal + {floor_buffer_pct}%, "
+                    f"signal_id={signal_id})"
                 ),
             )
             logger.info(
-                "[exec] tighten_trail %s: placed %.1f%% trailing stop @ signal ~$%.2f "
+                "[exec] tighten_trail %s: placed %s @ signal ~$%.2f (floor $%.2f) "
                 "signal_id=%s broker_id=%s",
-                symbol, trail_pct, signal_price, signal_id, resp.broker_order_id,
+                symbol, trail_req.order_type, signal_price, floor_price,
+                signal_id, resp.broker_order_id,
             )
             return True
         except Exception as exc:
