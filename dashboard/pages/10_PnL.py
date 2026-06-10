@@ -341,6 +341,110 @@ else:
     )
     st.caption(f"{len(df_show):,} trade(s) shown. Money shown in each row's broker currency (₹ for Zerodha, $ otherwise).")
 
+# ── Armed Tight Trails (Open Positions) ───────────────────────────────────────
+st.divider()
+section(
+    "Armed Tight Trails — Open Positions",
+    "Positions that received a SELL signal where the tight trailing stop is now armed "
+    "but the position has NOT exited yet. Track whether the trail is currently letting "
+    "the position ride above the signal price (helping) or sitting below it.",
+)
+st.caption(
+    "**Signal price** = price when the strategy SELL signal fired. "
+    "**Last** = current quote. **Move since signal** = (last − signal) / signal — "
+    "green means the position is still above the signal price (trail riding extra upside), "
+    "red means it has fallen below the signal price. "
+    "**Trail trigger** = the resting STOP level (floor), the % trail width, or "
+    "**⚠ no resting trail** when a SELL signal fired but no protective stop is currently "
+    "resting (the signal was scanner-path or the trail order isn't detectable — worth checking)."
+)
+
+try:
+    _armed = api.pnl_open_trails()
+except Exception as exc:
+    st.error(f"Cannot load /pnl/open-trails: {exc}")
+    _armed = []
+
+if not _armed:
+    st.info(
+        "No armed tight trails right now. This populates when an assigned/consensus "
+        "strategy fires a SELL on a held position and the scheduler arms its trailing "
+        "stop (instead of market-selling). Requires the scheduler's tight-trail feature."
+    )
+else:
+    # Summary tiles
+    _n_help = sum(1 for r in _armed if r.get("trail_helping") is True)
+    _n_hurt = sum(1 for r in _armed if r.get("trail_helping") is False)
+    _moves = [r["move_since_signal_pct"] for r in _armed if r.get("move_since_signal_pct") is not None]
+    _avg_move = round(sum(_moves) / len(_moves), 2) if _moves else 0.0
+    kpi_row([
+        ("Armed trails", str(len(_armed))),
+        ("Riding above signal", f"{_n_help}"),
+        ("Below signal", f"{_n_hurt}"),
+        ("Avg move since signal", f"{_avg_move:+.2f}%"),
+    ])
+
+    df_at = pd.DataFrame(_armed)
+
+    def _cur_at(row) -> str:
+        return currency_symbol(row.get("broker"))
+
+    def _money_at(row, col, signed=False) -> str:
+        if row.get(col) is None:
+            return "—"
+        cur = _cur_at(row)
+        return f"{cur}{float(row[col]):+,.2f}" if signed else f"{cur}{float(row[col]):,.2f}"
+
+    def _trigger_at(row) -> str:
+        ot = row.get("order_type")
+        if ot == "TRAILING_STOP" and row.get("trail_pct"):
+            return f"{float(row['trail_pct']):.1f}% trail"
+        if ot == "STOP" and row.get("stop_price") is not None:
+            return _money_at(row, "stop_price")
+        if ot == "SIGNAL_ONLY":
+            return "⚠ no resting trail"
+        if row.get("stop_price") is not None:
+            return _money_at(row, "stop_price")
+        return "—"
+
+    def _signal_when(row) -> str:
+        sa = row.get("signal_at") or row.get("armed_at")
+        return str(sa)[:16].replace("T", " ") if sa else "—"
+
+    df_at["_sig_px"]   = df_at.apply(lambda r: _money_at(r, "signal_price"), axis=1)
+    df_at["_last"]     = df_at.apply(lambda r: _money_at(r, "last_price"), axis=1)
+    df_at["_upnl"]     = df_at.apply(lambda r: _money_at(r, "unrealized_pnl", signed=True), axis=1)
+    df_at["_trigger"]  = df_at.apply(_trigger_at, axis=1)
+    df_at["_sig_when"] = df_at.apply(_signal_when, axis=1)
+    df_at["_status"]   = df_at["trail_helping"].apply(
+        lambda v: "🟢 Riding" if v is True else ("🔴 Below signal" if v is False else "—")
+    )
+
+    df_at_show = df_at[[
+        "symbol", "quantity", "signal_strategy", "_sig_when", "_sig_px",
+        "_last", "move_since_signal_pct", "_trigger", "_upnl", "_status",
+        "days_armed", "broker",
+    ]].copy()
+    df_at_show.columns = [
+        "Symbol", "Qty", "Strategy", "Signal fired", "Signal price",
+        "Last", "Move since signal", "Trail trigger", "Unrealized", "Status",
+        "Days armed", "Broker",
+    ]
+    st.dataframe(
+        df_at_show,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Qty": st.column_config.NumberColumn(format="%.4f"),
+            "Move since signal": st.column_config.NumberColumn(format="%+.2f%%"),
+            "Days armed": st.column_config.NumberColumn(format="%.1f"),
+        },
+    )
+    st.caption(
+        f"{len(df_at_show)} armed trail(s). The position stays open until the trailing "
+        "stop fills; once it does, the trade moves to the Trail Stop Audit below."
+    )
+
 # ── Trail Stop Audit ─────────────────────────────────────────────────────────
 st.divider()
 section(

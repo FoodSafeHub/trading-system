@@ -112,6 +112,38 @@ class SummaryOut(BaseModel):
     has_live_prices: bool
 
 
+class OpenTrailOut(BaseModel):
+    """An OPEN position whose tight-trail SELL stop is currently armed.
+
+    The strategy already fired a SELL signal and the scheduler placed a
+    protective STOP / TRAILING_STOP, but the position has not exited yet.
+    This lets the user watch — in real time — whether the trail is letting
+    them ride extra upside above the signal price, or sitting below it.
+    """
+    symbol: str
+    quantity: float
+    avg_cost: float
+    last_price: Optional[float]
+    unrealized_pnl: Optional[float]
+    unrealized_pct: Optional[float]
+    broker: str
+    is_paper: bool
+
+    # Armed trail details (joined from the resting SELL Order + its Signal)
+    signal_price: Optional[float]      # price when the SELL signal fired
+    signal_at: Optional[datetime]      # when it fired
+    signal_strategy: Optional[str]     # which strategy fired it
+    order_type: Optional[str]          # "STOP" (floor) | "TRAILING_STOP" (native %)
+    stop_price: Optional[float]        # current stop trigger (STOP orders only)
+    trail_pct: Optional[float]         # trail width % (TRAILING_STOP orders)
+    armed_at: Optional[datetime]       # when the trail order was submitted
+    days_armed: Optional[float]        # days since the trail was armed
+
+    # Computed live status
+    move_since_signal_pct: Optional[float]  # (last - signal) / signal × 100
+    trail_helping: Optional[bool]           # True if last_price > signal_price now
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def _refresh(db: Session):
@@ -153,6 +185,47 @@ def _resolve_last_prices(symbols: list[str]) -> dict[str, float]:
         if price and price > 0:
             out[sym.upper()] = float(price)
     return out
+
+
+def _broker_resting_sell_stops() -> dict[str, dict]:
+    """Query the active broker for WORKING SELL STOP/TRAILING_STOP orders.
+
+    The scheduler places these on the broker; they may not all be mirrored in
+    the local DB (e.g. scanner-path SELLs). This is the source of truth for
+    "what trail is actually resting right now". Returns {symbol: {...}}.
+    """
+    import asyncio
+    result: dict[str, dict] = {}
+    try:
+        broker = get_broker()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(broker.authenticate())
+            accts = loop.run_until_complete(broker.get_accounts())
+            acct_id = accts[0].account_id if accts else ""
+            orders = loop.run_until_complete(broker.list_orders(acct_id, status="working"))
+        finally:
+            loop.close()
+    except Exception as exc:
+        logger.warning("[pnl] broker working-orders fetch failed: %s", exc)
+        return {}
+
+    for o in orders or []:
+        side = (getattr(o, "side", "") or "").upper()
+        otype = (getattr(o, "order_type", "") or "").upper()
+        sym = (getattr(o, "symbol", "") or "").upper()
+        if side != "SELL" or otype not in ("STOP", "TRAILING_STOP") or not sym:
+            continue
+        if sym in result:
+            continue  # keep first (broker returns newest-ish; good enough)
+        raw = getattr(o, "raw", {}) or {}
+        result[sym] = {
+            "order_type": otype,
+            "stop_price": getattr(o, "stop_price", None) or raw.get("stopPrice"),
+            "trail_value": getattr(o, "trail_value", None) or raw.get("stopPriceOffset"),
+            "broker_order_id": getattr(o, "broker_order_id", None),
+        }
+    return result
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
@@ -314,3 +387,159 @@ def pnl_open_positions(db: Session = Depends(get_db)):
         last_prices = _resolve_last_prices(sorted({l.symbol for l in fifo.open_lots}))
     rows, _total = open_position_pnl(fifo.open_lots, last_prices)
     return [OpenPositionOut(**r) for r in rows]
+
+
+@router.get("/open-trails", response_model=List[OpenTrailOut])
+def pnl_open_trails(db: Session = Depends(get_db)):
+    """Open positions whose tight-trail SELL stop is currently armed.
+
+    Live counterpart to the closed-trade Trail Stop Audit: the strategy fired
+    a SELL signal and the scheduler armed a protective STOP / TRAILING_STOP,
+    but the position has NOT exited yet. Shows whether the trail is currently
+    letting the position ride above the signal price (helping) or sitting
+    below it (hurting), so the user can track the in-progress effect.
+    """
+    from app.models.orders import Order
+    from app.models.signals import Signal
+
+    _, fifo = _refresh(db)
+    if not fifo.open_lots:
+        return []
+
+    last_prices = _resolve_last_prices(sorted({l.symbol for l in fifo.open_lots}))
+    rows, _total = open_position_pnl(fifo.open_lots, last_prices)
+    open_by_symbol = {r["symbol"]: r for r in rows}
+    symbols = list(open_by_symbol.keys())
+
+    # ── Source 1: local DB resting SELL stops (preferred — carries signal link)
+    db_resting = (
+        db.query(Order)
+        .filter(
+            Order.symbol.in_(symbols),
+            Order.side == "SELL",
+            Order.order_type.in_(["STOP", "TRAILING_STOP"]),
+            Order.status.in_(["submitted", "working"]),
+        )
+        .order_by(Order.created_at.desc())
+        .all()
+    )
+    db_by_symbol: dict[str, Order] = {}
+    for o in db_resting:
+        db_by_symbol.setdefault(o.symbol, o)
+
+    sig_ids = [o.signal_id for o in db_by_symbol.values() if o.signal_id]
+    signals_by_id: dict[int, Signal] = {}
+    if sig_ids:
+        for s in db.query(Signal).filter(Signal.id.in_(sig_ids)).all():
+            signals_by_id[s.id] = s
+
+    # ── Source 2: broker working SELL stops (catches trails not in local DB,
+    # e.g. scanner-path SELLs). Source of truth for what's actually resting.
+    broker_stops = _broker_resting_sell_stops()
+
+    # ── Fallback signal price: most-recent acted-on SELL signal per held symbol
+    # (when no Order→Signal link exists). Lets the table populate from the
+    # scanner-path SELLs that armed a trail on the broker without a DB order.
+    fallback_sig: dict[str, Signal] = {}
+    if symbols:
+        recent_sells = (
+            db.query(Signal)
+            .filter(
+                Signal.symbol.in_(symbols),
+                Signal.direction == "SELL",
+                Signal.price_at_signal.isnot(None),
+            )
+            .order_by(Signal.created_at.desc())
+            .all()
+        )
+        for s in recent_sells:
+            fallback_sig.setdefault(s.symbol, s)
+
+    # Union of symbols with an armed trail (DB or broker) OR a recent acted-on
+    # SELL signal on a still-held position. The last case surfaces positions
+    # that fired a SELL but where no resting trail is currently detectable —
+    # an important state the user wants to see ("signal fired, trail pending").
+    acted_sell_symbols = {
+        s.symbol for s in fallback_sig.values()
+        if getattr(s, "acted_on", False)
+    }
+    armed_symbols = set(db_by_symbol) | set(broker_stops) | acted_sell_symbols
+
+    now = datetime.utcnow()
+    out: list[OpenTrailOut] = []
+    for sym in armed_symbols:
+        pos = open_by_symbol.get(sym)
+        if not pos:
+            continue
+
+        o = db_by_symbol.get(sym)
+        bstop = broker_stops.get(sym)
+
+        # Trail order details: prefer the DB row, then the broker order, else
+        # signal-only (SELL fired but no resting trail detected yet).
+        if o is not None:
+            order_type = o.order_type
+            stop_price = float(o.stop_price) if o.stop_price else None
+            trail_pct  = float(o.trail_value) if getattr(o, "trail_value", None) else None
+            armed_at   = o.submitted_at or o.created_at
+            sig = signals_by_id.get(o.signal_id) if o.signal_id else None
+        elif bstop is not None:
+            order_type = bstop.get("order_type")
+            try:
+                stop_price = float(bstop["stop_price"]) if bstop.get("stop_price") else None
+            except Exception:
+                stop_price = None
+            try:
+                trail_pct = float(bstop["trail_value"]) if bstop.get("trail_value") else None
+            except Exception:
+                trail_pct = None
+            armed_at = None
+            sig = None
+        else:
+            # Signal fired but no resting trail order found in DB or on broker.
+            order_type = "SIGNAL_ONLY"
+            stop_price = trail_pct = armed_at = None
+            sig = None
+
+        # Signal price: linked signal first, else the most-recent SELL signal.
+        if sig is None:
+            sig = fallback_sig.get(sym)
+        sig_price = float(sig.price_at_signal) if (sig and sig.price_at_signal) else None
+
+        last_px = pos.get("last_price")
+        move_pct = helping = None
+        if sig_price and sig_price > 0 and last_px:
+            move_pct = round((last_px - sig_price) / sig_price * 100, 2)
+            helping = last_px > sig_price
+
+        days_armed = None
+        if armed_at is not None:
+            try:
+                _a = armed_at.replace(tzinfo=None) if armed_at.tzinfo else armed_at
+                days_armed = round((now - _a).total_seconds() / 86400, 1)
+            except Exception:
+                days_armed = None
+
+        out.append(OpenTrailOut(
+            symbol=sym,
+            quantity=pos.get("quantity"),
+            avg_cost=pos.get("avg_cost"),
+            last_price=last_px,
+            unrealized_pnl=pos.get("unrealized_pnl"),
+            unrealized_pct=pos.get("unrealized_pct"),
+            broker=pos.get("broker"),
+            is_paper=pos.get("is_paper", False),
+            signal_price=sig_price,
+            signal_at=sig.created_at if sig else None,
+            signal_strategy=sig.strategy_name if sig else None,
+            order_type=order_type,
+            stop_price=stop_price,
+            trail_pct=trail_pct,
+            armed_at=armed_at,
+            days_armed=days_armed,
+            move_since_signal_pct=move_pct,
+            trail_helping=helping,
+        ))
+
+    out.sort(key=lambda r: (r.move_since_signal_pct or -999), reverse=True)
+    return out

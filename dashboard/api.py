@@ -573,6 +573,11 @@ def pnl_open_positions():
     return _get("/pnl/open-positions", timeout=30)
 
 
+def pnl_open_trails():
+    """Open positions with an armed tight-trail SELL stop (live trail audit)."""
+    return _get("/pnl/open-trails", timeout=30)
+
+
 # ── Recommendations (best historically-ranked strategy per symbol) ─────────
 
 def recommendations_list():
