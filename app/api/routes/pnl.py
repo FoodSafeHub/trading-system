@@ -187,6 +187,13 @@ def _resolve_last_prices(symbols: list[str]) -> dict[str, float]:
     return out
 
 
+def _naive(dt):
+    """Strip tzinfo for safe comparison between naive and aware datetimes."""
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=None) if getattr(dt, "tzinfo", None) else dt
+
+
 def _broker_resting_sell_stops() -> dict[str, dict]:
     """Query the active broker for WORKING SELL STOP/TRAILING_STOP orders.
 
@@ -411,6 +418,16 @@ def pnl_open_trails(db: Session = Depends(get_db)):
     open_by_symbol = {r["symbol"]: r for r in rows}
     symbols = list(open_by_symbol.keys())
 
+    # Earliest open (buy) time per held symbol — the SELL-signal price we anchor
+    # to is the FIRST SELL fired AT/AFTER the position was opened, not the most
+    # recent one. That first signal is when the strategy decided to exit and is
+    # the price the trail should be measured against.
+    earliest_buy: dict[str, datetime] = {}
+    for lot in fifo.open_lots:
+        cur = earliest_buy.get(lot.symbol)
+        if cur is None or lot.buy_at < cur:
+            earliest_buy[lot.symbol] = lot.buy_at
+
     # ── Source 1: local DB resting SELL stops (preferred — carries signal link)
     db_resting = (
         db.query(Order)
@@ -427,43 +444,40 @@ def pnl_open_trails(db: Session = Depends(get_db)):
     for o in db_resting:
         db_by_symbol.setdefault(o.symbol, o)
 
-    sig_ids = [o.signal_id for o in db_by_symbol.values() if o.signal_id]
-    signals_by_id: dict[int, Signal] = {}
-    if sig_ids:
-        for s in db.query(Signal).filter(Signal.id.in_(sig_ids)).all():
-            signals_by_id[s.id] = s
-
     # ── Source 2: broker working SELL stops (catches trails not in local DB,
     # e.g. scanner-path SELLs). Source of truth for what's actually resting.
     broker_stops = _broker_resting_sell_stops()
 
-    # ── Fallback signal price: most-recent acted-on SELL signal per held symbol
-    # (when no Order→Signal link exists). Lets the table populate from the
-    # scanner-path SELLs that armed a trail on the broker without a DB order.
+    # ── Anchor signal price: the FIRST SELL signal fired AT/AFTER the position
+    # was opened, per held symbol. This is the price the strategy first flagged
+    # the exit at — the price the trail should be measured against (not the most
+    # recent re-fire of the same signal).
     fallback_sig: dict[str, Signal] = {}
     if symbols:
-        recent_sells = (
+        all_sells = (
             db.query(Signal)
             .filter(
                 Signal.symbol.in_(symbols),
                 Signal.direction == "SELL",
                 Signal.price_at_signal.isnot(None),
             )
-            .order_by(Signal.created_at.desc())
+            .order_by(Signal.created_at.asc())   # earliest first
             .all()
         )
-        for s in recent_sells:
-            fallback_sig.setdefault(s.symbol, s)
+        for s in all_sells:
+            if s.symbol in fallback_sig:
+                continue  # already have the first qualifying signal
+            buy_t = earliest_buy.get(s.symbol)
+            # Only count SELL signals fired after the position was opened. If we
+            # somehow lack a buy time, accept the earliest SELL we have.
+            if buy_t is None or _naive(s.created_at) >= _naive(buy_t):
+                fallback_sig[s.symbol] = s
 
-    # Union of symbols with an armed trail (DB or broker) OR a recent acted-on
-    # SELL signal on a still-held position. The last case surfaces positions
-    # that fired a SELL but where no resting trail is currently detectable —
-    # an important state the user wants to see ("signal fired, trail pending").
-    acted_sell_symbols = {
-        s.symbol for s in fallback_sig.values()
-        if getattr(s, "acted_on", False)
-    }
-    armed_symbols = set(db_by_symbol) | set(broker_stops) | acted_sell_symbols
+    # Show EVERY held position that has a qualifying SELL signal — whether or
+    # not a trail is currently resting (DB or broker). A held position with a
+    # SELL signal but no resting trail is exactly the state worth surfacing.
+    sell_signal_symbols = set(fallback_sig.keys())
+    armed_symbols = set(db_by_symbol) | set(broker_stops) | sell_signal_symbols
 
     now = datetime.utcnow()
     out: list[OpenTrailOut] = []
@@ -482,7 +496,6 @@ def pnl_open_trails(db: Session = Depends(get_db)):
             stop_price = float(o.stop_price) if o.stop_price else None
             trail_pct  = float(o.trail_value) if getattr(o, "trail_value", None) else None
             armed_at   = o.submitted_at or o.created_at
-            sig = signals_by_id.get(o.signal_id) if o.signal_id else None
         elif bstop is not None:
             order_type = bstop.get("order_type")
             try:
@@ -494,16 +507,15 @@ def pnl_open_trails(db: Session = Depends(get_db)):
             except Exception:
                 trail_pct = None
             armed_at = None
-            sig = None
         else:
             # Signal fired but no resting trail order found in DB or on broker.
             order_type = "SIGNAL_ONLY"
             stop_price = trail_pct = armed_at = None
-            sig = None
 
-        # Signal price: linked signal first, else the most-recent SELL signal.
-        if sig is None:
-            sig = fallback_sig.get(sym)
+        # Signal price/time/strategy ALWAYS come from the FIRST SELL signal
+        # fired after the position opened (the anchor the user cares about),
+        # not the most recent re-fire or the order's linked signal.
+        sig = fallback_sig.get(sym)
         sig_price = float(sig.price_at_signal) if (sig and sig.price_at_signal) else None
 
         last_px = pos.get("last_price")
@@ -512,11 +524,13 @@ def pnl_open_trails(db: Session = Depends(get_db)):
             move_pct = round((last_px - sig_price) / sig_price * 100, 2)
             helping = last_px > sig_price
 
+        # Days since the trail was armed, or — when no trail is resting yet
+        # (SIGNAL_ONLY) — days since the first SELL signal fired.
+        _ref_time = armed_at or (sig.created_at if sig else None)
         days_armed = None
-        if armed_at is not None:
+        if _ref_time is not None:
             try:
-                _a = armed_at.replace(tzinfo=None) if armed_at.tzinfo else armed_at
-                days_armed = round((now - _a).total_seconds() / 86400, 1)
+                days_armed = round((now - _naive(_ref_time)).total_seconds() / 86400, 1)
             except Exception:
                 days_armed = None
 

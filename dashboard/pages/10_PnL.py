@@ -428,7 +428,7 @@ else:
     df_at_show.columns = [
         "Symbol", "Qty", "Strategy", "Signal fired", "Signal price",
         "Last", "Move since signal", "Trail trigger", "Unrealized", "Status",
-        "Days armed", "Broker",
+        "Days since signal", "Broker",
     ]
     st.dataframe(
         df_at_show,
@@ -437,7 +437,7 @@ else:
         column_config={
             "Qty": st.column_config.NumberColumn(format="%.4f"),
             "Move since signal": st.column_config.NumberColumn(format="%+.2f%%"),
-            "Days armed": st.column_config.NumberColumn(format="%.1f"),
+            "Days since signal": st.column_config.NumberColumn(format="%.1f"),
         },
     )
     st.caption(
