@@ -472,11 +472,11 @@ def pnl_open_trails(db: Session = Depends(get_db)):
 
     fallback_sig: dict[str, Signal] = {}
     if assigned_strat:
-        # Match the assigned strategy name in either stored form.
-        name_variants: list[str] = []
-        for nm in assigned_strat.values():
-            name_variants.append(nm)
-            name_variants.append(f"scanner:{nm}")
+        # Anchor to the SCANNER discovery stream for the assigned strategy
+        # ("scanner:<assigned_strategy>") — this is the feed shown on the
+        # Notifications page and is the signal price the user references.
+        scanner_names = {f"scanner:{nm}": sym
+                         for sym, nm in assigned_strat.items()}
 
         all_sells = (
             db.query(Signal)
@@ -484,7 +484,7 @@ def pnl_open_trails(db: Session = Depends(get_db)):
                 Signal.symbol.in_(list(assigned_strat.keys())),
                 Signal.direction == "SELL",
                 Signal.price_at_signal.isnot(None),
-                Signal.strategy_name.in_(name_variants),
+                Signal.strategy_name.in_(list(scanner_names.keys())),
             )
             .order_by(Signal.created_at.asc())   # earliest first
             .all()
@@ -493,10 +493,8 @@ def pnl_open_trails(db: Session = Depends(get_db)):
             sym = s.symbol.upper()
             if sym in fallback_sig:
                 continue  # already have the FIRST qualifying signal
-            # Confirm this signal's strategy is THIS symbol's assigned strategy.
-            asgn_name = assigned_strat.get(sym)
-            sname = (s.strategy_name or "").replace("scanner:", "")
-            if sname != asgn_name:
+            # Confirm this scanner signal belongs to THIS symbol's assigned strategy.
+            if scanner_names.get(s.strategy_name) != sym:
                 continue
             # Only signals fired AFTER the position was acquired.
             buy_t = earliest_buy.get(sym)
