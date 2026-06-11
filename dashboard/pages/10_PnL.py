@@ -354,9 +354,11 @@ st.caption(
     "**Last** = current quote. **Move since signal** = (last − signal) / signal — "
     "green means the position is still above the signal price (trail riding extra upside), "
     "red means it has fallen below the signal price. "
-    "**Trail trigger** = the resting STOP level (floor), the % trail width, or "
-    "**⚠ no resting trail** when a SELL signal fired but no protective stop is currently "
-    "resting (the signal was scanner-path or the trail order isn't detectable — worth checking)."
+    "**Trail trigger** = the resting STOP level (floor) or % trail width once armed. "
+    "When no order is resting yet, it shows the **~estimated** level the trail would sit at "
+    "if armed now (floor = signal + 0.25%, or the % trail from the current price, whichever "
+    "is higher) followed by ⚠ — so you can see the protective level before the scheduler "
+    "actually places the order."
 )
 
 try:
@@ -402,6 +404,13 @@ else:
         if ot == "STOP" and row.get("stop_price") is not None:
             return _money_at(row, "stop_price")
         if ot == "SIGNAL_ONLY":
+            # No order resting yet — show what the trail WOULD sit at if armed.
+            est = row.get("est_trail_trigger")
+            tp = row.get("trail_pct")
+            if est is not None:
+                cur = _cur_at(row)
+                tail = f" ({float(tp):.1f}% trail)" if tp else ""
+                return f"~{cur}{float(est):,.2f} est.{tail} ⚠"
             return "⚠ no resting trail"
         if row.get("stop_price") is not None:
             return _money_at(row, "stop_price")

@@ -135,13 +135,19 @@ class OpenTrailOut(BaseModel):
     signal_strategy: Optional[str]     # which strategy fired it
     order_type: Optional[str]          # "STOP" (floor) | "TRAILING_STOP" (native %)
     stop_price: Optional[float]        # current stop trigger (STOP orders only)
-    trail_pct: Optional[float]         # trail width % (TRAILING_STOP orders)
+    trail_pct: Optional[float]         # trail width % (TRAILING_STOP / config)
     armed_at: Optional[datetime]       # when the trail order was submitted
     days_armed: Optional[float]        # days since the trail was armed
 
     # Computed live status
     move_since_signal_pct: Optional[float]  # (last - signal) / signal × 100
     trail_helping: Optional[bool]           # True if last_price > signal_price now
+
+    # Estimated trail trigger when no order is resting yet (SIGNAL_ONLY): the
+    # level the trail WOULD sit at = max(signal floor, last × (1 - trail_pct)).
+    # Floor = signal × (1 + 0.25% buffer). Lets the user see the protective
+    # level before the reconciliation actually arms the broker order.
+    est_trail_trigger: Optional[float] = None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -459,6 +465,7 @@ def pnl_open_trails(db: Session = Depends(get_db)):
     from app.models.assignments import SymbolStrategyAssignment
 
     assigned_strat: dict[str, str] = {}
+    assigned_trail_pct: dict[str, float] = {}   # per-symbol tight_trail_pct (default 2%)
     if symbols:
         for a in (
             db.query(SymbolStrategyAssignment)
@@ -469,6 +476,7 @@ def pnl_open_trails(db: Session = Depends(get_db)):
             .all()
         ):
             assigned_strat[a.symbol.upper()] = a.strategy_name
+            assigned_trail_pct[a.symbol.upper()] = float(a.tight_trail_pct or 2.0)
 
     fallback_sig: dict[str, Signal] = {}
     if assigned_strat:
@@ -562,6 +570,21 @@ def pnl_open_trails(db: Session = Depends(get_db)):
             except Exception:
                 days_armed = None
 
+        # Estimated trail trigger — what the trail WOULD sit at if armed right
+        # now. Mirrors tighten_trail_on_sell: floor = signal × (1 + 0.25%);
+        # native trail = last × (1 - trail_pct%); the trigger is the HIGHER of
+        # the two (we never park below the signal floor). Only meaningful while
+        # SIGNAL_ONLY; once a real order is resting, stop_price/trail_pct apply.
+        est_trail_trigger = None
+        if order_type == "SIGNAL_ONLY" and sig_price and sig_price > 0:
+            _tp = assigned_trail_pct.get(sym, 2.0)
+            floor = sig_price * 1.0025
+            native = (last_px * (1.0 - _tp / 100.0)) if last_px else 0.0
+            est_trail_trigger = round(max(floor, native), 2)
+            # Surface the trail width so the UI can show "2.0% trail" context.
+            if trail_pct is None:
+                trail_pct = _tp
+
         out.append(OpenTrailOut(
             symbol=sym,
             quantity=pos.get("quantity"),
@@ -581,6 +604,7 @@ def pnl_open_trails(db: Session = Depends(get_db)):
             days_armed=days_armed,
             move_since_signal_pct=move_pct,
             trail_helping=helping,
+            est_trail_trigger=est_trail_trigger,
         ))
 
     out.sort(key=lambda r: (r.move_since_signal_pct or -999), reverse=True)
