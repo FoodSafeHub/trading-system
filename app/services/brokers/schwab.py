@@ -351,20 +351,34 @@ class SchwabBroker(BrokerBase):
                 "assetType": "EQUITY",
             },
         }
+        # Schwab expects full duration words, not our abbreviations. Without
+        # this map a GTC STOP is rejected with "Invalid value 'GTC'".
+        _DURATION = {
+            "DAY": "DAY",
+            "GTC": "GOOD_TILL_CANCEL",
+            "GOOD_TILL_CANCEL": "GOOD_TILL_CANCEL",
+            "FOK": "FILL_OR_KILL",
+            "IOC": "IMMEDIATE_OR_CANCEL",
+        }
         payload: dict = {
             "orderType": order.order_type,
             "session": session,
-            "duration": order.time_in_force,
+            "duration": _DURATION.get(order.time_in_force, "DAY"),
             "orderStrategyType": "SINGLE",
             "orderLegCollection": [leg],
         }
         if order.order_type == "TRAILING_STOP":
-            # Schwab trailing stop API fields:
-            # stopPriceLinkType: PERCENT (% of price) or VALUE ($ amount)
-            # stopPriceOffset:   the trail distance
+            # Schwab trailing stop API fields (all three required):
+            #   stopPriceLinkBasis: the reference price the offset trails from
+            #                       (LAST is standard; MARK/BID/ASK also valid).
+            #                       Schwab rejects the order without this:
+            #                       "Stop price link basis must be populated".
+            #   stopPriceLinkType:  PERCENT (% of basis) or VALUE ($ amount)
+            #   stopPriceOffset:    the trail distance
             # Must be GTC so the trail survives past the entry bar.
             payload["orderType"] = "TRAILING_STOP"
             trail_val = order.trail_value or 5.0
+            payload["stopPriceLinkBasis"] = "LAST"
             payload["stopPriceLinkType"] = "VALUE" if order.trail_type == "DOLLAR" else "PERCENT"
             payload["stopPriceOffset"] = trail_val
             payload["duration"] = "GOOD_TILL_CANCEL"
