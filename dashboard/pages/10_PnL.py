@@ -341,24 +341,22 @@ else:
     )
     st.caption(f"{len(df_show):,} trade(s) shown. Money shown in each row's broker currency (₹ for Zerodha, $ otherwise).")
 
-# ── Armed Tight Trails (Open Positions) ───────────────────────────────────────
+# ── Tight Trails on Open Positions ────────────────────────────────────────────
 st.divider()
 section(
-    "Armed Tight Trails — Open Positions",
-    "Positions that received a SELL signal where the tight trailing stop is now armed "
-    "but the position has NOT exited yet. Track whether the trail is currently letting "
-    "the position ride above the signal price (helping) or sitting below it.",
+    "Tight Trails — Open Positions",
+    "Held positions whose assigned strategy fired a SELL signal. "
+    "**Protection** tells you whether a real trailing stop is actually resting on the "
+    "broker (🟢 ARMED) or whether the trail trigger shown is only a preview (🔴 NOT ARMED). "
+    "A NOT-ARMED position is currently unprotected — nothing will auto-close it.",
 )
 st.caption(
-    "**Signal price** = price when the strategy SELL signal fired. "
-    "**Last** = current quote. **Move since signal** = (last − signal) / signal — "
-    "green means the position is still above the signal price (trail riding extra upside), "
-    "red means it has fallen below the signal price. "
-    "**Trail trigger** = the resting STOP level (floor) or % trail width once armed. "
-    "When no order is resting yet, it shows the **~estimated** level the trail would sit at "
-    "if armed now (floor = signal + 0.25%, or the % trail from the current price, whichever "
-    "is higher) followed by ⚠ — so you can see the protective level before the scheduler "
-    "actually places the order."
+    "**Protection** — 🟢 ARMED means a live STOP/TRAILING_STOP is resting at the broker; it "
+    "ratchets up automatically and auto-closes when price hits it. 🔴 NOT ARMED means no order "
+    "is resting yet — the trail trigger is only an estimate and will NOT close the position. "
+    "**Trail trigger** — the live order's level (marked *live*) once armed, or a peak-based "
+    "**estimate** (peak since signal × (1 − trail%), floored at signal + 0.25%) marked "
+    "*NOT live* before arming. **Move since signal** = (last − signal) / signal."
 )
 
 try:
@@ -369,20 +367,33 @@ except Exception as exc:
 
 if not _armed:
     st.info(
-        "No armed tight trails right now. This populates when an assigned/consensus "
-        "strategy fires a SELL on a held position and the scheduler arms its trailing "
-        "stop (instead of market-selling). Requires the scheduler's tight-trail feature."
+        "No held position currently has a SELL signal from its assigned strategy. "
+        "This populates when an assigned strategy fires a SELL on a position you hold."
     )
 else:
-    # Summary tiles
+    # Protection split — surface unprotected positions loudly.
+    _n_armed = sum(1 for r in _armed if r.get("order_type") in ("STOP", "TRAILING_STOP"))
+    _n_unarmed = len(_armed) - _n_armed
+    if _n_unarmed:
+        _syms = ", ".join(r["symbol"] for r in _armed
+                          if r.get("order_type") not in ("STOP", "TRAILING_STOP"))
+        st.warning(
+            f"⚠️ **{_n_unarmed} position(s) NOT protected:** {_syms}. "
+            "A SELL signal fired but no trailing stop is resting on the broker yet, so "
+            "nothing will auto-close them. The scheduler arms the trail on its next live "
+            "cycle (every 15 min, market hours) — restart the API server if it hasn't picked "
+            "up the latest code. The 'Trail trigger' below is only an estimate until armed.",
+            icon="⚠️",
+        )
+
     _n_help = sum(1 for r in _armed if r.get("trail_helping") is True)
     _n_hurt = sum(1 for r in _armed if r.get("trail_helping") is False)
     _moves = [r["move_since_signal_pct"] for r in _armed if r.get("move_since_signal_pct") is not None]
     _avg_move = round(sum(_moves) / len(_moves), 2) if _moves else 0.0
     kpi_row([
-        ("Armed trails", str(len(_armed))),
-        ("Riding above signal", f"{_n_help}"),
-        ("Below signal", f"{_n_hurt}"),
+        ("Positions", str(len(_armed))),
+        ("🟢 Protected (armed)", f"{_n_armed}"),
+        ("🔴 Unprotected", f"{_n_unarmed}"),
         ("Avg move since signal", f"{_avg_move:+.2f}%"),
     ])
 
@@ -397,47 +408,57 @@ else:
         cur = _cur_at(row)
         return f"{cur}{float(row[col]):+,.2f}" if signed else f"{cur}{float(row[col]):,.2f}"
 
+    def _is_armed(row) -> bool:
+        return row.get("order_type") in ("STOP", "TRAILING_STOP")
+
+    def _protection(row) -> str:
+        if _is_armed(row):
+            return "🟢 ARMED (live stop)"
+        return "🔴 NOT ARMED (estimate only)"
+
     def _trigger_at(row) -> str:
         ot = row.get("order_type")
+        cur = _cur_at(row)
+        # Real resting order → the live trigger.
         if ot == "TRAILING_STOP" and row.get("trail_pct"):
-            return f"{float(row['trail_pct']):.1f}% trail"
+            return f"{float(row['trail_pct']):.1f}% trail (live)"
         if ot == "STOP" and row.get("stop_price") is not None:
-            return _money_at(row, "stop_price")
+            return f"{_money_at(row, 'stop_price')} (live)"
+        # No order resting → estimate only, clearly NOT protecting.
         if ot == "SIGNAL_ONLY":
-            # No order resting yet — show what the trail WOULD sit at if armed.
             est = row.get("est_trail_trigger")
             tp = row.get("trail_pct")
             if est is not None:
-                cur = _cur_at(row)
-                tail = f" ({float(tp):.1f}% trail)" if tp else ""
-                return f"~{cur}{float(est):,.2f} est.{tail} ⚠"
-            return "⚠ no resting trail"
+                tail = f" {float(tp):.1f}%" if tp else ""
+                return f"~{cur}{float(est):,.2f} est.{tail} — NOT live"
+            return "— NOT live (no estimate)"
         if row.get("stop_price") is not None:
-            return _money_at(row, "stop_price")
+            return f"{_money_at(row, 'stop_price')} (live)"
         return "—"
 
     def _signal_when(row) -> str:
         sa = row.get("signal_at") or row.get("armed_at")
         return str(sa)[:16].replace("T", " ") if sa else "—"
 
-    df_at["_sig_px"]   = df_at.apply(lambda r: _money_at(r, "signal_price"), axis=1)
-    df_at["_last"]     = df_at.apply(lambda r: _money_at(r, "last_price"), axis=1)
-    df_at["_upnl"]     = df_at.apply(lambda r: _money_at(r, "unrealized_pnl", signed=True), axis=1)
-    df_at["_trigger"]  = df_at.apply(_trigger_at, axis=1)
-    df_at["_sig_when"] = df_at.apply(_signal_when, axis=1)
-    df_at["_status"]   = df_at["trail_helping"].apply(
+    df_at["_sig_px"]    = df_at.apply(lambda r: _money_at(r, "signal_price"), axis=1)
+    df_at["_last"]      = df_at.apply(lambda r: _money_at(r, "last_price"), axis=1)
+    df_at["_upnl"]      = df_at.apply(lambda r: _money_at(r, "unrealized_pnl", signed=True), axis=1)
+    df_at["_trigger"]   = df_at.apply(_trigger_at, axis=1)
+    df_at["_sig_when"]  = df_at.apply(_signal_when, axis=1)
+    df_at["_protection"] = df_at.apply(_protection, axis=1)
+    df_at["_status"]    = df_at["trail_helping"].apply(
         lambda v: "🟢 Riding" if v is True else ("🔴 Below signal" if v is False else "—")
     )
 
     df_at_show = df_at[[
         "symbol", "quantity", "signal_strategy", "_sig_when", "_sig_px",
-        "_last", "move_since_signal_pct", "_trigger", "_upnl", "_status",
-        "days_armed", "broker",
+        "_last", "move_since_signal_pct", "_protection", "_trigger", "_upnl",
+        "_status", "days_armed", "broker",
     ]].copy()
     df_at_show.columns = [
         "Symbol", "Qty", "Strategy", "Signal fired", "Signal price",
-        "Last", "Move since signal", "Trail trigger", "Unrealized", "Status",
-        "Days since signal", "Broker",
+        "Last", "Move since signal", "Protection", "Trail trigger", "Unrealized",
+        "Status", "Days since signal", "Broker",
     ]
     st.dataframe(
         df_at_show,
@@ -450,8 +471,10 @@ else:
         },
     )
     st.caption(
-        f"{len(df_at_show)} armed trail(s). The position stays open until the trailing "
-        "stop fills; once it does, the trade moves to the Trail Stop Audit below."
+        f"{len(df_at_show)} position(s) · {_n_armed} protected, {_n_unarmed} unprotected. "
+        "Once a trailing stop is ARMED, the broker auto-ratchets it up and auto-closes the "
+        "position when price hits it — the trade then moves to the Trail Stop Audit below. "
+        "A 🔴 NOT ARMED row has no live stop and will not auto-close until the scheduler arms it."
     )
 
 # ── Trail Stop Audit ─────────────────────────────────────────────────────────
