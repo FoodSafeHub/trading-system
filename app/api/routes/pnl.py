@@ -200,6 +200,32 @@ def _naive(dt):
     return dt.replace(tzinfo=None) if getattr(dt, "tzinfo", None) else dt
 
 
+def _peak_since(symbol: str, since_dt) -> float:
+    """Highest traded price for `symbol` since `since_dt` (the SELL signal time).
+
+    Used to estimate where a trailing stop WOULD sit before it's armed. A real
+    trailing stop ratchets off the PEAK since arming — never the current price —
+    so the estimate must use the high-water mark, not the live quote. Returns
+    0.0 on any failure (caller falls back to current price / floor).
+    """
+    try:
+        from app.services.market_data.provider import get_ohlcv
+        df = get_ohlcv(symbol, period="3mo")
+        if df is None or df.empty:
+            return 0.0
+        col = "High" if "High" in df.columns else "Close"
+        if since_dt is not None:
+            try:
+                sliced = df.loc[str(_naive(since_dt))[:10]:]
+                if not sliced.empty:
+                    return float(sliced[col].max())
+            except Exception:
+                pass
+        return float(df[col].max())
+    except Exception:
+        return 0.0
+
+
 def _broker_resting_sell_stops() -> dict[str, dict]:
     """Query the active broker for WORKING SELL STOP/TRAILING_STOP orders.
 
@@ -570,18 +596,26 @@ def pnl_open_trails(db: Session = Depends(get_db)):
             except Exception:
                 days_armed = None
 
-        # Estimated trail trigger — what the trail WOULD sit at if armed right
-        # now. Mirrors tighten_trail_on_sell: floor = signal × (1 + 0.25%);
-        # native trail = last × (1 - trail_pct%); the trigger is the HIGHER of
-        # the two (we never park below the signal floor). Only meaningful while
-        # SIGNAL_ONLY; once a real order is resting, stop_price/trail_pct apply.
+        # Estimated trail trigger — what the trail WOULD sit at if armed now.
+        # A trailing stop RATCHETS off the PEAK since the signal, never the
+        # current price, so it can only move UP. Mirrors tighten_trail_on_sell:
+        #   floor  = signal × (1 + 0.25%)        (never park below the signal)
+        #   native = peak_since_signal × (1 - trail_pct%)
+        #   trigger = max(floor, native)
+        # Only meaningful while SIGNAL_ONLY; once a real order rests the
+        # broker-managed trigger (stop_price / trail_pct) applies.
         est_trail_trigger = None
         if order_type == "SIGNAL_ONLY" and sig_price and sig_price > 0:
             _tp = assigned_trail_pct.get(sym, 2.0)
             floor = sig_price * 1.0025
-            native = (last_px * (1.0 - _tp / 100.0)) if last_px else 0.0
+            sig_time = sig.created_at if sig else None
+            peak = _peak_since(sym, sig_time)
+            if peak <= 0:
+                # No history — fall back to the larger of last/signal so we
+                # never imply a trail below where price has actually been.
+                peak = max(last_px or 0.0, sig_price)
+            native = peak * (1.0 - _tp / 100.0)
             est_trail_trigger = round(max(floor, native), 2)
-            # Surface the trail width so the UI can show "2.0% trail" context.
             if trail_pct is None:
                 trail_pct = _tp
 
