@@ -338,10 +338,18 @@ class SchwabBroker(BrokerBase):
         from app.utils.time_utils import is_market_hours
         s = self._settings
         in_regular = is_market_hours(s.trading_start_time, s.trading_end_time, s.tz)
-        if order.order_type == "MARKET":
+        # Schwab session rules for extended hours (SEAMLESS):
+        #   - Only LIMIT orders are eligible for extended-hours (SEAMLESS).
+        #   - MARKET, STOP, STOP_LIMIT, TRAILING_STOP are NOT extended-hours
+        #     eligible — they must use NORMAL, which queues them for the next
+        #     regular session. Sending them as SEAMLESS is rejected:
+        #     "'SEAMLESS' session must be a LIMIT order".
+        if in_regular:
             session = "NORMAL"
+        elif order.order_type == "LIMIT":
+            session = "SEAMLESS"   # extended-hours LIMIT is allowed
         else:
-            session = "NORMAL" if in_regular else "SEAMLESS"
+            session = "NORMAL"     # stop/market/trailing → queue for next open
 
         leg = {
             "instruction": order.side,  # BUY | SELL
