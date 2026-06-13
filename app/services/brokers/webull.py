@@ -50,11 +50,28 @@ WEBULL_BASE_URL = f"https://{WEBULL_HOST}"
 # Order-side enum used by Webull's /trade/order/place stock_order.side.
 _SIDE_MAP = {"BUY": "BUY", "SELL": "SELL"}
 # OrderType maps our enum to Webull's stock_order.order_type strings.
+# (Confirmed against webullsdktrade.common.order_type.OrderType.)
 _ORDER_TYPE_MAP = {
-    "MARKET":     "MARKET",
-    "LIMIT":      "LIMIT",
-    "STOP":       "STOP_LOSS",
-    "STOP_LIMIT": "STOP_LOSS_LIMIT",
+    "MARKET":        "MARKET",
+    "LIMIT":         "LIMIT",
+    "STOP":          "STOP_LOSS",
+    "STOP_LIMIT":    "STOP_LOSS_LIMIT",
+    "TRAILING_STOP": "TRAILING_STOP_LOSS",
+}
+# Our trail_type → Webull trailing_type (webullsdktrade.common.trailing_type).
+_TRAILING_TYPE_MAP = {
+    "PERCENT": "PERCENTAGE",
+    "DOLLAR":  "AMOUNT",
+}
+# Reverse: normalize Webull's order_type strings back to OUR enums on read-back
+# so the scheduler's "find resting SELL stops" and the PnL trail audit (which
+# filter on order_type in STOP/TRAILING_STOP) recognize Webull orders.
+_ORDER_TYPE_REVERSE = {
+    "MARKET":             "MARKET",
+    "LIMIT":              "LIMIT",
+    "STOP_LOSS":          "STOP",
+    "STOP_LOSS_LIMIT":    "STOP_LIMIT",
+    "TRAILING_STOP_LOSS": "TRAILING_STOP",
 }
 # Time-in-force passthrough — Webull names align with ours.
 _TIF_MAP = {"DAY": "DAY", "GTC": "GTC", "IOC": "IOC", "FOK": "FOK"}
@@ -349,6 +366,13 @@ class WebullBroker(BrokerBase):
             stock_order["limit_price"] = str(order.limit_price)
         if order.order_type in ("STOP", "STOP_LIMIT") and order.stop_price is not None:
             stock_order["stop_price"] = str(order.stop_price)
+        if order.order_type == "TRAILING_STOP":
+            # Webull TRAILING_STOP_LOSS needs trailing_type + trailing_stop_step
+            # (the trail distance: a % when PERCENTAGE, a $ amount when AMOUNT).
+            t_type = _TRAILING_TYPE_MAP.get(order.trail_type or "PERCENT", "PERCENTAGE")
+            stock_order["trailing_type"] = t_type
+            if order.trail_value is not None:
+                stock_order["trailing_stop_step"] = str(order.trail_value)
         return {
             "account_id":  account_id,
             "category":    "US_STOCK",
@@ -425,7 +449,10 @@ class WebullBroker(BrokerBase):
             ),
             symbol=str(data.get("symbol") or "").upper(),
             side=str(data.get("side") or ""),
-            order_type=str(data.get("order_type") or data.get("orderType") or ""),
+            order_type=_ORDER_TYPE_REVERSE.get(
+                str(data.get("order_type") or data.get("orderType") or "").upper(),
+                str(data.get("order_type") or data.get("orderType") or ""),
+            ),
             quantity=_to_float(
                 data.get("qty") or data.get("quantity") or data.get("totalQuantity")
             ) or 0.0,
