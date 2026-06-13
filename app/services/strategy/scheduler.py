@@ -12,6 +12,7 @@ import threading
 from collections import defaultdict
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import get_settings
@@ -956,6 +957,21 @@ def _run_scanner_job() -> None:
 _POSITION_SYNC_INTERVAL_SECONDS = 900   # 15 min — cheap broker read
 
 
+def _run_m1_daily_scan_job(session_label: str) -> None:
+    """Scheduled M1 SIP advisor scan (advisory only — emits a notification digest).
+
+    Fires pre-open and post-close. Does NOT place orders; it dip-weights the
+    pie analysis and writes an M1 notification + toast. See
+    app/services/m1/daily_scan.py.
+    """
+    try:
+        from app.services.m1.daily_scan import run_daily_m1_scan
+        summary = run_daily_m1_scan(session_label=session_label)
+        logger.info("[scheduler] M1 %s scan: %s", session_label, summary)
+    except Exception as exc:
+        logger.exception("[scheduler] M1 %s scan failed: %s", session_label, exc)
+
+
 def _run_gtc_fill_sync_job() -> None:
     """Poll the broker for fills on submitted GTC orders and update the DB.
 
@@ -1286,6 +1302,31 @@ def start_scheduler() -> None:
         name="GTC Order Fill Sync",
         replace_existing=True,
         max_instances=1,
+    )
+    # ── M1 SIP advisor — daily scans (advisory only, emits notifications) ──
+    # Pre-open digest (~9:00 ET) and post-close review (~16:15 ET), in US/Eastern
+    # so DST is handled automatically.
+    _scheduler.add_job(
+        _run_m1_daily_scan_job,
+        args=["pre-open"],
+        trigger=CronTrigger(day_of_week="mon-fri", hour=9, minute=0, timezone="US/Eastern"),
+        id="m1_scan_preopen",
+        name="M1 SIP Advisor — Pre-Open",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+    _scheduler.add_job(
+        _run_m1_daily_scan_job,
+        args=["post-close"],
+        trigger=CronTrigger(day_of_week="mon-fri", hour=16, minute=15, timezone="US/Eastern"),
+        id="m1_scan_postclose",
+        name="M1 SIP Advisor — Post-Close",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+        coalesce=True,
     )
     _scheduler.start()
     logger.info(

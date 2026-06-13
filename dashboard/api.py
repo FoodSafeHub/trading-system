@@ -85,6 +85,31 @@ def _delete(path: str, timeout: int = 10, **kwargs):
 def health():
     return _get("/health")
 
+def m1_analyze(contribution: float = 0.0, tilt_mode: str = "aggressive", period: str = "1y"):
+    return _get(
+        "/m1/analyze",
+        timeout=300,
+        params={"contribution": contribution, "tilt_mode": tilt_mode, "period": period},
+    )
+
+def m1_analyze_pies(contribution: float = 0.0, tilt_mode: str = "aggressive",
+                    pie_split_mode: str = "conviction", period: str = "1y"):
+    return _get(
+        "/m1/analyze_pies",
+        timeout=300,
+        params={"contribution": contribution, "tilt_mode": tilt_mode,
+                "pie_split_mode": pie_split_mode, "period": period},
+    )
+
+def m1_targets(contribution: float = 0.0, period: str = "1y",
+               max_stock_weight: float = 0.10, max_pie_weight: float = 0.35):
+    return _get(
+        "/m1/targets",
+        timeout=300,
+        params={"contribution": contribution, "period": period,
+                "max_stock_weight": max_stock_weight, "max_pie_weight": max_pie_weight},
+    )
+
 def scanner_status():
     return _get("/scanner/status")
 

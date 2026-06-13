@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import account, assignments, backtest, chart, daytrading, health, notifications, orders, perplexity, pnl, recommendations, risk, rs_rotation, scanner, settings as settings_routes, signals, strategy, schwab_auth, webull_auth, zerodha_auth, upstox_auth
+from app.api.routes import account, assignments, backtest, chart, daytrading, health, m1, notifications, orders, perplexity, pnl, recommendations, risk, rs_rotation, scanner, settings as settings_routes, signals, strategy, schwab_auth, webull_auth, zerodha_auth, upstox_auth
 from app.config import get_settings
 from app.db import init_db
 from app.services.strategy.scheduler import start_scheduler, stop_scheduler
@@ -134,6 +134,7 @@ app.include_router(notifications.router)
 app.include_router(pnl.router)
 app.include_router(recommendations.router)
 app.include_router(rs_rotation.router)
+app.include_router(m1.router)
 
 # ── Static files ─────────────────────────────────────────────
 try:

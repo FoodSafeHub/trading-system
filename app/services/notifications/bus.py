@@ -103,3 +103,42 @@ def notify_signal(
 
     _toast(title, body)
     return new_id
+
+
+def notify_m1(
+    *,
+    title: str,
+    body: str,
+    symbol: Optional[str] = None,
+    direction: Optional[str] = None,
+    price: Optional[float] = None,
+    toast: bool = True,
+) -> Optional[int]:
+    """Emit an M1-portfolio notification — NOT gated on assignments.
+
+    The M1 advisor's symbols aren't broker assignments, so notify_signal would
+    suppress them. This path always writes (source='m1') and optionally toasts.
+    """
+    try:
+        with SessionLocal() as db:
+            row = Notification(
+                kind="signal",
+                symbol=(symbol or "").upper() or None,
+                direction=(direction or "").upper() or None,
+                strategy="m1_advisor",
+                source="m1",
+                price=price,
+                title=title[:256],
+                body=body,
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+            new_id = row.id
+    except Exception as exc:
+        logger.warning("notify_m1 db write failed: %s", exc)
+        return None
+
+    if toast:
+        _toast(title, body)
+    return new_id
