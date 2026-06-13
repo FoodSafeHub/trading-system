@@ -411,9 +411,19 @@ else:
     def _is_armed(row) -> bool:
         return row.get("order_type") in ("STOP", "TRAILING_STOP")
 
+    def _is_india(row) -> bool:
+        return str(row.get("broker", "")).lower() == "zerodha"
+
     def _protection(row) -> str:
-        if _is_armed(row):
-            return "🟢 ARMED (live stop)"
+        ot = row.get("order_type")
+        if ot == "TRAILING_STOP":
+            return "🟢 ARMED (broker trails)"
+        if ot == "STOP":
+            # A static STOP is the EXPECTED protection on Zerodha (no native
+            # trailing on Kite) — the Chandelier job ratchets it every 15 min.
+            if _is_india(row):
+                return "🟢 ARMED (static stop · Chandelier ratchets)"
+            return "🟢 ARMED (static stop)"
         return "🔴 NOT ARMED (estimate only)"
 
     def _trigger_at(row) -> str:
@@ -474,7 +484,10 @@ else:
         f"{len(df_at_show)} position(s) · {_n_armed} protected, {_n_unarmed} unprotected. "
         "Once a trailing stop is ARMED, the broker auto-ratchets it up and auto-closes the "
         "position when price hits it — the trade then moves to the Trail Stop Audit below. "
-        "A 🔴 NOT ARMED row has no live stop and will not auto-close until the scheduler arms it."
+        "A 🔴 NOT ARMED row has no live stop and will not auto-close until the scheduler arms it. "
+        "India (Zerodha) positions show **static stop · Chandelier ratchets** — Kite has no "
+        "native trailing-stop order, so the bot places a static STOP and ratchets it up every "
+        "15 min during market hours. That's the expected, fully-protected state for India names."
     )
 
 # ── Trail Stop Audit ─────────────────────────────────────────────────────────

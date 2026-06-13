@@ -12,6 +12,14 @@ class BrokerBase(ABC):
 
     name: str = "base"
 
+    # Whether the broker accepts a native TRAILING_STOP order type that it
+    # ratchets server-side. Brokers that DON'T (e.g. Zerodha/Kite, which
+    # removed trailing SL years ago) must set this False so the execution
+    # layer places a static STOP instead and relies on the Chandelier job to
+    # ratchet it. Defaults False so an unset adapter is treated as "no native
+    # trail" — fail safe (a static stop), never a silent MARKET conversion.
+    supports_native_trailing_stop: bool = False
+
     @abstractmethod
     async def authenticate(self) -> None:
         """Perform initial authentication / load stored tokens."""

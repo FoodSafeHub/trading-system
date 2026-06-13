@@ -81,6 +81,7 @@ class WebullBroker(BrokerBase):
     """Webull OpenAPI broker adapter (signed HMAC-SHA1, US region)."""
 
     name = "webull"
+    supports_native_trailing_stop = True  # native TRAILING_STOP_LOSS order type
 
     def __init__(self) -> None:
         self._settings = get_settings()

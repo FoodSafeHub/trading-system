@@ -161,6 +161,50 @@ class ExecutionService:
 
         return db_order
 
+    def _volatility_trail_pct(self, symbol: str, price: float) -> float:
+        """Volatility-aware trail %: ATR% (ATR/price × 100) scaled by a
+        multiplier that adjusts for how volatile the symbol is.
+
+        ATR% buckets (based on 22-day ATR as % of price):
+            < 1.5%  → low-vol  (KO, XOM, SO)    → 2.0× ATR trail (~2.5–3%)
+            1.5–3%  → mid-vol  (NVDA, BAC, COP) → 2.5× ATR trail (~4–7%)
+            3–4.5%  → high-vol (NVDA, TSLA)     → 2.0× ATR trail (~7–9%)
+            > 4.5%  → very-high (TOST, PLTR)    → 1.5× ATR trail (~7–9%)
+
+        Low-vol names get a tighter trail (less slippage on exit); high-vol
+        names get breathing room (normal pullbacks won't shake them out).
+        Floored at 1.5% (never choke) and capped at 10% (never give back more
+        than a solid swing move). Falls back to settings.trail_stop_pct when
+        OHLCV/ATR is unavailable.
+        """
+        settings = get_settings()
+        trail_pct = settings.trail_stop_pct  # fallback
+        try:
+            from app.services.market_data.provider import get_ohlcv
+            from app.services.strategy.rules import _atr_raw
+            df = get_ohlcv(symbol, period="3mo")
+            if not df.empty and len(df) >= 22:
+                atr = float(_atr_raw(df, 22).iloc[-1])
+                if price > 0 and atr > 0:
+                    atr_pct = (atr / price) * 100
+                    if atr_pct < 1.5:
+                        mult = 2.0
+                    elif atr_pct < 3.0:
+                        mult = 2.5
+                    elif atr_pct < 4.5:
+                        mult = 2.0
+                    else:
+                        mult = 1.5
+                    trail_pct = max(1.5, min(10.0, round(atr_pct * mult, 2)))
+                    logger.info(
+                        "[exec] Volatility trail %s: ATR=%.2f (%.1f%% of price) "
+                        "× %.1f → trail=%.2f%%",
+                        symbol, atr, atr_pct, mult, trail_pct,
+                    )
+        except Exception as exc:
+            logger.debug("[exec] ATR trail compute failed, using pct fallback: %s", exc)
+        return trail_pct
+
     async def _submit_protective_stop(
         self,
         buy_req: OrderRequest,
@@ -194,64 +238,65 @@ class ExecutionService:
             return
         fill_price = fill.fill_price or 0.0
 
-        if settings.trailing_stop_enabled:
-            # Volatility-aware trail: use ATR% (ATR/price × 100) scaled by a
-            # multiplier that adjusts for how volatile the symbol is.
-            #
-            # ATR% buckets (based on 22-day ATR as % of price):
-            #   < 1.5%  → low-vol  (KO, XOM, SO)   → 2× ATR trail (~2.5–3%)
-            #   1.5–3%  → mid-vol  (NVDA, BAC, COP) → 2.5× ATR trail (~4–7%)
-            #   > 3%    → high-vol (TSLA, PLTR)      → 3× ATR trail (~9–12%)
-            #
-            # This means low-vol stocks get a tighter trail (less slippage on
-            # the exit) and high-vol stocks get breathing room (normal pullbacks
-            # won't shake them out).
-            trail_pct = settings.trail_stop_pct  # fallback
-            try:
-                from app.services.market_data.provider import get_ohlcv
-                from app.services.strategy.rules import _atr_raw
-                df = get_ohlcv(buy_req.symbol, period="3mo")
-                if not df.empty and len(df) >= 22:
-                    atr = float(_atr_raw(df, 22).iloc[-1])
-                    if fill_price > 0 and atr > 0:
-                        atr_pct = (atr / fill_price) * 100
-                        if atr_pct < 1.5:
-                            mult = 2.0     # low-vol:  KO, SO        → ~3%
-                        elif atr_pct < 3.0:
-                            mult = 2.5     # mid-vol:  XOM, BAC, COP → ~4–7%
-                        elif atr_pct < 4.5:
-                            mult = 2.0     # high-vol: NVDA, TSLA    → ~7–9%
-                        else:
-                            mult = 1.5     # very-high: TOST, PLTR   → ~7–9%
-                        trail_pct = round(atr_pct * mult, 2)
-                        # Floor 1.5% (never choke), ceiling 10% (never give
-                        # back more than a solid swing move).
-                        trail_pct = max(1.5, min(10.0, trail_pct))
-                        logger.info(
-                            "[exec] Volatility trail %s: ATR=%.2f (%.1f%% of price) "
-                            "× %.1f → trail=%.2f%%",
-                            buy_req.symbol, atr, atr_pct, mult, trail_pct,
-                        )
-            except Exception as exc:
-                logger.debug("[exec] ATR trail compute failed, using pct fallback: %s", exc)
+        # Brokers without a native trailing-stop order type (e.g. Zerodha/Kite)
+        # cannot accept a TRAILING_STOP — placing one would either be rejected
+        # or silently become a MARKET sell. For those, fall back to a static
+        # STOP (the Chandelier job ratchets it every 15 min during market hrs).
+        native_trail_ok = getattr(self.broker, "supports_native_trailing_stop", False)
 
-            stop_req = OrderRequest(
-                symbol=buy_req.symbol,
-                side="SELL",
-                order_type="TRAILING_STOP",
-                quantity=filled_qty,
-                trail_type="PERCENT",
-                trail_value=round(trail_pct, 2),
-                time_in_force="GTC",
-                source=buy_req.source,
-                idempotency_key=f"trailstop-{buy_req.idempotency_key}",
-            )
-            event_desc = (
-                f"SELL TRAILING_STOP {buy_req.symbol} x{filled_qty} "
-                f"trail={trail_pct:.1f}% (chandelier ATR, protects BUY {buy_req.idempotency_key})"
-            )
-            log_msg = "[exec] Trailing stop placed: %s x%.4f trail=%.1f%% broker_id=%s"
-            log_args = (buy_req.symbol, filled_qty, trail_pct)
+        if settings.trailing_stop_enabled:
+            # Volatility-aware trail %: ATR% (ATR/price × 100) scaled by a
+            # multiplier that adjusts for how volatile the symbol is. Computed
+            # the same way regardless of broker; how we PLACE it differs below.
+            trail_pct = self._volatility_trail_pct(buy_req.symbol, fill_price)
+
+            if native_trail_ok:
+                stop_req = OrderRequest(
+                    symbol=buy_req.symbol,
+                    side="SELL",
+                    order_type="TRAILING_STOP",
+                    quantity=filled_qty,
+                    trail_type="PERCENT",
+                    trail_value=round(trail_pct, 2),
+                    time_in_force="GTC",
+                    source=buy_req.source,
+                    idempotency_key=f"trailstop-{buy_req.idempotency_key}",
+                )
+                event_desc = (
+                    f"SELL TRAILING_STOP {buy_req.symbol} x{filled_qty} "
+                    f"trail={trail_pct:.1f}% (chandelier ATR, protects BUY {buy_req.idempotency_key})"
+                )
+                log_msg = "[exec] Trailing stop placed: %s x%.4f trail=%.1f%% broker_id=%s"
+                log_args = (buy_req.symbol, filled_qty, trail_pct)
+            else:
+                # No native trailing (Zerodha): place a static STOP at the same
+                # ATR-derived distance below fill. The Chandelier job ratchets
+                # it up on later highs, approximating a trailing stop.
+                if fill_price <= 0:
+                    logger.warning(
+                        "[exec] Protective stop skipped — no fill price for %s "
+                        "(broker has no native trailing stop)", buy_req.symbol,
+                    )
+                    return
+                stop_price = round(fill_price * (1 - trail_pct / 100.0), 2)
+                stop_req = OrderRequest(
+                    symbol=buy_req.symbol,
+                    side="SELL",
+                    order_type="STOP",
+                    quantity=filled_qty,
+                    stop_price=stop_price,
+                    time_in_force="GTC",
+                    source=buy_req.source,
+                    idempotency_key=f"trailstop-{buy_req.idempotency_key}",
+                )
+                event_desc = (
+                    f"SELL STOP {buy_req.symbol} x{filled_qty} @ {stop_price} "
+                    f"(static ATR trail={trail_pct:.1f}%, no native trailing on "
+                    f"{getattr(self.broker, 'name', '?')}; Chandelier ratchets — "
+                    f"protects BUY {buy_req.idempotency_key})"
+                )
+                log_msg = "[exec] Static ATR stop placed: SELL STOP %s x%.4f @ %.2f broker_id=%s"
+                log_args = (buy_req.symbol, filled_qty, stop_price)  # type: ignore[assignment]
         else:
             # Legacy fixed STOP fallback
             fill_price_safe = fill_price or 0.0
@@ -312,6 +357,7 @@ class ExecutionService:
         source: str = "scheduler",
         idempotency_suffix: str = "",
         signal_id: Optional[int] = None,
+        force_replace: bool = False,
     ) -> bool:
         """Cancel any resting STOP/TRAILING_STOP for a symbol, then place a
         tight trailing stop in its place.
@@ -320,6 +366,17 @@ class ExecutionService:
         signal. Other strategies signalling SELL on the same symbol are ignored
         — the caller (scheduler._run_cycle) is already filtered to assigned-
         strategy signals only via the signals_to_act list.
+
+        Idempotent across cycles: the scheduler re-evaluates every ~30s and a
+        SELL condition typically persists for many cycles. If a healthy resting
+        SELL STOP/TRAILING_STOP already protects this symbol we RETURN EARLY
+        (treated as success) WITHOUT cancel-and-replace. Re-placing every cycle
+        would reset a broker-native trail's ratchet back to the current price
+        (so it could never climb) and churn cancel/replace orders on brokers
+        without a native trail (Zerodha), opening a brief unprotected window
+        each cycle. The existing trail keeps ratcheting on its own — native
+        (Schwab/Webull) or via the Chandelier job (Zerodha). Pass
+        force_replace=True to re-arm regardless (e.g. trail params changed).
 
         trail_pct defaults to 2.0% — wider than 1% to absorb normal intraday
         noise before exiting, while still being tight enough to capture most of
@@ -336,27 +393,52 @@ class ExecutionService:
         signal_id: the Signal row id for this SELL signal. Linked to the trail
         order so PnL audit can show signal_price vs actual exit price.
 
-        Returns True if the protective order was placed, False on failure
-        (no fallback market sell — see below).
+        Returns True if the protective order was placed OR a healthy trail was
+        already resting; False on failure (no fallback market sell — see below).
         """
-        # Step 1: cancel any resting sell-side stops
+        # Step 0: idempotency guard. Fetch working orders ONCE and reuse the
+        # list for both the "already protected?" check and the cancel sweep.
         try:
             open_orders = await self.broker.list_orders(account_id, status="working")
-            for o in open_orders:
-                if (getattr(o, "symbol", "").upper() == symbol.upper()
-                        and getattr(o, "side", "").upper() == "SELL"
-                        and getattr(o, "order_type", "").upper() in ("STOP", "TRAILING_STOP")
-                        and getattr(o, "broker_order_id", None)):
-                    await self.broker.cancel_order(o.broker_order_id, account_id)
-                    logger.info(
-                        "[exec] tighten_trail %s: cancelled resting %s",
-                        symbol, o.order_type,
-                    )
         except Exception as exc:
             logger.warning(
-                "[exec] tighten_trail %s: could not cancel resting stops (%s) "
-                "— placing tight trail anyway", symbol, exc,
+                "[exec] tighten_trail %s: could not list working orders (%s) "
+                "— proceeding to place a fresh trail", symbol, exc,
             )
+            open_orders = []
+
+        resting_sell_stops = [
+            o for o in open_orders
+            if getattr(o, "symbol", "").upper() == symbol.upper()
+            and getattr(o, "side", "").upper() == "SELL"
+            and getattr(o, "order_type", "").upper() in ("STOP", "TRAILING_STOP")
+            and getattr(o, "broker_order_id", None)
+        ]
+
+        if resting_sell_stops and not force_replace:
+            logger.info(
+                "[exec] tighten_trail %s: already protected by a resting %s — "
+                "skipping re-arm (existing trail keeps ratcheting). "
+                "Use force_replace=True to override.",
+                symbol, getattr(resting_sell_stops[0], "order_type", "stop"),
+            )
+            return True
+
+        # Step 1: cancel any resting sell-side stops (we're replacing them).
+        # Reached only when force_replace=True or no stop was resting.
+        for o in resting_sell_stops:
+            try:
+                await self.broker.cancel_order(o.broker_order_id, account_id)
+                logger.info(
+                    "[exec] tighten_trail %s: cancelled resting %s",
+                    symbol, getattr(o, "order_type", "stop"),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[exec] tighten_trail %s: could not cancel resting %s (%s) "
+                    "— placing tight trail anyway",
+                    symbol, getattr(o, "order_type", "stop"), exc,
+                )
 
         # Step 2: place the protective SELL order, anchored to the PEAK since the
         # SELL signal (not the current price) so it captures any run-up that
@@ -375,8 +457,6 @@ class ExecutionService:
         #     >= floor, use a native TRAILING_STOP (broker ratchets it up — best).
         #   - Otherwise place a STOP at max(floor, peak_trail) to lock in the
         #     run-up; the chandelier job ratchets it up on later highs.
-        floor_price = round(signal_price * (1.0 + floor_buffer_pct / 100.0), 2)
-
         current_price = 0.0
         try:
             quotes = await self.broker.get_quotes([symbol])
@@ -388,6 +468,28 @@ class ExecutionService:
                 "[exec] tighten_trail %s: quote fetch failed (%s) — "
                 "defaulting to floor STOP for safety", symbol, exc,
             )
+
+        # Guard: a missing/zero signal_price (e.g. consensus SELL when the live
+        # quote was unavailable) would make floor_price 0.0 — silently dropping
+        # the "never exit below signal" protection. Fall back to current price
+        # so the floor stays meaningful; warn so it's visible in the logs.
+        if signal_price <= 0:
+            if current_price > 0:
+                logger.warning(
+                    "[exec] tighten_trail %s: signal_price was %.2f (missing) — "
+                    "using current price $%.2f as the floor anchor instead.",
+                    symbol, signal_price, current_price,
+                )
+                signal_price = current_price
+            else:
+                logger.error(
+                    "[exec] tighten_trail %s: signal_price and current price both "
+                    "unavailable — cannot anchor a protective floor. Aborting.",
+                    symbol,
+                )
+                return False
+
+        floor_price = round(signal_price * (1.0 + floor_buffer_pct / 100.0), 2)
 
         # Peak (high-water mark) since the SELL signal fired.
         peak_price = 0.0
@@ -427,24 +529,41 @@ class ExecutionService:
         # Prefer it when the native start already meets the peak-based ideal AND
         # is below current (so it rests cleanly); otherwise a static STOP just
         # below market at target_stop locks in what's recoverable.
+        #
+        # Brokers without a native TRAILING_STOP order type (Zerodha/Kite) can
+        # NEVER take the native path — force the static STOP, which the
+        # Chandelier job ratchets up on later highs.
+        native_trail_ok = getattr(self.broker, "supports_native_trailing_stop", False)
         use_native_trail = (
-            native_trail > 0.0
+            native_trail_ok
+            and native_trail > 0.0
             and native_trail >= ideal_stop
             and native_trail < current_price
         )
         use_floor = not use_native_trail
 
         # If even the floor sits at/above current price, price has fallen below
-        # the protective floor entirely — no valid resting STOP exists. We do
-        # NOT market-sell (same no-fallback safety as elsewhere); surface it.
+        # the protective floor entirely — the ideal stop can't be placed as-is.
+        # Use an emergency STOP ~1% below current price so the position is still
+        # protected; log a warning so the user knows the floor was breached.
         if use_floor and target_stop is None:
-            logger.error(
-                "[exec] tighten_trail %s: current $%.2f is at/below the signal "
-                "floor $%.2f — cannot place a valid protective stop. Position "
-                "left as-is (no fallback market sell). Investigate manually.",
-                symbol, current_price, floor_price,
-            )
-            return False
+            if current_price > 0:
+                emergency_stop = round(current_price * 0.99, 2)
+                logger.warning(
+                    "[exec] tighten_trail %s: current $%.2f is at/below the signal "
+                    "floor $%.2f — floor breached (likely gap-down). Placing emergency "
+                    "STOP @ $%.2f (current × 0.99) to protect position.",
+                    symbol, current_price, floor_price, emergency_stop,
+                )
+                target_stop = emergency_stop
+                # fall through to use_floor path below
+            else:
+                logger.error(
+                    "[exec] tighten_trail %s: current price unknown and floor $%.2f "
+                    "breached — cannot place any protective stop. Investigate manually.",
+                    symbol, floor_price,
+                )
+                return False
 
         suffix = idempotency_suffix or str(int(signal_price * 100))
         if use_floor:
@@ -513,25 +632,61 @@ class ExecutionService:
             )
             return True
         except Exception as exc:
-            # SAFETY: if the trailing stop can't be placed (broker rejection,
-            # network blip, instrument not eligible for TRAILING_STOP, etc.)
-            # we do NOT fall back to a MARKET sell. A failed trail leaves
-            # the position alone -- the user can intervene; a silent market
-            # sell hides the failure AND closes a position the strategy may
-            # never have intended to exit immediately.
-            #
-            # The previous fallback was the second escape hatch that allowed
-            # SELL signals to become MARKET sells (the first being scanner
-            # auto-trade; both are now closed). If the trail fails repeatedly,
-            # the GTC fill-sync job will surface the absent stop and the user
-            # will see the position un-protected in the dashboard.
+            # Primary trail placement failed (broker rejection, network blip,
+            # instrument not eligible for TRAILING_STOP, etc.).
+            # Attempt a fallback static STOP at floor_price - 0.5% so the
+            # position is still protected even if the ideal trail can't be placed.
             logger.error(
                 "[exec] tighten_trail %s: failed to place tight trail (%s) "
-                "-- POSITION LEFT UNPROTECTED, no fallback MARKET sell. "
-                "Investigate the broker rejection and re-place manually if needed.",
+                "— attempting fallback static STOP at floor - 0.5%%.",
                 symbol, exc,
             )
-            return False
+            fallback_stop = round(floor_price * 0.995, 2)
+            if current_price > 0 and fallback_stop >= current_price:
+                # Floor itself is above market; drop to 1% below current.
+                fallback_stop = round(current_price * 0.99, 2)
+            fallback_req = OrderRequest(
+                symbol=symbol,
+                side="SELL",
+                order_type="STOP",
+                quantity=quantity,
+                stop_price=fallback_stop,
+                time_in_force="GTC",
+                source=source,  # type: ignore[arg-type]
+                idempotency_key=f"sell-trail-fallback-{symbol}-{suffix}",
+            )
+            try:
+                resp2 = await self.broker.place_order(fallback_req, account_id)
+                fb_order = self._persist_order(fallback_req, signal_id, status="submitted")
+                self._update_order_status(
+                    fb_order.id,
+                    status="submitted",
+                    broker_order_id=resp2.broker_order_id,
+                    submitted_at=datetime.now(tz=timezone.utc),
+                )
+                _audit.log(
+                    event_type="TIGHT_TRAIL_FALLBACK",
+                    entity_type="order",
+                    entity_id=fb_order.id,
+                    description=(
+                        f"Fallback STOP {symbol} x{quantity} @ ${fallback_stop:.2f} "
+                        f"(primary trail failed: {exc}; signal ${signal_price:.2f}, "
+                        f"floor ${floor_price:.2f})"
+                    ),
+                )
+                logger.warning(
+                    "[exec] tighten_trail %s: fallback STOP placed @ $%.2f "
+                    "(floor $%.2f − 0.5%%). Position protected. broker_id=%s",
+                    symbol, fallback_stop, floor_price, resp2.broker_order_id,
+                )
+                return True
+            except Exception as exc2:
+                logger.error(
+                    "[exec] tighten_trail %s: fallback STOP also failed (%s) "
+                    "— POSITION LEFT UNPROTECTED. Investigate manually.",
+                    symbol, exc2,
+                )
+                return False
 
     async def _buying_power_preflight(
         self,

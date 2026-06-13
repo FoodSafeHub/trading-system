@@ -319,6 +319,20 @@ class ZerodhaBroker(BrokerBase):
         )
 
     async def place_order(self, order: OrderRequest, account_id: str) -> OrderStatusResponse:
+        # Kite Connect has NO native trailing-stop order type (Zerodha removed
+        # trailing SL years ago). Reject it loudly rather than letting the
+        # order-type map silently fall through to MARKET — a MARKET SELL here
+        # would instantly liquidate the position a protective stop was meant to
+        # guard. The execution layer checks supports_native_trailing_stop
+        # (False for this broker) and places a static STOP instead, so this
+        # guard should never fire in normal flow; it's the last-line safety net.
+        if order.order_type == "TRAILING_STOP":
+            raise ValueError(
+                "Zerodha/Kite has no native TRAILING_STOP order type. "
+                "Place a static STOP (SL-M) instead; the Chandelier job ratchets it. "
+                f"(symbol={order.symbol}, side={order.side})"
+            )
+
         exch, ts = self._split_symbol(order.symbol)
         body = {
             "exchange": exch,
@@ -352,13 +366,24 @@ class ZerodhaBroker(BrokerBase):
 
     @staticmethod
     def _kite_order_type(order_type: str) -> str:
-        """Map our order_type vocabulary to Kite's."""
-        return {
+        """Map our order_type vocabulary to Kite's.
+
+        Unknown types raise rather than silently defaulting to MARKET — a wrong
+        default here can turn a protective order into an instant liquidation.
+        """
+        mapping = {
             "MARKET": "MARKET",
             "LIMIT": "LIMIT",
             "STOP": "SL-M",        # stop-loss market
             "STOP_LIMIT": "SL",    # stop-loss limit
-        }.get(order_type, "MARKET")
+        }
+        try:
+            return mapping[order_type]
+        except KeyError:
+            raise ValueError(
+                f"Zerodha/Kite does not support order_type={order_type!r}. "
+                f"Supported: {sorted(mapping)}"
+            )
 
     async def cancel_order(self, broker_order_id: str, account_id: str) -> bool:
         try:

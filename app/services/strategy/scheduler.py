@@ -73,6 +73,33 @@ def _persist_signal(
         return None
 
 
+def _pending_signal_id(symbol: str, direction: str, strategy_label: str) -> int | None:
+    """Return the most recent un-acted matching signal row id WITHOUT marking it.
+
+    Used to link a signal to the order it triggers before we know whether the
+    order placement succeeded. Only flip acted_on=True (via
+    _mark_signal_acted_on) once the action actually completes, so a failed
+    placement leaves the signal eligible for the reconcile retry.
+    """
+    try:
+        with SessionLocal() as db:
+            sig = (
+                db.query(Signal)
+                .filter(
+                    Signal.symbol == symbol.upper(),
+                    Signal.direction == direction,
+                    Signal.strategy_name == strategy_label[:128],
+                    Signal.acted_on == False,  # noqa: E712
+                )
+                .order_by(Signal.id.desc())
+                .first()
+            )
+            return sig.id if sig else None
+    except Exception as exc:
+        logger.warning("[scheduler] Could not resolve pending signal for %s/%s: %s", symbol, strategy_label, exc)
+    return None
+
+
 def _mark_signal_acted_on(symbol: str, direction: str, strategy_label: str) -> int | None:
     """Flip the most recent matching signal row to acted_on=True and return its id."""
     try:
@@ -710,15 +737,20 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                     exec_svc, exec_acct = _svc_for(asgn_broker)
                     trail_pct = float(asgn.get("tight_trail_pct") or 2.0)
 
-                    # Mark signal first so we get the signal_id to link to the trail order
-                    sig_id = _mark_signal_acted_on(symbol, direction, label)
+                    # Resolve (don't yet consume) the signal id so we can link it
+                    # to the trail order. We only mark it acted_on if the trail
+                    # actually gets placed — otherwise the position would be left
+                    # naked AND the signal flagged done, so the reconcile job
+                    # (which re-arms unprotected held positions with a recent SELL)
+                    # could skip it. Leaving acted_on=False keeps it eligible.
+                    sig_id = _pending_signal_id(symbol, direction, label)
 
                     logger.info(
                         "[scheduler] SELL signal %s: placing %.1f%% tight trail "
                         "(assignment trail_pct=%s)",
                         symbol, trail_pct, asgn.get("tight_trail_pct"),
                     )
-                    loop.run_until_complete(exec_svc.tighten_trail_on_sell(
+                    trail_ok = loop.run_until_complete(exec_svc.tighten_trail_on_sell(
                         symbol=symbol,
                         quantity=qty,
                         account_id=exec_acct,
@@ -728,6 +760,14 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         idempotency_suffix=str(int(entry * 100)),
                         signal_id=sig_id,
                     ))
+                    if trail_ok:
+                        _mark_signal_acted_on(symbol, direction, label)
+                    else:
+                        logger.error(
+                            "[scheduler] SELL %s: tighten_trail_on_sell returned False "
+                            "— position NOT protected; leaving signal un-acted so the "
+                            "reconcile job retries next cycle.", symbol,
+                        )
 
                     try:
                         from app.services.notifications.bus import notify_signal
@@ -820,7 +860,7 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         symbol, c_trail_pct, c_broker,
                         (c_asgn or {}).get("tight_trail_pct"),
                     )
-                    loop.run_until_complete(exec_svc.tighten_trail_on_sell(
+                    c_trail_ok = loop.run_until_complete(exec_svc.tighten_trail_on_sell(
                         symbol=symbol,
                         quantity=qty,
                         account_id=exec_acct,
@@ -830,6 +870,12 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         idempotency_suffix=f"consensus-{symbol}",
                         signal_id=sig_id,
                     ))
+                    if not c_trail_ok:
+                        logger.error(
+                            "[scheduler] Consensus SELL %s: tighten_trail_on_sell "
+                            "returned False — position NOT protected; reconcile job "
+                            "will retry next cycle.", symbol,
+                        )
                     try:
                         from app.services.notifications.bus import notify_signal
                         notify_signal(
@@ -1072,6 +1118,29 @@ def _run_gtc_fill_sync_job() -> None:
         logger.error("[scheduler] GTC fill sync job failed: %s", exc)
 
 
+def _has_india_assignments() -> bool:
+    """True if any enabled assignment is an India symbol (routes to Zerodha).
+
+    Used to decide whether jobs that default to the global broker also need to
+    process the Zerodha broker for India positions.
+    """
+    try:
+        from app.models.assignments import SymbolStrategyAssignment
+        from app.services.markets import is_india_symbol
+
+        with SessionLocal() as db:
+            rows = db.query(SymbolStrategyAssignment).filter_by(enabled=True).all()
+            for a in rows:
+                broker = (a.broker or "default").lower()
+                if broker == "zerodha":
+                    return True
+                if broker == "default" and is_india_symbol(a.symbol):
+                    return True
+    except Exception as exc:
+        logger.debug("[scheduler] _has_india_assignments check failed: %s", exc)
+    return False
+
+
 def _run_chandelier_trail_job() -> None:
     """Upgrade legacy static SELL STOPs to the chandelier ATR level.
 
@@ -1098,13 +1167,10 @@ def _run_chandelier_trail_job() -> None:
         from app.services.strategy.rules import _atr_raw
         from app.schemas.orders import OrderRequest
 
-        loop = _aio.new_event_loop()
-        try:
-            broker = get_broker()
-            loop.run_until_complete(broker.authenticate())
-            accounts = loop.run_until_complete(broker.get_accounts())
-            account_id = accounts[0].account_id if accounts else ""
-
+        def _ratchet_broker(broker, account_id: str) -> None:
+            """Ratchet legacy static STOPs up to the chandelier ATR level for
+            one broker's positions. Broker-native TRAILING_STOPs are skipped
+            (the broker ratchets those itself)."""
             positions = loop.run_until_complete(broker.get_positions(account_id))
             long_positions = {p.symbol.upper(): p.quantity for p in positions if p.quantity > 0}
             if not long_positions:
@@ -1186,6 +1252,40 @@ def _run_chandelier_trail_job() -> None:
                     logger.info("[scheduler] Chandelier trail %s: legacy STOP upgraded to %.2f", symbol, new_stop)
                 except Exception as exc:
                     logger.error("[scheduler] Chandelier trail %s: cancel/replace failed: %s", symbol, exc)
+
+        loop = _aio.new_event_loop()
+        try:
+            # The global broker handles US (Schwab/Webull) positions. India
+            # symbols route to Zerodha per-assignment, so its positions live on
+            # a different broker — ratchet those too. Zerodha has NO native
+            # trailing stop, so its protective stops are ALWAYS static STOPs
+            # that this job is the only thing keeping ratcheted upward.
+            brokers_to_ratchet: list = []
+            try:
+                brokers_to_ratchet.append(get_broker())
+            except Exception as exc:
+                logger.error("[scheduler] Chandelier: could not build global broker: %s", exc)
+
+            if _has_india_assignments():
+                try:
+                    from app.services.brokers.factory import _build_one
+                    brokers_to_ratchet.append(_build_one("zerodha"))
+                except Exception as exc:
+                    logger.error("[scheduler] Chandelier: could not build Zerodha broker: %s", exc)
+
+            seen_brokers: set[str] = set()
+            for broker in brokers_to_ratchet:
+                bname = getattr(broker, "name", "")
+                if bname in seen_brokers:
+                    continue
+                seen_brokers.add(bname)
+                try:
+                    loop.run_until_complete(broker.authenticate())
+                    accounts = loop.run_until_complete(broker.get_accounts())
+                    account_id = accounts[0].account_id if accounts else ""
+                    _ratchet_broker(broker, account_id)
+                except Exception as exc:
+                    logger.error("[scheduler] Chandelier trail job failed for %s: %s", bname, exc)
         finally:
             loop.close()
     except Exception as exc:

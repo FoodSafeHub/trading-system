@@ -52,4 +52,5 @@ class TestSchwabPayloadMapping:
         broker = _broker()
         order = OrderRequest(symbol="SPY", side="BUY", order_type="MARKET", quantity=1, time_in_force="GTC")
         payload = broker._build_order_payload(order)
-        assert payload["duration"] == "GTC"
+        # Schwab's API spells GTC as GOOD_TILL_CANCEL (mapped in _build_order_payload).
+        assert payload["duration"] == "GOOD_TILL_CANCEL"

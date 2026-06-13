@@ -41,6 +41,7 @@ TOKEN_REFRESH_BUFFER_SECONDS = 300  # refresh 5 min before expiry
 
 class SchwabBroker(BrokerBase):
     name = "schwab"
+    supports_native_trailing_stop = True  # native TRAILING_STOP order type
 
     def __init__(self) -> None:
         self._settings = get_settings()

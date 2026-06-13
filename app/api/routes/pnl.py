@@ -267,6 +267,44 @@ def _broker_resting_sell_stops() -> dict[str, dict]:
     return result
 
 
+def _broker_positions() -> dict[str, dict]:
+    """Query the active broker for currently-held LONG positions.
+
+    The FIFO ledger only knows positions the BOT opened (local order history).
+    Manual/external buys (placed directly in the broker app) never get a local
+    BUY row, so they're invisible to the ledger — but they're real holdings the
+    assigned strategy still trades. This is the source of truth for "what do we
+    actually hold". Returns {symbol: {quantity, avg_cost, broker}}.
+    """
+    import asyncio
+    result: dict[str, dict] = {}
+    try:
+        broker = get_broker()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(broker.authenticate())
+            accts = loop.run_until_complete(broker.get_accounts())
+            acct_id = accts[0].account_id if accts else ""
+            positions = loop.run_until_complete(broker.get_positions(acct_id))
+        finally:
+            loop.close()
+    except Exception as exc:
+        logger.warning("[pnl] broker positions fetch failed: %s", exc)
+        return {}
+
+    for p in positions or []:
+        sym = (getattr(p, "symbol", "") or "").upper()
+        qty = getattr(p, "quantity", 0) or 0
+        if not sym or qty <= 0:
+            continue
+        result[sym] = {
+            "quantity": float(qty),
+            "avg_cost": getattr(p, "average_cost", None),
+            "broker": getattr(p, "broker", None),
+        }
+    return result
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────
 
 @router.get("/summary", response_model=SummaryOut)
@@ -442,12 +480,45 @@ def pnl_open_trails(db: Session = Depends(get_db)):
     from app.models.signals import Signal
 
     _, fifo = _refresh(db)
-    if not fifo.open_lots:
+
+    # Source of held positions is TWO-fold:
+    #   1. FIFO ledger (positions the bot opened) — carries cost basis / P&L.
+    #   2. Live broker positions — catches MANUAL/external buys the ledger never
+    #      saw. Without this, a held symbol with a SELL signal but no local BUY
+    #      (e.g. COLL bought in the broker app) is silently absent from this
+    #      table even though the assigned strategy is actively trading it.
+    broker_positions = _broker_positions()
+
+    fifo_symbols = {l.symbol.upper() for l in fifo.open_lots}
+    all_held = sorted(fifo_symbols | set(broker_positions.keys()))
+    if not all_held:
         return []
 
-    last_prices = _resolve_last_prices(sorted({l.symbol for l in fifo.open_lots}))
+    last_prices = _resolve_last_prices(all_held)
     rows, _total = open_position_pnl(fifo.open_lots, last_prices)
-    open_by_symbol = {r["symbol"]: r for r in rows}
+    open_by_symbol = {r["symbol"].upper(): r for r in rows}
+
+    # Synthesize a position row for broker-only holdings (no FIFO cost basis).
+    for sym, bp in broker_positions.items():
+        if sym in open_by_symbol:
+            continue  # FIFO row already has richer cost-basis data
+        last_px = last_prices.get(sym)
+        avg_cost = bp.get("avg_cost")
+        upnl = upnl_pct = None
+        if avg_cost and last_px:
+            upnl = round((last_px - float(avg_cost)) * bp["quantity"], 2)
+            upnl_pct = round((last_px - float(avg_cost)) / float(avg_cost) * 100, 2)
+        open_by_symbol[sym] = {
+            "symbol": sym,
+            "quantity": bp["quantity"],
+            "avg_cost": avg_cost,
+            "last_price": last_px,
+            "unrealized_pnl": upnl,
+            "unrealized_pct": upnl_pct,
+            "broker": bp.get("broker"),
+            "is_paper": False,
+        }
+
     symbols = list(open_by_symbol.keys())
 
     # Earliest open (buy) time per held symbol — the SELL-signal price we anchor
