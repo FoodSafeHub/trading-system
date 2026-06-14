@@ -112,7 +112,7 @@ def simulation_backtest(
     partial_tp: bool = Query(True),
     risk_per_trade_pct: float = Query(0.01),
     max_daily_loss_pct: float = Query(2.0),
-    max_trades_per_day: int = Query(6),
+    max_trades_per_day: int = Query(0, description="0 = unlimited"),
     strategy_name: str = Query(""),
 ) -> dict[str, Any]:
     """Replay auto-trader logic bar-by-bar. Matches Auto Trader simulation tab."""
@@ -140,7 +140,7 @@ def simulation_backtest_all(
     partial_tp: bool = Query(True),
     risk_per_trade_pct: float = Query(0.01),
     max_daily_loss_pct: float = Query(2.0),
-    max_trades_per_day: int = Query(6),
+    max_trades_per_day: int = Query(0, description="0 = unlimited"),
 ) -> list[dict[str, Any]]:
     """Run simulation backtest for every strategy and return ranked comparison."""
     from app.services.strategy.daytrading.strategies import ALL_STRATEGIES
@@ -393,6 +393,30 @@ def scanner_watchlist(
     return [r.to_dict() for r in results]
 
 
+@router.get("/scanner/diagnostics")
+def scanner_diagnostics(
+    market: str = Query("us", description="'us', 'india', or 'both'"),
+    min_price: float = Query(5.0),
+    max_price: float | None = Query(None),
+    min_avg_volume: float = Query(1_000_000),
+    universe_max_symbols: int | None = Query(None),
+) -> dict[str, Any]:
+    """Explain why the scanner universe collapsed: per-phase survivor counts and
+    a rejection-reason histogram with examples. Read-only diagnostic — arms
+    nothing. Use when get_intraday_watchlist returns few/no candidates."""
+    from app.services.strategy.daytrading.scanners import (
+        DayTradingScanner, DayTradingScannerConfig,
+    )
+    cfg = DayTradingScannerConfig(
+        market=market.lower().strip() or "us",
+        min_price=min_price,
+        max_price=max_price,
+        min_avg_volume=min_avg_volume,
+        universe_max_symbols=universe_max_symbols,
+    )
+    return DayTradingScanner(config=cfg).scan_diagnostics()
+
+
 @router.get("/scanner/metrics/{symbol}")
 def scanner_symbol_metrics(symbol: str) -> dict[str, Any]:
     """Fetch raw scan metrics for a single symbol."""
@@ -451,7 +475,10 @@ class AutoTraderStartRequest(BaseModel):
     partial_tp: bool = True
     risk_per_trade_pct: float = Field(0.01, gt=0, le=0.05, description="Fraction of capital risked per trade")
     max_daily_loss_pct: float = Field(2.0, gt=0, le=20.0)
-    max_trades_per_day: int = Field(6, ge=1, le=50)
+    max_trades_per_day: int = Field(
+        0, ge=0, le=1000,
+        description="Opt-in cap on number of trades. 0 = unlimited (default).",
+    )
     max_consecutive_losses: int = Field(3, ge=1, le=10)
     initial_capital: float = Field(10_000.0, gt=0)
     broker_name: Literal["paper", "alpaca"] = "paper"
@@ -470,6 +497,22 @@ class AutoTraderStartRequest(BaseModel):
             "Optional override for which strategies run when entry_mode="
             "'native_strategy'. Defaults to the audited 4-strategy set."
         ),
+    )
+    account_type: Literal["cash", "margin"] = Field(
+        "cash",
+        description=(
+            "Account type for the PDT guard. PDT (≤3 day trades / 5 business days) "
+            "only restricts MARGIN accounts under $25k on a real broker. Cash "
+            "accounts and paper mode are never restricted."
+        ),
+    )
+    pdt_guard: bool = Field(
+        True,
+        description="Master switch for the PDT guard (only bites when not exempt).",
+    )
+    max_open_positions: int = Field(
+        1, ge=1, le=50,
+        description="Max concurrent positions per symbol-trader (default 1).",
     )
     force: bool = Field(False, description="Arm even if outside regular trading hours")
 
@@ -490,6 +533,9 @@ def autotrader_start(req: AutoTraderStartRequest) -> dict[str, Any]:
         broker_name=req.broker_name,
         entry_mode=req.entry_mode,
         native_strategies=req.native_strategies,
+        account_type=req.account_type,
+        pdt_guard=req.pdt_guard,
+        max_open_positions=req.max_open_positions,
     )
     try:
         return get_manager().flip_on(cfg, force=req.force)
@@ -580,7 +626,10 @@ class StartFromScannerRequest(BaseModel):
     partial_tp: bool = True
     risk_per_trade_pct: float = Field(0.01, gt=0, le=0.05)
     max_daily_loss_pct: float = Field(2.0, gt=0, le=20.0)
-    max_trades_per_day: int = Field(6, ge=1, le=50)
+    max_trades_per_day: int = Field(
+        0, ge=0, le=1000,
+        description="Opt-in cap on number of trades. 0 = unlimited (default).",
+    )
     max_consecutive_losses: int = Field(3, ge=1, le=10)
     initial_capital: float = Field(10_000.0, gt=0)
     broker_name: Literal["paper", "alpaca"] = "paper"

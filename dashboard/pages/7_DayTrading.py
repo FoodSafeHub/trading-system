@@ -793,7 +793,10 @@ with tab_backtest:
         bt_sim_maxloss= sr4.number_input("Daily loss limit %", 0.5, 10.0, 2.0, 0.5, key="bt_sim_maxloss")
         sr5, sr6 = st.columns(2)
         bt_sim_partial = sr5.toggle("Scale out 50% at +1R", value=True, key="bt_sim_partial")
-        bt_sim_maxtrades = sr6.number_input("Max trades/day", 1, 20, 6, 1, key="bt_sim_maxtrades")
+        bt_sim_maxtrades = sr6.number_input(
+            "Max trades/day (0 = unlimited)", 0, 1000, 0, 1, key="bt_sim_maxtrades",
+            help="Optional cap for the replay. 0 = unlimited.",
+        )
 
     if st.button("▶ Run Backtest", key="run_bt"):
         with st.spinner("Running bar-by-bar simulation…"):
@@ -1178,7 +1181,7 @@ with tab_compare:
                     partial_tp=ca_sim_partial,
                     risk_pct=ca_sim_risk / 100,
                     max_loss_pct=ca_sim_maxloss,
-                    max_trades=6,
+                    max_trades=0,  # 0 = unlimited (don't clip strategy comparison)
                 )
             else:
                 results = _cached_backtest_all(ca_symbol, ca_period, float(ca_capital))
@@ -2142,8 +2145,11 @@ with tab_autotrader:
             help="Bot stops all new entries for the day once realized losses hit this % of capital.",
         )
         at_max_trades = rc4.number_input(
-            "Max trades/day", 1, 20, 6, 1, key="at_maxtrades",
-            help="Hard cap on entries per session. Bot goes idle after this count.",
+            "Max trades/day (0 = unlimited)", 0, 1000, 0, 1, key="at_maxtrades",
+            help="Optional opt-in cap on entries per session. 0 = unlimited — there is "
+                 "no regulatory limit on the *number* of intraday round-trips, so the "
+                 "bot is not halted just for being active. PDT (≤3 day trades/5d for "
+                 "sub-$25k margin accounts) is tracked separately by the PDT guard.",
         )
 
         sc1, sc2 = st.columns(2)
@@ -2167,6 +2173,26 @@ with tab_autotrader:
                 "while guaranteeing the exit is never BELOW the sell-signal price — "
                 "so you book the profit the signal identified, plus any extra upside. "
                 "OFF = old behaviour (immediate market sell on every exit signal)."
+            ),
+        )
+
+        ac1, ac2 = st.columns(2)
+        _acct_disp = ac1.selectbox(
+            "Account type (PDT)", ["Cash", "Margin"], key="at_acct_type",
+            help=(
+                "Drives the Pattern Day Trader (PDT) guard. PDT (≤3 day trades / 5 "
+                "business days) only restricts MARGIN accounts under $25,000 on a "
+                "real broker. Cash accounts and paper/simulation mode are never "
+                "restricted. The guard counts real round-trips from the trade log."
+            ),
+        )
+        at_account_type = _acct_disp.lower()
+        at_pdt_guard = ac2.toggle(
+            "Enforce PDT guard", value=True, key="at_pdt_guard",
+            help=(
+                "When ON (default), a sub-$25k margin live account is blocked from "
+                "opening a 4th day trade in the rolling 5-day window. No effect on "
+                "cash, paper, or funded (≥$25k) accounts."
             ),
         )
 
@@ -2268,6 +2294,8 @@ with tab_autotrader:
                 initial_capital=float(at_capital),
                 entry_mode="native_strategy",
                 tight_trail_on_exit_signal=bool(at_tight_trail),
+                account_type=at_account_type,
+                pdt_guard=bool(at_pdt_guard),
                 on_trade_update=lambda s: st.session_state.update({"at_status": s}),
             )
 
@@ -2432,6 +2460,31 @@ with tab_autotrader:
                 f"{'🟢' if hb_ok else '🔴'} Heartbeat {hb:.0f}s ago · "
                 f"{'Running' if status.get('running') else 'Stopped'}"
             )
+
+            # ── PDT guard status (live sub-$25k margin only) ──────────────────
+            _pdt = status.get("pdt") or {}
+            if _pdt.get("guard_active"):
+                _used = _pdt.get("day_trades_used", 0)
+                _maxdt = _pdt.get("max_day_trades", 3)
+                _rem = _pdt.get("day_trades_remaining", 0)
+                _to_floor = _pdt.get("equity_to_floor", 0) or 0
+                if _rem <= 0:
+                    st.error(
+                        f"🚫 **PDT limit reached** — {_used}/{_maxdt} day trades used in the "
+                        f"rolling 5-business-day window. New day-trade entries are blocked to "
+                        f"avoid the Pattern Day Trader flag. Add **${_to_floor:,.0f}** equity "
+                        f"(to reach $25,000) to lift this.",
+                        icon="🚫",
+                    )
+                else:
+                    st.info(
+                        f"🛡️ **PDT guard active**: {_used}/{_maxdt} day trades used · "
+                        f"**{_rem}** remaining this rolling 5-day window "
+                        f"(sub-$25k margin account; ${_to_floor:,.0f} to exempt).",
+                        icon="🛡️",
+                    )
+            elif _pdt.get("exempt_reason"):
+                st.caption(f"🛡️ PDT guard: off — {_pdt['exempt_reason']}")
 
             # Active config strip — reflects the RUNNING bot's config (from its
             # own status), not the toggle. Always visible even when the config

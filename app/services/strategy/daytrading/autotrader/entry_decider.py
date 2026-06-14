@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import time
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
@@ -24,7 +23,9 @@ if TYPE_CHECKING:
 
 import pandas as pd
 
-from app.services.strategy.daytrading.market_open import ET, compute_vwap, now_et
+from app.services.strategy.daytrading.market_open import (
+    ET, compute_vwap, is_past_last_entry, market_session, now_et,
+)
 from app.services.strategy.daytrading.brain.market_state import (
     MarketStateResult,
     TREND_UP, TREND_DOWN, CHOPPY, HIGH_VOL, NEWS_RISK,
@@ -32,7 +33,6 @@ from app.services.strategy.daytrading.brain.market_state import (
 
 logger = logging.getLogger(__name__)
 
-_NO_ENTRY_AFTER = time(15, 15)     # hard cutoff — matches execution_guard
 _MIN_RR         = 1.5              # minimum risk/reward to enter
 _MIN_CONFIDENCE = 0.45             # below this → NO_TRADE
 
@@ -110,10 +110,13 @@ class EntryDecider:
         """
         no_trade = _no_trade  # shorthand
 
-        # ── Time gate ──────────────────────────────────────────────────────────
-        now_time = now_et().time()
-        if now_time >= _NO_ENTRY_AFTER:
-            return no_trade("Too late in day — no new entries after 15:15 ET")
+        # ── Time gate (market-aware) ───────────────────────────────────────────
+        # Use the symbol's own session cutoff (15:15 ET for US, 15:15 IST for
+        # NSE) instead of a US-clock literal, so an India autotrader stops taking
+        # entries at the correct wall-clock time.
+        if is_past_last_entry(symbol):
+            _cut = market_session(symbol).last_entry_time
+            return no_trade(f"Too late in day — no new entries after {_cut.strftime('%H:%M')} (session local)")
 
         # ── Need enough bars ──────────────────────────────────────────────────
         if df_5m is None or len(df_5m) < 15:

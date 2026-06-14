@@ -4,10 +4,18 @@ Risk Governor — enforces hard daily trading limits.
 Rules enforced:
   - max_daily_loss_pct: if daily P&L drops below this %, kill switch triggers
   - max_consecutive_losses: after N losses in a row, stop trading
-  - max_trades_per_day: hard cap on total trades
+  - max_trades_per_day: OPTIONAL opt-in cap on total trades. <= 0 (the default)
+    means UNLIMITED — there is no regulatory cap on the *count* of intraday
+    round-trips, so the bot is not silently halted mid-day. Set a positive value
+    only if you deliberately want to throttle churn.
   - max_open_positions: never hold more than this simultaneously (default 1)
   - size_reduction_after_loss: after any loss, reduce size to this fraction
     until a winner resets the counter
+
+PDT note: the *Pattern Day Trader* rule (≤3 day trades / 5 business days for
+sub-$25k margin accounts) is a separate concern handled by PDTTracker — it is
+NOT enforced here, because it depends on account type/equity/broker, not on a
+per-session count.
 
 The governor is stateless per session — it is rebuilt from the day's trade log
 each time it is called, so it is correct even if the process restarts.
@@ -57,7 +65,7 @@ class RiskGovernor:
     DEFAULT_CONFIG: dict[str, Any] = {
         "max_daily_loss_pct": 2.0,        # stop if down 2% on the day
         "max_consecutive_losses": 3,       # stop after 3 losses in a row
-        "max_trades_per_day": 6,           # no more than 6 trades per day
+        "max_trades_per_day": 0,           # 0 = UNLIMITED (no artificial cap)
         "max_open_positions": 1,           # never have 2 open at once
         "size_reduction_after_loss": 0.5,  # half size after any loss
         "size_reset_after_win": True,      # full size restored after a winner
@@ -109,12 +117,17 @@ class RiskGovernor:
                 f"{state.consecutive_losses} consecutive losses — "
                 f"max allowed is {self.config['max_consecutive_losses']}."
             )
-        elif state.trades_today >= self.config["max_trades_per_day"]:
-            state.kill_switch_triggered = True
-            state.kill_switch_reason = (
-                f"Max trades per day reached: {state.trades_today} "
-                f"(limit {self.config['max_trades_per_day']})."
-            )
+        else:
+            # max_trades_per_day is an OPTIONAL throttle. A value <= 0 means
+            # unlimited — there is no regulatory cap on the *number* of intraday
+            # round-trips, so we never halt the bot just for being active.
+            cap = self.config.get("max_trades_per_day", 0)
+            if cap and cap > 0 and state.trades_today >= cap:
+                state.kill_switch_triggered = True
+                state.kill_switch_reason = (
+                    f"Max trades per day reached: {state.trades_today} "
+                    f"(opt-in limit {cap})."
+                )
 
         return state
 

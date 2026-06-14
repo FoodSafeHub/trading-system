@@ -47,7 +47,7 @@ class AutoTraderConfig:
     partial_tp: bool = True
     risk_per_trade_pct: float = 0.01
     max_daily_loss_pct: float = 2.0
-    max_trades_per_day: int = 6
+    max_trades_per_day: int = 0   # 0 = unlimited (no artificial cap on trade count)
     max_consecutive_losses: int = 3
     initial_capital: float = 10_000.0
     broker_name: str = "paper"                 # paper | alpaca
@@ -58,6 +58,14 @@ class AutoTraderConfig:
     entry_mode: str = "legacy_entry_decider"   # legacy_entry_decider | native_strategy
     native_strategies: list[str] | None = None
     tight_trail_on_exit_signal: bool = True    # arm tight trail on momentum-fade exit
+
+    # PDT (Pattern Day Trader) awareness. The guard is a no-op unless ALL hold:
+    # account_type == "margin", broker is real (not paper), and equity < $25k.
+    # See brain/pdt_tracker.py. Defaults are chosen so paper / cash / funded
+    # accounts behave exactly as before.
+    account_type: str = "cash"                 # "cash" | "margin"
+    pdt_guard: bool = True                      # master switch (only bites when not exempt)
+    max_open_positions: int = 1                 # concurrent positions per trader (was hardcoded)
 
     # Filled by the manager after start():
     started_at_et: str | None = None
@@ -171,6 +179,9 @@ class AutoTraderManager:
                     entry_mode=config.entry_mode,
                     native_strategies=config.native_strategies,
                     tight_trail_on_exit_signal=config.tight_trail_on_exit_signal,
+                    account_type=config.account_type,
+                    pdt_guard=config.pdt_guard,
+                    max_open_positions=config.max_open_positions,
                 )
                 try:
                     trader.start()
@@ -330,6 +341,9 @@ def _config_as_dict(cfg: AutoTraderConfig) -> dict[str, Any]:
         "broker_name": cfg.broker_name,
         "entry_mode": cfg.entry_mode,
         "native_strategies": cfg.native_strategies,
+        "account_type": cfg.account_type,
+        "pdt_guard": cfg.pdt_guard,
+        "max_open_positions": cfg.max_open_positions,
         "started_at_et": cfg.started_at_et,
     }
 

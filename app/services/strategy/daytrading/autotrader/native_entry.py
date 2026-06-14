@@ -25,7 +25,6 @@ includes per-strategy rejection diagnostics for the UI/decision log.
 from __future__ import annotations
 
 import logging
-from datetime import time
 from typing import Any
 
 import pandas as pd
@@ -34,13 +33,13 @@ from app.services.strategy.daytrading.autotrader.entry_decider import EntryDecis
 from app.services.strategy.daytrading.brain.market_state import (
     CHOPPY, HIGH_VOL, NEWS_RISK, TREND_DOWN, TREND_UP, MarketStateResult,
 )
-from app.services.strategy.daytrading.market_open import now_et
+from app.services.strategy.daytrading.market_open import (
+    is_past_last_entry, market_session, now_et,
+)
 from app.services.strategy.daytrading.models import DayTradeSignal
 from app.services.strategy.daytrading.strategies import STRATEGY_MAP
 
 logger = logging.getLogger(__name__)
-
-_NO_ENTRY_AFTER = time(15, 15)  # universal hard cutoff — matches EntryDecider
 
 # Strategies that have been audited and verified to produce live-compatible
 # signals via their generate_signals() output. Order matters only for the
@@ -123,11 +122,13 @@ class NativeStrategyEntry:
         """Mirror of EntryDecider.decide() signature so SingleStockTrader can
         call either one without branching on data plumbing.
         """
-        # ── Time gate (matches EntryDecider) ──────────────────────────────
-        now_t = now_et().time()
-        if now_t >= _NO_ENTRY_AFTER:
+        # ── Time gate (market-aware, matches EntryDecider) ─────────────────
+        # Symbol's own session cutoff (US 15:15 ET / NSE 15:15 IST), not a
+        # US-clock literal — keeps India autotraders correct.
+        if is_past_last_entry(symbol):
+            _cut = market_session(symbol).last_entry_time
             return _no_trade(
-                "Too late in day — no new entries after 15:15 ET",
+                f"Too late in day — no new entries after {_cut.strftime('%H:%M')} (session local)",
                 entry_mode="native_strategy",
                 extra_checks={"gate": "late_entry_window"},
             )

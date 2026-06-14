@@ -1511,7 +1511,7 @@ def run_simulation_backtest(
     partial_tp: bool = True,
     risk_per_trade_pct: float = 0.01,
     max_daily_loss_pct: float = 2.0,
-    max_trades_per_day: int = 6,
+    max_trades_per_day: int = 0,   # 0 = unlimited (matches live default)
     strategy_name: str | None = None,
     tight_trail_on_exit_signal: bool = True,
 ) -> dict[str, Any]:

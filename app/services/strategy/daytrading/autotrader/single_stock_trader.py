@@ -80,7 +80,7 @@ class SingleStockTrader:
         partial_tp: bool = True,
         risk_per_trade_pct: float = 0.01,
         max_daily_loss_pct: float = 2.0,
-        max_trades_per_day: int = 6,
+        max_trades_per_day: int = 0,   # 0 = unlimited (no artificial trade-count cap)
         max_consecutive_losses: int = 3,
         initial_capital: float = 10_000.0,
         on_trade_update: Callable[[dict], None] | None = None,
@@ -89,6 +89,9 @@ class SingleStockTrader:
         execution_service=None,   # ExecutionService | None — required for live orders
         account_id: str = "",     # broker account ID passed to ExecutionService
         tight_trail_on_exit_signal: bool = True,  # ride momentum after a sell signal
+        account_type: str = "cash",   # "cash" | "margin" — drives PDT guard
+        pdt_guard: bool = True,        # master switch for the PDT block (no-op when exempt)
+        max_open_positions: int = 1,   # concurrent positions (forwarded to RiskGovernor)
     ):
         self.symbol = symbol.upper()
         self._broker = broker
@@ -131,7 +134,17 @@ class SingleStockTrader:
             "max_daily_loss_pct": max_daily_loss_pct,
             "max_trades_per_day": max_trades_per_day,
             "max_consecutive_losses": max_consecutive_losses,
+            "max_open_positions": max_open_positions,
         })
+
+        # PDT (Pattern Day Trader) guard. Paper mode is always exempt; for live
+        # the tracker decides exemption from account_type + equity at gate time.
+        # broker is None ⇒ paper sim; otherwise treat as a real broker.
+        self.account_type = (account_type or "cash").lower()
+        self.pdt_guard = bool(pdt_guard)
+        # broker is None ⇒ in-process paper sim. A real BaseBroker exposes
+        # .is_paper (True for PaperBroker / Alpaca paper).
+        self._is_paper_account = broker is None or bool(getattr(broker, "is_paper", False))
 
         # Live data snapshots
         self._df_1m: pd.DataFrame | None = None
@@ -268,6 +281,7 @@ class SingleStockTrader:
                 ),
                 "decision_log": list(self._decision_log[-20:]),
                 "session_trades": [t.to_dict() for t in tsm.session_trades],
+                "pdt": self.pdt_status(),
             }
 
     def decision_summary(self, limit: int | None = None) -> dict[str, Any]:
@@ -531,6 +545,16 @@ class SingleStockTrader:
         if not gov.allowed:
             self.tsm.block(gov.reason)
             self._log("BLOCKED", gov.reason, "warn")
+            return
+
+        # ── PDT guard (live sub-$25k margin only; no-op otherwise) ─────────────
+        pdt = self._check_pdt()
+        if pdt is not None and not pdt.allowed:
+            # Do NOT permanently BLOCK the day here — the rolling window can free
+            # up, and exits on existing positions must still run. Just skip this
+            # entry cycle with a clear, logged reason.
+            self._last_no_trade_reason = pdt.reason
+            self._log("PDT_BLOCK", pdt.reason, "warning")
             return
 
         # ── Entry decision ─────────────────────────────────────────────────────
@@ -1008,6 +1032,82 @@ class SingleStockTrader:
         if fill_price and float(fill_price) > 0:
             return float(fill_price)
         return self._last_price()
+
+    # ── PDT guard ──────────────────────────────────────────────────────────────
+
+    def _pdt_equity(self) -> float:
+        """Best-effort current account equity for the $25k PDT exemption test.
+
+        Uses initial_capital + realized session P&L. This is intentionally simple
+        and conservative — if the true equity is higher, the worst case is the
+        guard staying on slightly longer than strictly required, which is the safe
+        direction for a compliance check.
+        """
+        return self.initial_capital + self.tsm.daily_pnl
+
+    def _pdt_round_trips(self) -> list[dict]:
+        """Pull recent live round-trips from the realized-trades table for the
+        rolling PDT window. Returns an empty list on any failure (fail-open is
+        acceptable because the guard only ever *adds* a restriction; a transient
+        DB hiccup must not wedge live trading).
+        """
+        from datetime import timedelta
+        try:
+            from app.db import SessionLocal
+            from app.models.realized_trades import RealizedTrade
+            cutoff = datetime.now(ET) - timedelta(days=10)  # > 5 biz days of slack
+            with SessionLocal() as db:
+                rows = (
+                    db.query(RealizedTrade)
+                    .filter(RealizedTrade.symbol == self.symbol)
+                    .filter(RealizedTrade.sell_at >= cutoff)
+                    .filter(RealizedTrade.is_paper.is_(False))
+                    .all()
+                )
+                return [
+                    {"symbol": r.symbol, "buy_at": r.buy_at, "sell_at": r.sell_at}
+                    for r in rows
+                ]
+        except Exception as e:
+            logger.debug("[pdt] round-trip fetch failed: %s", e)
+            return []
+
+    def _check_pdt(self):
+        """Return a PDTDecision when the guard is enabled, else None.
+
+        No-op (returns None) for paper accounts or when pdt_guard is off, so the
+        common path pays nothing. The PDTTracker itself also short-circuits when
+        the account is cash or funded ≥ $25k.
+        """
+        if not self.pdt_guard or self._is_paper_account:
+            return None
+        try:
+            from app.services.strategy.daytrading.brain.pdt_tracker import PDTTracker
+            tracker = PDTTracker(
+                account_type=self.account_type,
+                equity=self._pdt_equity(),
+                is_paper=self._is_paper_account,
+            )
+            return tracker.check_can_open_day_trade(
+                self._pdt_round_trips(), symbol=self.symbol
+            )
+        except Exception as e:
+            logger.warning("[pdt] guard evaluation failed (fail-open): %s", e)
+            return None
+
+    def pdt_status(self) -> dict[str, Any]:
+        """Read-only PDT standing for this symbol — surfaced by the status API."""
+        try:
+            from app.services.strategy.daytrading.brain.pdt_tracker import PDTTracker
+            tracker = PDTTracker(
+                account_type=self.account_type,
+                equity=self._pdt_equity(),
+                is_paper=self._is_paper_account,
+            )
+            return tracker.build_status(self._pdt_round_trips()).to_dict()
+        except Exception as e:
+            logger.debug("[pdt] status build failed: %s", e)
+            return {"guard_active": False, "exempt_reason": f"unavailable: {e}"}
 
     def _last_price(self) -> float:
         """Return the latest close from 5m data."""

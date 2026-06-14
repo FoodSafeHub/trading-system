@@ -112,6 +112,11 @@ class SymbolScanMetrics:
     gap_size: Literal["none", "small", "medium", "large", "extreme"]
     has_catalyst: bool
     catalyst_tags: list[str]                # ["earnings", "news", ...]
+    # How the catalyst was inferred. "heuristic" = volume-anomaly / best-effort
+    # yfinance earnings calendar (NOT a confirmed news event). "none" when no
+    # catalyst was flagged. Downstream code/UI must not treat "heuristic" as a
+    # confirmed catalyst.
+    catalyst_source: str = "none"           # "none" | "heuristic"
     # Raw snapshot for debugging
     prior_close: float = 0.0
     today_open: float = 0.0
@@ -138,6 +143,7 @@ class SymbolScanMetrics:
             "gap_size": self.gap_size,
             "has_catalyst": self.has_catalyst,
             "catalyst_tags": self.catalyst_tags,
+            "catalyst_source": self.catalyst_source,
             "prior_close": round(self.prior_close, 4),
             "today_open": round(self.today_open, 4),
             "data_quality": self.data_quality,
@@ -887,6 +893,7 @@ class DayTradingScanner:
             gap_size=gap_size,
             has_catalyst=len(catalyst_tags) > 0,
             catalyst_tags=catalyst_tags,
+            catalyst_source="heuristic" if catalyst_tags else "none",
             prior_close=round(prior_close, 4),
             today_open=round(open_price, 4),
             data_quality="ok",
@@ -1107,6 +1114,62 @@ class DayTradingScanner:
         )
         return watchlist
 
+    def scan_diagnostics(self, sample_rejections: int = 12) -> dict[str, Any]:
+        """Explain *why* the universe collapsed: per-phase survivor counts and a
+        histogram of rejection reasons.
+
+        Runs the full scan() (reusing the in-process daily / pm-vol caches, so on
+        a warm cache this is nearly free) and then re-scores every survivor to
+        tally how many were dropped by each hard filter. Read-only — does not arm
+        anything. Surfaced by the ``/daytrading/scanner/diagnostics`` endpoint.
+        """
+        universe = self.load_universe()
+        # Build metrics for survivors using the same pipeline scan() uses.
+        # scan() already populates the caches; calling it warms them and gives us
+        # the passing set. We then independently score the survivors to bucket
+        # rejections (score_symbol stamps rejection_reason for each).
+        passed = self.scan(max_symbols=10_000)  # effectively "all that pass"
+        passed_syms = {r.symbol for r in passed}
+
+        # Rebuild metrics for the cached survivors to classify rejections.
+        from app.services.markets import is_india_symbol as _is_india
+        daily = DayTradingScanner._daily_cache
+        pm = DayTradingScanner._pm_vol_cache
+        rejection_hist: dict[str, int] = {}
+        examples: dict[str, list[str]] = {}
+        survivors_scored = 0
+
+        for sym, df in (daily or {}).items():
+            try:
+                m = self._metrics_from_cache(sym, df, pm.get(sym, 0.0))
+            except Exception:
+                continue
+            survivors_scored += 1
+            result = self.score_symbol(m)
+            if result.rejection_reason:
+                bucket = _bucket_rejection(result.rejection_reason)
+                rejection_hist[bucket] = rejection_hist.get(bucket, 0) + 1
+                if len(examples.setdefault(bucket, [])) < 3:
+                    examples[bucket].append(f"{sym}: {result.rejection_reason}")
+
+        return {
+            "market": self.config.market,
+            "universe_size": len(universe),
+            "phase1_survivors_scored": survivors_scored,
+            "passed_all_filters": len(passed_syms),
+            "rejection_histogram": _sorted_rejection_hist(rejection_hist),
+            "rejection_examples": {k: examples[k] for k in list(examples)[:sample_rejections]},
+            "config_snapshot": {
+                "min_price": self.config.min_price,
+                "max_price": self.config.max_price,
+                "min_avg_volume": self.config.min_avg_volume,
+                "min_atr_pct": self.config.min_atr_pct,
+                "max_atr_pct": self.config.max_atr_pct,
+                "min_float": self.config.min_float,
+                "max_float": self.config.max_float,
+            },
+        }
+
     def _apply_native_precheck(
         self,
         watchlist: list["SymbolScanResult"],
@@ -1241,6 +1304,7 @@ class DayTradingScanner:
             gap_size=gap_size,
             has_catalyst=has_catalyst,
             catalyst_tags=catalyst_tags,
+            catalyst_source="heuristic" if has_catalyst else "none",
             prior_close=round(prior_close, 4),
             today_open=round(open_price, 4),
             data_quality="ok",
@@ -1348,6 +1412,37 @@ def _fetch_float(symbol: str) -> float:
         return float(val) if val else 0.0
     except Exception:
         return 0.0
+
+
+def _bucket_rejection(reason: str) -> str:
+    """Collapse a free-text rejection reason into a stable category for the
+    diagnostics histogram. Mirrors the strings score_symbol() emits."""
+    r = reason.lower()
+    if "no_data" in r:
+        return "no_data"
+    if "price" in r and "< min" in r:
+        return "price_below_min"
+    if "price" in r and "> max" in r:
+        return "price_above_max"
+    if "avg_vol" in r:
+        return "liquidity_below_min"
+    if "float" in r and "< min" in r:
+        return "float_below_min"
+    if "float" in r and "> max" in r:
+        return "float_above_max"
+    if "too low" in r or "dead" in r:
+        return "atr_too_low"
+    if "too wild" in r:
+        return "atr_too_high"
+    return "other"
+
+
+def _sorted_rejection_hist(counts: dict[str, int]) -> list[dict[str, Any]]:
+    """Return the rejection histogram as a sorted list for deterministic JSON."""
+    return [
+        {"reason": k, "count": v}
+        for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
 
 
 def _compute_daily_atr(df: pd.DataFrame, period: int = 14) -> float:
