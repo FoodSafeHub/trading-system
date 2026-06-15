@@ -145,82 +145,69 @@ def _reconcile_trail_stops(
     live_prices: dict[str, float],
     svc_for,
 ) -> None:
-    """Safety net: arm a tight trail for any held position that has a recent
-    SELL signal but no resting protective SELL stop.
+    """Bring every held position into the correct tight-trail state.
 
-    Catches the gap where a SELL signal fired (scheduler OR scanner discovery)
-    on a held position but no trailing stop ended up resting — e.g. a prior
-    cycle's broker fetch failed, or the SELL was scanner-only. Runs at the end
-    of the live cycle so it can't conflict with the entry/exit loop above.
+    For each held position whose ASSIGNED strategy fired a SELL signal (the
+    scanner-stream signal) at/after acquisition, call tighten_trail_on_sell —
+    which implements Approach C end-to-end: it holds off until price clears the
+    arm gate (signal + 0.25%), then places/ratchets a bot-managed STOP floored
+    at signal + 0.25% so a reversal still exits in profit.
 
-    Idempotent: tighten_trail_on_sell cancels any resting SELL stop first, so a
-    symbol that already has a healthy trail just gets it re-placed at the same
-    level. Assigned-symbol immunity is irrelevant here because this only ACTS
-    on held positions and uses the assignment's own trail_pct when present.
+    Idempotency/ratchet lives INSIDE tighten_trail_on_sell now: it re-computes
+    the floored target each cycle and only cancel/replaces when the new stop is
+    materially higher than the resting one, so calling it every cycle is safe and
+    keeps the stop climbing. We no longer reason about native TRAILING_STOP vs
+    static STOP here — the bot manages a floored STOP on every broker so the
+    hard floor is guaranteed (a native % trail could sit below it).
+
+    Uses first_assigned_sell_signals so the anchor matches the PnL table exactly
+    (first scanner-stream SELL from the assigned strategy, after acquisition).
     """
-    from datetime import datetime as _dt, timedelta as _td
-    from app.models.signals import Signal
-    from app.models.orders import Order
+    from app.services.pnl.store import sync_realized_trades
+    from app.services.strategy.trail_anchor import (
+        assigned_strategy_map, assigned_trail_pct_map, first_assigned_sell_signals,
+    )
 
-    held = {s: q for s, q in current_positions.items() if q and q >= 1.0}
+    held = {s.upper(): q for s, q in current_positions.items() if q and q >= 1.0}
     if not held:
         return
-
-    # Look back 3 days for the latest SELL signal per held symbol.
-    cutoff = _dt.utcnow() - _td(days=3)
-    asgn_by_symbol = {a["symbol"].upper(): a for a in assignments}
-
-    # Broker working SELL stops — fetched ONCE (source of truth; DB may lag).
-    broker_protected: set[str] = set()
-    try:
-        bro = loop.run_until_complete(broker.list_orders(account_id, status="working"))
-        for o in (bro or []):
-            if (getattr(o, "side", "").upper() == "SELL"
-                    and getattr(o, "order_type", "").upper() in ("STOP", "TRAILING_STOP")):
-                broker_protected.add(getattr(o, "symbol", "").upper())
-    except Exception as exc:
-        logger.debug("[scheduler] Trail reconcile: broker order fetch failed: %s", exc)
+    symbols = list(held.keys())
 
     with SessionLocal() as db:
-        # Symbols that already have a resting SELL stop in our DB — skip those.
-        resting = {
-            o.symbol.upper()
-            for o in db.query(Order).filter(
-                Order.symbol.in_(list(held.keys())),
-                Order.side == "SELL",
-                Order.order_type.in_(["STOP", "TRAILING_STOP"]),
-                Order.status.in_(["submitted", "working"]),
-            ).all()
-        }
-        resting |= broker_protected
+        # FIFO earliest-buy per held symbol (anchor cutoff for the SELL signal).
+        try:
+            _ins, fifo = sync_realized_trades(db)
+            earliest_buy = {}
+            for lot in fifo.open_lots:
+                sym = lot.symbol.upper()
+                if sym not in earliest_buy or lot.buy_at < earliest_buy[sym]:
+                    earliest_buy[sym] = lot.buy_at
+        except Exception as exc:
+            logger.warning("[scheduler] Trail reconcile: FIFO build failed: %s", exc)
+            earliest_buy = {}
+
+        assigned_strat = assigned_strategy_map(db, symbols)
+        trail_pcts = assigned_trail_pct_map(db, symbols)
+        anchor_sig = first_assigned_sell_signals(db, assigned_strat, earliest_buy)
 
         for symbol, qty in held.items():
-            if symbol in resting:
-                continue  # already protected (DB or broker)
-            # Most recent SELL signal for this held symbol (any source).
-            sig = (
-                db.query(Signal)
-                .filter(
-                    Signal.symbol == symbol.upper(),
-                    Signal.direction == "SELL",
-                    Signal.price_at_signal.isnot(None),
-                    Signal.created_at >= cutoff,
-                )
-                .order_by(Signal.created_at.desc())
-                .first()
-            )
+            sig = anchor_sig.get(symbol)
             if sig is None:
-                continue
+                continue  # assigned strategy hasn't flagged an exit — leave it
 
-            asgn = asgn_by_symbol.get(symbol)
-            trail_pct = float((asgn.get("tight_trail_pct") if asgn else None) or 2.0)
-            sig_price = live_prices.get(symbol) or float(sig.price_at_signal)
-
+            asgn = next((a for a in assignments if a["symbol"].upper() == symbol), None)
+            trail_pct = trail_pcts.get(symbol, 2.0)
+            sig_price = float(sig.price_at_signal)
             exec_svc, exec_acct = svc_for((asgn or {}).get("broker", "default") or "default")
+
+            # tighten_trail_on_sell is the single source of Approach C: arm gate,
+            # hard floor, and per-cycle ratchet all live inside it and are
+            # idempotent, so we always call it (no force_replace needed). It
+            # holds off below the arm gate and only ratchets the floored STOP up.
             logger.info(
-                "[scheduler] Trail reconcile: %s held=%.4f has SELL signal "
-                "(%s @ $%.2f) but no resting trail — arming %.1f%% trail.",
-                symbol, qty, sig.strategy_name, sig_price, trail_pct,
+                "[scheduler] Trail reconcile: %s held=%.4f assigned SELL @ $%.2f "
+                "(%s) — evaluating %.1f%% floored trail.",
+                symbol, qty, sig_price, sig.strategy_name, trail_pct,
             )
             try:
                 ok = loop.run_until_complete(exec_svc.tighten_trail_on_sell(
@@ -228,6 +215,7 @@ def _reconcile_trail_stops(
                     quantity=qty,
                     account_id=exec_acct,
                     signal_price=sig_price,
+                    signal_at=sig.created_at,
                     trail_pct=trail_pct,
                     source="scheduler",
                     idempotency_suffix=f"reconcile-{symbol}-{int(sig_price * 100)}",
@@ -238,6 +226,78 @@ def _reconcile_trail_stops(
                     db.commit()
             except Exception as exc:
                 logger.warning("[scheduler] Trail reconcile failed for %s: %s", symbol, exc)
+
+
+def reconcile_trails_now() -> dict:
+    """Standalone trail reconciliation — sets up its own broker context and runs
+    _reconcile_trail_stops across every held position.
+
+    Callable on demand (API endpoint / manual trigger) independent of the
+    15-min scheduler cycle. Returns a summary dict for the caller.
+    """
+    import asyncio as _aio
+    from app.models.assignments import SymbolStrategyAssignment
+
+    loop = _aio.new_event_loop()
+    try:
+        broker = get_broker()
+        loop.run_until_complete(broker.authenticate())
+        accounts = loop.run_until_complete(broker.get_accounts())
+        account_id = accounts[0].account_id if accounts else ""
+
+        positions = loop.run_until_complete(broker.get_positions(account_id))
+        current_positions = {p.symbol.upper(): p.quantity for p in positions}
+
+        with SessionLocal() as db:
+            assignments = [
+                {"symbol": a.symbol, "broker": a.broker or "default",
+                 "tight_trail_pct": a.tight_trail_pct}
+                for a in db.query(SymbolStrategyAssignment).filter_by(enabled=True).all()
+            ]
+
+        # Live quotes for the held symbols (best-effort; reconcile reads them).
+        live_prices: dict[str, float] = {}
+        try:
+            held_syms = [s for s, q in current_positions.items() if q and q >= 1.0]
+            if held_syms:
+                quotes = loop.run_until_complete(broker.get_quotes(held_syms))
+                for s, q in (quotes or {}).items():
+                    px = getattr(q, "last", None) or getattr(q, "bid", None) or getattr(q, "ask", None)
+                    if px:
+                        live_prices[s.upper()] = float(px)
+        except Exception:
+            pass
+
+        # Per-assignment broker routing (mirror the cycle's _svc_for).
+        svc_cache: dict[str, tuple] = {"default": (ExecutionService(broker), account_id)}
+
+        def _svc_for(name: str):
+            key = (name or "default").lower()
+            if key in svc_cache:
+                return svc_cache[key]
+            try:
+                b = _build_one(key)
+                loop.run_until_complete(b.authenticate())
+                accts = loop.run_until_complete(b.get_accounts())
+                aid = accts[0].account_id if accts else ""
+                pair = (ExecutionService(b), aid)
+                svc_cache[key] = pair
+                return pair
+            except Exception as exc:
+                logger.warning("[scheduler] reconcile _svc_for(%s) failed: %s — using default", name, exc)
+                return svc_cache["default"]
+
+        _reconcile_trail_stops(
+            loop, broker, account_id,
+            current_positions, assignments, live_prices, _svc_for,
+        )
+        n_held = sum(1 for q in current_positions.values() if q and q >= 1.0)
+        return {"status": "ok", "held_positions": n_held}
+    except Exception as exc:
+        logger.error("[scheduler] reconcile_trails_now failed: %s", exc, exc_info=True)
+        return {"status": "error", "error": str(exc)}
+    finally:
+        loop.close()
 
 
 def _live_position_state(symbol: str, df, held_qty: float):
@@ -972,6 +1032,28 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
 _scheduler: BackgroundScheduler | None = None
 _SCANNER_WATCHLIST_INTERVAL_SECONDS = 900    # 15 min — small universe, cheap
 _SCANNER_LARGE_INTERVAL_SECONDS = 4 * 3600   # 4 h — sp500/nasdaq100 each take 2–5 min
+# Fast trail ratchet — the full strategy cycle is 15 min, far too slow for a
+# trailing stop (a spike could round-trip within one cycle). This lightweight
+# job ONLY re-evaluates armed floored-stops every minute (positions + quotes +
+# tighten_trail_on_sell), so the bot-managed phase ratchets tightly and hands
+# off to a broker-native trail as soon as the trail level clears the floor.
+_FAST_TRAIL_INTERVAL_SECONDS = 60
+
+
+def _run_fast_trail_job() -> None:
+    """Ratchet armed tight-trails every minute during market hours.
+
+    Reuses reconcile_trails_now(), which only touches held positions that have a
+    qualifying assigned SELL signal — idempotent and a no-op when nothing is
+    armed, so it's safe to run frequently. Skips outside market hours.
+    """
+    settings = get_settings()
+    if not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
+        return
+    try:
+        reconcile_trails_now()
+    except Exception as exc:
+        logger.error("[scheduler] Fast trail job failed: %s", exc)
 
 
 def _run_scanner_job_universe(universe: str, top_n: int = 5) -> None:
@@ -1403,6 +1485,16 @@ def start_scheduler() -> None:
         replace_existing=True,
         max_instances=1,
     )
+    _scheduler.add_job(
+        _run_fast_trail_job,
+        trigger=IntervalTrigger(seconds=_FAST_TRAIL_INTERVAL_SECONDS),
+        id="fast_trail_ratchet",
+        name="Fast Tight-Trail Ratchet",
+        replace_existing=True,
+        # Don't pile up if a run overruns the 60s interval; just skip the tick.
+        max_instances=1,
+        coalesce=True,
+    )
     # ── M1 SIP advisor — daily scans (advisory only, emits notifications) ──
     # Pre-open digest (~9:00 ET) and post-close review (~16:15 ET), in US/Eastern
     # so DST is handled automatically.
@@ -1433,7 +1525,8 @@ def start_scheduler() -> None:
         f"[scheduler] Started — strategy_cycle={settings.scheduler_interval_seconds}s, "
         f"scanner watchlist={_SCANNER_WATCHLIST_INTERVAL_SECONDS}s, "
         f"scanner sp500/nasdaq100={_SCANNER_LARGE_INTERVAL_SECONDS}s, "
-        f"position_sync={_POSITION_SYNC_INTERVAL_SECONDS}s"
+        f"position_sync={_POSITION_SYNC_INTERVAL_SECONDS}s, "
+        f"fast_trail={_FAST_TRAIL_INTERVAL_SECONDS}s"
     )
 
 

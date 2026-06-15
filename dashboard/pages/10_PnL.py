@@ -91,7 +91,10 @@ if not eq:
     st.info("No realized trades yet. The curve fills in as round-trips close.")
 else:
     df_eq = pd.DataFrame(eq)
-    df_eq["at"] = pd.to_datetime(df_eq["at"])
+    # Timestamps may arrive as tz-aware ISO-8601 with offsets (e.g.
+    # "2026-06-15T09:30:03-04:00") or naive; format="ISO8601" parses both,
+    # then drop tz so all points share one naive axis (avoids mixed-tz errors).
+    df_eq["at"] = pd.to_datetime(df_eq["at"], format="ISO8601", utc=True).dt.tz_localize(None)
 
     max_dd = float(df_eq["drawdown"].max()) if "drawdown" in df_eq else 0.0
     max_dd_pct = df_eq["drawdown_pct"].max() if "drawdown_pct" in df_eq else None

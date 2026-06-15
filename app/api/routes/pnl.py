@@ -559,52 +559,17 @@ def pnl_open_trails(db: Session = Depends(get_db)):
     # The qualifying signal MUST come from the symbol's ASSIGNED strategy (the
     # scheduler stores it as the bare name or "scanner:<name>"), and must have
     # fired AFTER the position was acquired (earliest open lot).
-    from app.models.assignments import SymbolStrategyAssignment
+    # Shared helper — same anchor logic the scheduler's trail reconcile uses,
+    # so the table and the actual armed trails never diverge.
+    from app.services.strategy.trail_anchor import (
+        assigned_strategy_map, assigned_trail_pct_map, first_assigned_sell_signals,
+    )
 
-    assigned_strat: dict[str, str] = {}
-    assigned_trail_pct: dict[str, float] = {}   # per-symbol tight_trail_pct (default 2%)
-    if symbols:
-        for a in (
-            db.query(SymbolStrategyAssignment)
-            .filter(
-                SymbolStrategyAssignment.symbol.in_(symbols),
-                SymbolStrategyAssignment.enabled == True,  # noqa: E712
-            )
-            .all()
-        ):
-            assigned_strat[a.symbol.upper()] = a.strategy_name
-            assigned_trail_pct[a.symbol.upper()] = float(a.tight_trail_pct or 2.0)
-
-    fallback_sig: dict[str, Signal] = {}
-    if assigned_strat:
-        # Anchor to the SCANNER discovery stream for the assigned strategy
-        # ("scanner:<assigned_strategy>") — this is the feed shown on the
-        # Notifications page and is the signal price the user references.
-        scanner_names = {f"scanner:{nm}": sym
-                         for sym, nm in assigned_strat.items()}
-
-        all_sells = (
-            db.query(Signal)
-            .filter(
-                Signal.symbol.in_(list(assigned_strat.keys())),
-                Signal.direction == "SELL",
-                Signal.price_at_signal.isnot(None),
-                Signal.strategy_name.in_(list(scanner_names.keys())),
-            )
-            .order_by(Signal.created_at.asc())   # earliest first
-            .all()
-        )
-        for s in all_sells:
-            sym = s.symbol.upper()
-            if sym in fallback_sig:
-                continue  # already have the FIRST qualifying signal
-            # Confirm this scanner signal belongs to THIS symbol's assigned strategy.
-            if scanner_names.get(s.strategy_name) != sym:
-                continue
-            # Only signals fired AFTER the position was acquired.
-            buy_t = earliest_buy.get(sym)
-            if buy_t is None or _naive(s.created_at) >= _naive(buy_t):
-                fallback_sig[sym] = s
+    assigned_strat = assigned_strategy_map(db, symbols)
+    assigned_trail_pct = assigned_trail_pct_map(db, symbols)
+    fallback_sig: dict[str, Signal] = first_assigned_sell_signals(
+        db, assigned_strat, earliest_buy,
+    )
 
     # Show held positions whose ASSIGNED strategy fired a SELL after acquisition
     # (whether or not a trail is currently resting), PLUS any symbol that already

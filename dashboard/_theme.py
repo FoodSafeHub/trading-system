@@ -6,28 +6,36 @@ then composes pages out of the helpers below (`section`, `kpi_row`, `pill`,
 UI feels less like a stack of unrelated dashboards and more like a professional
 trading terminal.
 
+Design language: "Midnight" — a modern fintech dark theme on a blue-black
+canvas with an electric violet→cyan accent gradient, glassy elevated surfaces,
+and soft accent glows. Token NAMES are kept stable (e.g. ``--teal`` is still the
+primary-accent token) so all pages reskin automatically; only the VALUES and
+component styling change.
+
 Design system token reference (mirrored in .streamlit/config.toml):
-  --bg        #0a0d13   deep graphite canvas
-  --panel     #111620   primary surface (cards, containers)
-  --panel-2   #181d28   raised surface (hover, headers, nav active)
-  --panel-3   #1e2433   highest elevation (dropdowns, tooltips)
-  --line      rgba(255,255,255,0.06)   hairline border
-  --line-2    rgba(255,255,255,0.11)   medium border (hover, focus)
-  --line-3    rgba(255,255,255,0.18)   strong border (active)
-  --text      #eaecf0   primary off-white
-  --text-2    #8e97a8   secondary / labels
-  --text-3    #5a6373   tertiary / helpers / metadata
-  --teal      #37b8aa   primary accent (restrained, not neon)
-  --teal-dim  rgba(55,184,170,0.12)   teal background tint
-  --gold      #b89c6b   section accent rule only
-  --pos       #4db896   gains (teal-green, elegant)
-  --pos-bg    rgba(77,184,150,0.10)
-  --neg       #d07a7a   losses (muted terracotta, not alarming)
-  --neg-bg    rgba(208,122,122,0.10)
-  --warn      #c29445   warnings / amber
-  --warn-bg   rgba(194,148,69,0.10)
-  --info      #5b92d1   informational / blue
-  --info-bg   rgba(91,146,209,0.10)
+  --bg        #0b0c14   blue-black canvas
+  --panel     #14162280 primary surface (glassy cards, containers)
+  --panel-2   #191c2e   raised surface (hover, headers, nav active)
+  --panel-3   #21253a   highest elevation (dropdowns, tooltips)
+  --line      rgba(255,255,255,0.07)   hairline border
+  --line-2    rgba(255,255,255,0.12)   medium border (hover, focus)
+  --line-3    rgba(255,255,255,0.20)   strong border (active)
+  --text      #eef0f6   primary near-white
+  --text-2    #9aa3bd   secondary / labels
+  --text-3    #626a86   tertiary / helpers / metadata
+  --teal      #7c5cff   PRIMARY accent (electric violet) — name kept for compat
+  --cyan      #22d3ee   secondary accent (cyan, end of gradient)
+  --accent-grad linear violet→cyan   buttons, highlights, active bars
+  --teal-dim  rgba(124,92,255,0.14)   accent background tint
+  --gold      #f0b429   section accent rule only (warm amber)
+  --pos       #34d399   gains (emerald)
+  --pos-bg    rgba(52,211,153,0.11)
+  --neg       #fb7185   losses (rose)
+  --neg-bg    rgba(251,113,133,0.11)
+  --warn      #fbbf24   warnings / amber
+  --warn-bg   rgba(251,191,36,0.11)
+  --info      #38bdf8   informational / sky
+  --info-bg   rgba(56,189,248,0.11)
 """
 from __future__ import annotations
 
