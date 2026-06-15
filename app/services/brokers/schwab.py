@@ -421,14 +421,19 @@ class SchwabBroker(BrokerBase):
         data = await self._get(f"/accounts/{account_hash}/orders/{broker_order_id}")
         return self._parse_order_response(data)
 
-    async def list_orders(self, account_id: str, status: Optional[str] = None) -> List[OrderStatusResponse]:
+    async def list_orders(
+        self, account_id: str, status: Optional[str] = None, lookback_days: int = 7,
+    ) -> List[OrderStatusResponse]:
         # Schwab requires fromEnteredTime/toEnteredTime in ISO-8601 UTC ("...Z").
-        # Without them the endpoint returns 400. Default window: last 7 days.
+        # Without them the endpoint returns 400. Default window: last 7 days;
+        # callers (e.g. a backfill reconcile) can widen it via lookback_days.
+        # maxResults is generous so an active day's orders aren't truncated —
+        # a low cap silently dropped fills (a closed symbol then looked open).
         now = datetime.now(tz=timezone.utc)
         params: dict = {
-            "fromEnteredTime": (now - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "fromEnteredTime": (now - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
             "toEnteredTime":   now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-            "maxResults":      100,
+            "maxResults":      3000,
         }
         if status:
             # Schwab status values are uppercase: WORKING, FILLED, CANCELED, etc.

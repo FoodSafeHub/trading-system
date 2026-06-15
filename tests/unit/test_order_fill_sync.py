@@ -38,6 +38,7 @@ class _FakeBroker:
 
     def __init__(self, orders):
         self._orders = orders
+        self.last_lookback = None
 
     async def authenticate(self):
         return True
@@ -45,7 +46,8 @@ class _FakeBroker:
     async def get_accounts(self):
         return [SimpleNamespace(account_id="ACCT1")]
 
-    async def list_orders(self, account_id, status=None):
+    async def list_orders(self, account_id, status=None, lookback_days=7):
+        self.last_lookback = lookback_days
         return list(self._orders)
 
 
@@ -159,3 +161,16 @@ def test_non_fill_status_creates_no_row(db_session):
     assert result["updated"] == 0
     with db_session() as db:
         assert db.query(Order).filter_by(broker_order_id="W-1").count() == 0
+
+
+def test_lookback_days_passed_through(db_session):
+    """A backfill must widen the broker order window — lookback_days reaches the
+    adapter so a position that closed >7 days ago can still be ingested."""
+    from app.services.reconciliation.order_sync import sync_broker_orders_once
+
+    broker = _FakeBroker([_bo("B-9", "ABNB", "SELL", 3, "filled", fill_price=138.755)])
+    patches = _patch_env(db_session, broker)
+    with patches[0], patches[1], patches[2], patches[3]:
+        sync_broker_orders_once(lookback_days=30)
+
+    assert broker.last_lookback == 30

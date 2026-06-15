@@ -147,5 +147,12 @@ class MultiBroker(BrokerBase):
     async def get_order(self, broker_order_id: str, account_id: str) -> OrderStatusResponse:
         return await self._primary.get_order(broker_order_id, account_id)
 
-    async def list_orders(self, account_id: str, status: Optional[str] = None) -> List[OrderStatusResponse]:
-        return await self._primary.list_orders(account_id, status)
+    async def list_orders(
+        self, account_id: str, status: Optional[str] = None, lookback_days: int = 7,
+    ) -> List[OrderStatusResponse]:
+        # Pass lookback_days through when the primary adapter supports it (Schwab
+        # does; others may not), so a backfill reconcile can widen the window.
+        try:
+            return await self._primary.list_orders(account_id, status, lookback_days=lookback_days)
+        except TypeError:
+            return await self._primary.list_orders(account_id, status)

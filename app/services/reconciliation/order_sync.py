@@ -73,17 +73,26 @@ def _broker_is_paper(broker) -> bool:
     return "paper" in name and not any(b in name for b in ("schwab", "webull", "zerodha"))
 
 
-def _reconcile_one_broker(broker, loop) -> tuple[int, int]:
+def _reconcile_one_broker(broker, loop, lookback_days: int = 7) -> tuple[int, int]:
     """Reconcile a single broker's recent orders into the DB.
 
-    Returns (updated, created) counts.
+    lookback_days widens the broker order window (e.g. a one-time backfill of a
+    symbol that closed more than the default window ago). Returns (updated,
+    created) counts.
     """
     bname = getattr(broker, "name", "") or "unknown"
     try:
         loop.run_until_complete(broker.authenticate())
         accounts = loop.run_until_complete(broker.get_accounts())
         account_id = accounts[0].account_id if accounts else ""
-        broker_orders = loop.run_until_complete(broker.list_orders(account_id)) or []
+        # Pass lookback_days when the adapter supports it; fall back gracefully
+        # for brokers whose list_orders doesn't take the kwarg.
+        try:
+            broker_orders = loop.run_until_complete(
+                broker.list_orders(account_id, lookback_days=lookback_days)
+            ) or []
+        except TypeError:
+            broker_orders = loop.run_until_complete(broker.list_orders(account_id)) or []
     except Exception as exc:
         logger.warning("[order_sync] %s: could not list orders: %s", bname, exc)
         return 0, 0
@@ -174,9 +183,13 @@ def _reconcile_one_broker(broker, loop) -> tuple[int, int]:
     return updated, created
 
 
-def sync_broker_orders_once() -> dict:
+def sync_broker_orders_once(lookback_days: int = 7) -> dict:
     """Reconcile every relevant broker's recent orders into the DB, then
     materialize realized trades so PnL/Recent Fills update automatically.
+
+    lookback_days widens the broker order window — the default 7 covers routine
+    syncing; pass a larger value for a one-time backfill of a position that
+    closed further back.
 
     Brokers covered: the global active broker (Schwab/Webull/paper) plus Zerodha
     when any enabled assignment routes to India. Never raises — returns a summary.
@@ -205,7 +218,7 @@ def sync_broker_orders_once() -> dict:
             logger.error("[order_sync] could not build Zerodha broker: %s", exc)
 
         for broker in brokers:
-            u, c = _reconcile_one_broker(broker, loop)
+            u, c = _reconcile_one_broker(broker, loop, lookback_days=lookback_days)
             total_updated += u
             total_created += c
     finally:
