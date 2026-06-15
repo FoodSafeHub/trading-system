@@ -92,6 +92,23 @@ def _no_ohlcv():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _isolated_trail_peaks_db():
+    """Point the trail-peak persistence at a fresh in-memory DB per test, so the
+    durable high-water mark never leaks between tests (or into the project DB)."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.db import Base
+    from app.models.trail_peaks import TrailPeak  # noqa: F401 — register table
+    import app.services.execution.service as svc_mod
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine, tables=[TrailPeak.__table__])
+    TestSession = sessionmaker(bind=engine)
+    with patch.object(svc_mod, "SessionLocal", TestSession):
+        yield TestSession
+
+
 async def test_pending_arm_below_gate_places_nothing():
     # signal 100 → floor/arm gate = 100.25; current 100.0 < gate → pending arm.
     broker = _FakeBroker(working_orders=[], price=100.0)
@@ -253,3 +270,42 @@ async def test_zero_signal_price_falls_back_to_current():
     )
 
     assert ok is True
+
+
+async def test_durable_peak_holds_on_pullback_across_cycles(_isolated_trail_peaks_db):
+    """The user's scenario: a $45 peak a few days ago, today's high is lower.
+    The DURABLE persisted peak must govern — cycle 2 (price faded to $42) must
+    NOT lower the stop to 42×0.98; it stays at the stored 45×0.98 = $44.10."""
+    from app.models.trail_peaks import TrailPeak
+    TestSession = _isolated_trail_peaks_db
+
+    # Cycle 1 — price at the $45 peak, no resting order. signal 40 → floor 40.10;
+    # trail 45×0.98 = 44.10. Static STOP path placed at the peak-based level.
+    broker = _FakeBroker(working_orders=[], price=45.0)
+    broker.supports_native_trailing_stop = False
+    svc = _svc(broker)
+    ok = await svc.tighten_trail_on_sell(
+        symbol="AMAL", quantity=10, account_id="X",
+        signal_price=40.0, trail_pct=2.0, signal_id=999,
+    )
+    assert ok is True
+    assert broker.place_calls[0].stop_price == pytest.approx(44.10, abs=0.01)
+    with TestSession() as db:
+        row = db.query(TrailPeak).filter_by(symbol="AMAL", signal_id=999).one()
+        assert row.peak_price == pytest.approx(45.0, abs=0.01)
+
+    # Cycle 2 — price faded to $42, resting STOP at 44.10. The durable peak ($45)
+    # must win: target stays 44.10, no downward move / no churn.
+    broker2 = _FakeBroker(working_orders=[_resting_stop("AMAL", 44.10)], price=42.0)
+    broker2.supports_native_trailing_stop = False
+    svc2 = _svc(broker2)
+    ok2 = await svc2.tighten_trail_on_sell(
+        symbol="AMAL", quantity=10, account_id="X",
+        signal_price=40.0, trail_pct=2.0, signal_id=999,
+    )
+    assert ok2 is True
+    assert broker2.cancel_calls == []   # stop NOT lowered to 42×0.98=41.16
+    assert broker2.place_calls == []
+    with TestSession() as db:
+        row = db.query(TrailPeak).filter_by(symbol="AMAL", signal_id=999).one()
+        assert row.peak_price == pytest.approx(45.0, abs=0.01)

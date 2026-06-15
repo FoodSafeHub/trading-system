@@ -149,6 +149,12 @@ class OpenTrailOut(BaseModel):
     # level before the reconciliation actually arms the broker order.
     est_trail_trigger: Optional[float] = None
 
+    # Durable high-water mark the trail ratchets off (from trail_peaks). This is
+    # the authoritative peak since the SELL signal — the stop holds at
+    # peak × (1 - trail_pct%) and does NOT drop when price pulls back below it.
+    peak_price: Optional[float] = None
+    peak_at: Optional[datetime] = None
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -571,6 +577,23 @@ def pnl_open_trails(db: Session = Depends(get_db)):
         db, assigned_strat, earliest_buy,
     )
 
+    # Durable high-water marks the trail ratchets off (one per symbol; latest
+    # row wins). This is the persisted peak the scheduler advances each cycle —
+    # the authoritative value the stop is measured against.
+    trail_peak_by_symbol: dict[str, tuple] = {}
+    try:
+        from app.models.trail_peaks import TrailPeak
+        if symbols:
+            for tp in (
+                db.query(TrailPeak)
+                .filter(TrailPeak.symbol.in_([s.upper() for s in symbols]))
+                .order_by(TrailPeak.id.asc())
+                .all()
+            ):
+                trail_peak_by_symbol[tp.symbol.upper()] = (tp.peak_price, tp.peak_at)
+    except Exception:
+        trail_peak_by_symbol = {}
+
     # Show held positions whose ASSIGNED strategy fired a SELL after acquisition
     # (whether or not a trail is currently resting), PLUS any symbol that already
     # has a resting trail order in the DB or on the broker.
@@ -640,12 +663,22 @@ def pnl_open_trails(db: Session = Depends(get_db)):
         #   trigger = max(floor, native)
         # Only meaningful while SIGNAL_ONLY; once a real order rests the
         # broker-managed trigger (stop_price / trail_pct) applies.
+        # Durable persisted peak (authoritative; the scheduler advances it each
+        # cycle). Prefer it over a fresh OHLCV lookup so the table matches the
+        # exact value the live trail measures against.
+        _persisted = trail_peak_by_symbol.get(sym)
+        peak_price = float(_persisted[0]) if _persisted else None
+        peak_at = _persisted[1] if _persisted else None
+
         est_trail_trigger = None
         if order_type == "SIGNAL_ONLY" and sig_price and sig_price > 0:
             _tp = assigned_trail_pct.get(sym, 2.0)
             floor = sig_price * 1.0025
-            sig_time = sig.created_at if sig else None
-            peak = _peak_since(sym, sig_time)
+            # Use the persisted peak when present; else reconstruct from OHLCV.
+            peak = peak_price or 0.0
+            if peak <= 0:
+                sig_time = sig.created_at if sig else None
+                peak = _peak_since(sym, sig_time)
             if peak <= 0:
                 # No history — fall back to the larger of last/signal so we
                 # never imply a trail below where price has actually been.
@@ -675,6 +708,8 @@ def pnl_open_trails(db: Session = Depends(get_db)):
             move_since_signal_pct=move_pct,
             trail_helping=helping,
             est_trail_trigger=est_trail_trigger,
+            peak_price=peak_price,
+            peak_at=peak_at,
         ))
 
     out.sort(key=lambda r: (r.move_since_signal_pct or -999), reverse=True)

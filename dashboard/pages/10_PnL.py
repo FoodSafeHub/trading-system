@@ -453,8 +453,17 @@ else:
         sa = row.get("signal_at") or row.get("armed_at")
         return str(sa)[:16].replace("T", " ") if sa else "—"
 
+    def _peak_at(row) -> str:
+        # Durable high-water mark the trail ratchets off. The stop holds at
+        # peak × (1 - trail%) and does NOT drop when price pulls back below it.
+        pk = row.get("peak_price")
+        if pk is None:
+            return "—"
+        return _money_at(row, "peak_price")
+
     df_at["_sig_px"]    = df_at.apply(lambda r: _money_at(r, "signal_price"), axis=1)
     df_at["_last"]      = df_at.apply(lambda r: _money_at(r, "last_price"), axis=1)
+    df_at["_peak"]      = df_at.apply(_peak_at, axis=1)
     df_at["_upnl"]      = df_at.apply(lambda r: _money_at(r, "unrealized_pnl", signed=True), axis=1)
     df_at["_trigger"]   = df_at.apply(_trigger_at, axis=1)
     df_at["_sig_when"]  = df_at.apply(_signal_when, axis=1)
@@ -465,12 +474,12 @@ else:
 
     df_at_show = df_at[[
         "symbol", "quantity", "signal_strategy", "_sig_when", "_sig_px",
-        "_last", "move_since_signal_pct", "_protection", "_trigger", "_upnl",
+        "_last", "_peak", "move_since_signal_pct", "_protection", "_trigger", "_upnl",
         "_status", "days_armed", "broker",
     ]].copy()
     df_at_show.columns = [
         "Symbol", "Qty", "Strategy", "Signal fired", "Signal price",
-        "Last", "Move since signal", "Protection", "Trail trigger", "Unrealized",
+        "Last", "Peak", "Move since signal", "Protection", "Trail trigger", "Unrealized",
         "Status", "Days since signal", "Broker",
     ]
     st.dataframe(

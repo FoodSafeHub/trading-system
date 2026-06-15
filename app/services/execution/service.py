@@ -408,6 +408,73 @@ class ExecutionService:
         except Exception:
             return 0.0
 
+    def _advance_trail_peak(
+        self, symbol: str, signal_id: Optional[int], signal_price: float,
+        *, candidate_peak: float,
+    ) -> float:
+        """Read + advance the durable high-water mark for this armed trail.
+
+        Returns max(stored_peak, candidate_peak) and persists it when the
+        candidate is higher, so the stored peak is monotonic non-decreasing for
+        the life of the trail (keyed by signal_id). Logs every advance. Falls
+        back to candidate_peak on any DB error (never lowers the trail).
+        """
+        from app.models.trail_peaks import TrailPeak
+
+        try:
+            with SessionLocal() as db:
+                q = db.query(TrailPeak).filter(TrailPeak.symbol == symbol.upper())
+                # Match the specific anchor signal when we have one; else the
+                # latest row for the symbol (a trail with no signal_id link).
+                if signal_id is not None:
+                    q = q.filter(TrailPeak.signal_id == signal_id)
+                else:
+                    q = q.filter(TrailPeak.signal_id.is_(None))
+                row = q.order_by(TrailPeak.id.desc()).first()
+
+                now = datetime.now(tz=timezone.utc)
+                if row is None:
+                    row = TrailPeak(
+                        symbol=symbol.upper(),
+                        signal_id=signal_id,
+                        signal_price=signal_price or None,
+                        peak_price=round(candidate_peak, 4),
+                        peak_at=now,
+                    )
+                    db.add(row)
+                    db.commit()
+                    logger.info(
+                        "[exec] trail peak %s: initialised high-water mark $%.2f "
+                        "(signal_id=%s, signal $%.2f).",
+                        symbol, candidate_peak, signal_id, signal_price or 0.0,
+                    )
+                    return candidate_peak
+
+                stored = float(row.peak_price or 0.0)
+                if candidate_peak > stored + 1e-9:
+                    row.peak_price = round(candidate_peak, 4)
+                    row.peak_at = now
+                    db.commit()
+                    logger.info(
+                        "[exec] trail peak %s: advanced high-water mark $%.2f → $%.2f "
+                        "(signal_id=%s).",
+                        symbol, stored, candidate_peak, signal_id,
+                    )
+                    return candidate_peak
+                # Stored peak wins — today's high is below the prior peak.
+                logger.debug(
+                    "[exec] trail peak %s: stored peak $%.2f ≥ candidate $%.2f — "
+                    "trail holds at the prior high (no drop with price).",
+                    symbol, stored, candidate_peak,
+                )
+                return stored
+        except Exception as exc:
+            logger.warning(
+                "[exec] trail peak %s: persistence failed (%s) — using candidate "
+                "$%.2f for this cycle.", symbol, exc, candidate_peak,
+            )
+            return candidate_peak
+
     async def tighten_trail_on_sell(
         self,
         symbol: str,
@@ -546,13 +613,21 @@ class ExecutionService:
 
         # ── TARGET STOP: ratchet off the PEAK SINCE THE SIGNAL, not the current
         # price. A trailing stop must follow the high-water mark — if price ran to
-        # $110 then pulled back to $104, the stop stays at 110×(1−trail%), it does
-        # NOT drop to 104×(1−trail%). We reconstruct the peak from three sources
-        # and take the max so the estimate is never below where price has been:
-        #   • current_price                         (live)
-        #   • peak traded since the signal (OHLCV)   (historical high-water mark)
-        #   • the resting STOP's implied peak = stop / (1 − trail%)  (what the bot
-        #     already locked in last cycle — guarantees monotonic, lag-proof)
+        # $45 a few days ago then faded to $42, the stop stays at 45×(1−trail%),
+        # it does NOT drop to 42×(1−trail%).
+        #
+        # The peak is a DURABLE high-water mark persisted in trail_peaks (keyed by
+        # signal_id), so it survives provider gaps and intraday-vs-daily quirks and
+        # is the authoritative value. We seed/advance it each cycle from:
+        #   • the stored peak                        (authoritative; today's $45)
+        #   • current_price                          (live high)
+        #   • peak traded since the signal (OHLCV)    (seeds the first write;
+        #                                              daily High since signal date
+        #                                              captures an older peak)
+        #   • the resting STOP's implied peak = stop / (1 − trail%)  (last cycle's
+        #                                              locked-in peak; lag-proof)
+        # The max is then written back, so the stored peak is monotonic non-
+        # decreasing for the life of the trail.
         peak = current_price
         try:
             hist_peak = self._peak_since_signal(symbol, signal_at)
@@ -565,9 +640,20 @@ class ExecutionService:
             if implied_peak > peak:
                 peak = implied_peak
 
+        # Merge with (and write back) the durable stored peak. This both reads the
+        # authoritative high-water mark and advances it to today's high.
+        peak = self._advance_trail_peak(
+            symbol, signal_id, signal_price, candidate_peak=peak,
+        )
+
         # trail follows the PEAK up, floored at `floor`.
         trail_level = round(peak * (1.0 - trail_pct / 100.0), 2)
         target_stop = max(trail_level, floor)
+        logger.info(
+            "[exec] tighten_trail %s: peak $%.2f → trail level $%.2f, floor $%.2f, "
+            "target stop $%.2f (current $%.2f, signal $%.2f).",
+            symbol, peak, trail_level, floor, target_stop, current_price, signal_price,
+        )
 
         # NATIVE HANDOFF DECISION. Hand off to a broker-native TRAILING_STOP only
         # when BOTH hold:

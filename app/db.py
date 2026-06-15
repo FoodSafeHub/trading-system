@@ -67,6 +67,7 @@ def init_db() -> None:
         signals,
         strategy_recommendations,
         strategy_runs,
+        trail_peaks,
     )
     Base.metadata.create_all(bind=engine)
     _migrate_add_orders_source_column()
