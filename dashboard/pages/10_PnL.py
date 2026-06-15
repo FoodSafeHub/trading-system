@@ -512,72 +512,64 @@ section(
     "after it, and where the trail finally exited.",
 )
 st.caption(
-    "**Signal price** = price when the SELL signal fired. "
-    "**Peak after signal** = the high-water mark the trail ratcheted off (recorded live). "
+    "**Signal price** = price when the strategy SELL signal fired. "
     "**Exit** = where the trail filled. "
-    "**Capture efficiency** = (exit − signal) / (peak − signal) — of the upside that was "
-    "actually available after the signal, the share the trail kept. 100% = exited at the "
-    "peak; 0% = no better than selling at the signal; below 0% = exited under the signal."
+    "**Trail captured %** = (exit − signal) / signal — positive means riding past the "
+    "signal added gains; negative means it reversed below the signal. "
+    "**Peak / Capture** (when recorded): the high-water mark the trail rode to and the "
+    "share of that signal→peak run-up the trail kept (100% = exited at the peak)."
 )
 
-# Re-use the closed trades already fetched above (no extra API call). The audit
-# needs a recorded PEAK (trail_peaks) — only trades the bot trailed have one.
-_trail_rows = [
-    r for r in (closed or [])
-    if r.get("signal_price") is not None and r.get("peak_price") is not None
-]
+# Re-use the closed trades already fetched above (no extra API call). Any trade
+# with a recorded SELL-signal price is auditable; the peak/capture columns fill
+# in for trades the bot trailed under Approach C (peak tracking).
+_trail_rows = [r for r in (closed or []) if r.get("signal_price") is not None]
 
 if not _trail_rows:
     st.info(
-        "No peak-capture data yet. This fills in as the bot arms floored trailing "
-        "stops (Approach C) and those positions close — each records its signal "
-        "price and the peak it rode to. Older closes (before peak tracking, or "
-        "reconciled from the broker) won't have a peak and are shown in the "
-        "Closed Trades table above instead."
+        "No trail audit data yet — this fills in as closes accumulate a recorded "
+        "SELL-signal price. Run a live cycle with the trailing stop enabled to populate it."
     )
 else:
     df_tr = pd.DataFrame(_trail_rows)
-    eff = df_tr["capture_efficiency_pct"].dropna()
+    captured = df_tr["trail_captured_pct"].dropna()
+    eff = df_tr["capture_efficiency_pct"].dropna() if "capture_efficiency_pct" in df_tr else pd.Series(dtype=float)
 
     # ── Summary ──────────────────────────────────────────────────────────────
-    n_audited = len(df_tr)
-    n_trail_exit = int((df_tr["exit_type"] == "trail").sum())
-    avg_eff = eff.mean() if len(eff) else 0.0
-    # "Beat the signal" = exited above the signal price (trail added net value).
-    beat_signal = int((df_tr["trail_captured_pct"] > 0).sum())
-    # Extra $ the trail added vs selling at the signal price, summed.
+    n_total = len(df_tr)
+    n_trail_exit = int((df_tr["exit_type"] == "trail").sum()) if "exit_type" in df_tr else 0
+    avg_captured = captured.mean() if len(captured) else 0.0
+    beat_signal = int((captured > 0).sum())
     extra_dollars = sum(
         ((r.get("sell_price") or 0) - (r.get("signal_price") or 0)) * (r.get("quantity") or 0)
         for r in _trail_rows
     )
 
-    ta1, ta2, ta3, ta4 = st.columns(4)
-    ta1.metric("Trades audited", f"{n_audited}",
-               help="Closed trades with a recorded signal price AND peak (bot-trailed).")
-    ta2.metric("Avg capture efficiency", f"{avg_eff:.0f}%",
-               help="Average share of the available run-up (signal → peak) the trail kept. "
-                    "100% = exited at the peak; 0% = no better than the signal price.")
-    ta3.metric("Beat the signal", f"{beat_signal} / {n_audited}",
-               help="Trades where the trail exited ABOVE the signal price — i.e. riding "
-                    "past the signal added net value vs selling immediately.")
-    ta4.metric("Extra captured ($)", f"${extra_dollars:+,.2f}",
-               help="Total dollars the trail added vs selling everything at the signal "
-                    "price: Σ (exit − signal) × qty.")
+    ta1, ta2, ta3, ta4, ta5 = st.columns(5)
+    ta1.metric("Audited", f"{n_total}",
+               help="Closed trades with a recorded SELL-signal price.")
+    ta2.metric("Trail exits", f"{n_trail_exit}",
+               help="Exits via a bot-managed STOP or native TRAILING_STOP "
+                    "(Approach C), vs a plain market sell.")
+    ta3.metric("Avg trail captured", f"{avg_captured:+.2f}%",
+               help="Average (exit − signal) / signal. Positive = riding past the "
+                    "signal added gains on average.")
+    ta4.metric("Beat the signal", f"{beat_signal} / {n_total}",
+               help="Trades that exited ABOVE the signal price.")
+    ta5.metric("Extra captured ($)", f"${extra_dollars:+,.2f}",
+               help="Total dollars vs selling at the signal price: Σ (exit − signal) × qty.")
+    if len(eff):
+        st.caption(f"Avg **capture efficiency** (where a peak was recorded): **{eff.mean():.0f}%** "
+                   f"of the signal→peak run-up kept, across {len(eff)} trade(s).")
 
-    # ── Per-trade breakdown (signal → peak → exit) ───────────────────────────
+    # ── Per-trade breakdown ──────────────────────────────────────────────────
     section("Per-trade breakdown")
-
-    def _bar(eff_val) -> str:
-        # Tiny text gauge so capture efficiency reads at a glance.
-        if eff_val is None:
-            return "—"
-        filled = max(0, min(10, round(eff_val / 10)))
-        return "█" * filled + "░" * (10 - filled)
 
     def _trail_row_fmt(row):
         sig_p = row.get("signal_price")
         peak_p = row.get("peak_price")
         exit_p = row.get("sell_price")
+        captured = row.get("trail_captured_pct")
         eff_val = row.get("capture_efficiency_pct")
         return {
             "Symbol": row.get("symbol", ""),
@@ -585,29 +577,29 @@ else:
             "Signal $": f"${sig_p:.2f}" if sig_p else "—",
             "Peak $": f"${peak_p:.2f}" if peak_p else "—",
             "Exit $": f"${exit_p:.2f}" if exit_p else "—",
-            "Ran up": f"{((peak_p - sig_p) / sig_p * 100):+.2f}%" if (sig_p and peak_p) else "—",
-            "Capture": f"{eff_val:.0f}%" if eff_val is not None else "—",
-            "": _bar(eff_val),
+            "Trail captured": f"{captured:+.2f}%" if captured is not None else "—",
+            "Capture eff.": f"{eff_val:.0f}%" if eff_val is not None else "—",
             "Total P/L %": f"{row.get('realized_pct', 0):+.2f}%",
             "Exit": row.get("exit_type", "?"),
         }
 
     df_audit = pd.DataFrame([_trail_row_fmt(r) for r in _trail_rows])
 
-    def _highlight_capture(val):
+    def _highlight_captured(val):
         try:
             v = float(str(val).replace("%", "").replace("+", ""))
-            return "color: #2ec4b6" if v >= 50 else ("color: #e8a23d" if v >= 0 else "color: #e84545")
+            return "color: #2ec4b6" if v > 0 else ("color: #e84545" if v < 0 else "")
         except Exception:
             return ""
 
     st.dataframe(
-        df_audit.style.map(_highlight_capture, subset=["Capture"]),
+        df_audit.style.map(_highlight_captured, subset=["Trail captured"]),
         use_container_width=True,
         hide_index=True,
     )
     st.caption(
-        "**Capture** colour: 🟢 ≥50% of the run-up kept · 🟠 0–50% · 🔴 exited below the "
-        "signal. A low capture on a big **Ran up** means the trail width may be too wide "
-        "(giving back too much from the peak); consistently 100% means it could ride looser."
+        "**Trail captured** 🟢 positive = the trail exited above the signal (riding helped) · "
+        "🔴 negative = it reversed below the signal. **Capture eff.** (when a peak was "
+        "recorded) shows how much of the signal→peak run-up was kept — a low value on a big "
+        "move means the trail may be too wide."
     )
