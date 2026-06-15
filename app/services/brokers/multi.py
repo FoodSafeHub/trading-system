@@ -35,6 +35,13 @@ class MultiBroker(BrokerBase):
         self._brokers = brokers
         self._primary = brokers[0]
         self.name = "multi:" + "+".join(b.name for b in brokers)
+        # A fan-out TRAILING_STOP only works if EVERY leg supports it natively;
+        # otherwise the non-native leg would reject the order. When all do
+        # (e.g. Schwab + Webull), expose native trailing so tighten_trail_on_sell
+        # places a real trailing stop instead of a static STOP.
+        self.supports_native_trailing_stop = all(
+            getattr(b, "supports_native_trailing_stop", False) for b in brokers
+        )
 
     async def authenticate(self) -> None:
         results = await asyncio.gather(
