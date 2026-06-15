@@ -73,7 +73,12 @@ class ClosedTradeOut(BaseModel):
     signal_at: Optional[datetime] = None    # timestamp of the SELL signal
     trail_pct: Optional[float] = None       # trail % placed at signal time (from Order row)
     trail_captured_pct: Optional[float] = None  # (sell_price - signal_price) / signal_price * 100
-    exit_type: Optional[str] = None         # "trailing_stop" | "market" | "stop" | "unknown"
+    exit_type: Optional[str] = None         # "trail" | "market" | "unknown"
+    # Approach C peak-capture audit: the durable high-water mark reached after
+    # the signal (from trail_peaks), and how much of the available run-up
+    # (signal → peak) the trail actually kept.
+    peak_price: Optional[float] = None
+    capture_efficiency_pct: Optional[float] = None  # (exit-signal)/(peak-signal)*100
 
     @field_serializer("buy_at", "sell_at", "signal_at")
     def _ser_ts(self, dt: datetime | None) -> str | None:
@@ -389,10 +394,12 @@ def pnl_closed_trades(
 ):
     """The realized round-trip log. Most recent SELL first.
 
-    For trailing-stop exits, also returns signal_price (price when the SELL
-    signal fired), signal_at (when it fired), trail_pct (the % trail placed),
-    trail_captured_pct (extra gain between signal price and actual exit), and
-    exit_type so the dashboard can render the trail stop audit.
+    For trailing-stop exits, also returns the Approach C peak-capture audit
+    fields: signal_price (price when the SELL signal fired), signal_at, trail_pct,
+    peak_price (the high-water mark the trail ratcheted off, from trail_peaks),
+    capture_efficiency_pct ((exit-signal)/(peak-signal) — share of the available
+    run-up the trail kept), trail_captured_pct, and a normalised exit_type
+    ("trail" for a bot STOP / native TRAILING_STOP, "market" otherwise).
     """
     if limit < 1 or limit > 5000:
         raise HTTPException(400, "limit must be between 1 and 5000")
@@ -412,33 +419,63 @@ def pnl_closed_trades(
 
     sell_ids = [t.sell_order_id for t in rows if t.sell_order_id]
     trail_info: dict[int, dict] = {}
+    # Durable peaks keyed by signal_id (what the trail ratcheted off — Approach C).
+    peak_by_signal: dict[int, float] = {}
     if sell_ids:
         sell_orders = db.query(Order).filter(Order.id.in_(sell_ids)).all()
-        order_by_id = {o.id: o for o in sell_orders}
         sig_ids = [o.signal_id for o in sell_orders if o.signal_id]
         signals_by_id: dict[int, Signal] = {}
         if sig_ids:
             for sig in db.query(Signal).filter(Signal.id.in_(sig_ids)).all():
                 signals_by_id[sig.id] = sig
+            try:
+                from app.models.trail_peaks import TrailPeak
+                for tp in db.query(TrailPeak).filter(TrailPeak.signal_id.in_(sig_ids)).all():
+                    if tp.signal_id is not None and tp.peak_price:
+                        # Keep the highest if multiple rows exist for a signal.
+                        peak_by_signal[tp.signal_id] = max(
+                            peak_by_signal.get(tp.signal_id, 0.0), float(tp.peak_price)
+                        )
+            except Exception:
+                peak_by_signal = {}
 
         for o in sell_orders:
             sig = signals_by_id.get(o.signal_id) if o.signal_id else None
-            exit_type = (o.order_type or "unknown").lower()
+            # Normalise exit_type: the Approach C trail rests as a bot-managed
+            # STOP or a native TRAILING_STOP — both are "trail" exits. A plain
+            # MARKET fill (or a reconciled broker close) is a "market" exit.
+            otype = (o.order_type or "").upper()
+            if otype in ("STOP", "TRAILING_STOP"):
+                exit_type = "trail"
+            elif otype == "MARKET":
+                exit_type = "market"
+            else:
+                exit_type = otype.lower() or "unknown"
             trail_info[o.id] = {
                 "signal_price": float(sig.price_at_signal) if sig and sig.price_at_signal else None,
                 "signal_at":    sig.created_at if sig else None,
                 "trail_pct":    float(o.trail_value) if getattr(o, "trail_value", None) else None,
                 "exit_type":    exit_type,
+                "peak_price":   peak_by_signal.get(o.signal_id) if o.signal_id else None,
             }
 
     result = []
     for t in rows:
         info = trail_info.get(t.sell_order_id, {})
         sp = info.get("signal_price")
-        # trail_captured_pct: how much extra (%) the stock moved from signal → exit
+        peak = info.get("peak_price")
+        exit_p = t.sell_price
+        # trail_captured_pct: how much extra (%) the stock moved from signal → exit.
         trail_captured = None
-        if sp and sp > 0 and t.sell_price:
-            trail_captured = round((t.sell_price - sp) / sp * 100, 2)
+        if sp and sp > 0 and exit_p:
+            trail_captured = round((exit_p - sp) / sp * 100, 2)
+        # capture_efficiency_pct: of the run-up that was actually AVAILABLE after
+        # the signal (signal → peak), how much did the trail keep? 100% = exited
+        # at the peak; 0% = exited at the signal; <0% = exited below the signal.
+        # Only meaningful when the peak rose above the signal.
+        capture_eff = None
+        if sp and peak and exit_p and (peak - sp) > 1e-9:
+            capture_eff = round((exit_p - sp) / (peak - sp) * 100, 1)
         result.append(ClosedTradeOut(
             symbol=t.symbol, quantity=t.quantity, buy_price=t.buy_price,
             sell_price=t.sell_price, buy_at=t.buy_at, sell_at=t.sell_at,
@@ -452,6 +489,8 @@ def pnl_closed_trades(
             trail_pct=info.get("trail_pct"),
             trail_captured_pct=trail_captured,
             exit_type=info.get("exit_type"),
+            peak_price=peak,
+            capture_efficiency_pct=capture_eff,
         ))
     return result
 
