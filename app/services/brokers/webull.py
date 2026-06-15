@@ -254,6 +254,10 @@ class WebullBroker(BrokerBase):
             sym = p.get("symbol") or p.get("ticker") or ""
             if not sym:
                 continue
+            # Skip flat (closed) lots — a sold symbol can linger in the holdings
+            # array with qty 0 and would otherwise show as an "open" position.
+            if not qty:
+                continue
             out.append(Position(
                 symbol=str(sym).upper(),
                 quantity=qty,

@@ -17,6 +17,17 @@ async def get_account_summary():
     return await broker.get_accounts()
 
 
+def _held_only(positions: List[Position]) -> List[Position]:
+    """Drop flat (qty 0) lots so a sold symbol never shows as 'open'.
+
+    Defense in depth: each broker adapter already filters zero-quantity lots,
+    but a broker can return a recently-closed position with net qty 0 in its
+    positions array. Filtering here guarantees the home page and any consumer
+    of /account/positions only ever sees genuinely-held positions.
+    """
+    return [p for p in positions if (p.quantity or 0) != 0]
+
+
 @router.get("/positions", response_model=List[Position])
 async def get_positions(account_id: str = ""):
     broker = get_broker()
@@ -28,10 +39,10 @@ async def get_positions(account_id: str = ""):
     # out across every broker and returns positions tagged with their broker.
     # On a single broker, we still need to pass the resolved account_id.
     if account_id:
-        return await broker.get_positions(account_id)
+        return _held_only(await broker.get_positions(account_id))
     if getattr(broker, "name", "").startswith("multi:"):
-        return await broker.get_positions("")
-    return await broker.get_positions(accounts[0].account_id)
+        return _held_only(await broker.get_positions(""))
+    return _held_only(await broker.get_positions(accounts[0].account_id))
 
 
 @router.get("/{broker}/summary", response_model=List[AccountSummary])
@@ -65,7 +76,7 @@ async def get_broker_positions(broker: str):
         accounts = await b.get_accounts()
         if not accounts:
             return []
-        return await b.get_positions(accounts[0].account_id)
+        return _held_only(await b.get_positions(accounts[0].account_id))
     except Exception:
         return []
 

@@ -243,7 +243,11 @@ class ZerodhaBroker(BrokerBase):
         holdings = await self._get("/portfolio/holdings") or []
         out: List[Position] = []
         for h in holdings:
-            qty = h.get("quantity", 0)
+            qty = h.get("quantity", 0) or 0
+            # Skip flat lots — a fully-sold holding can remain in the array with
+            # quantity 0 and would otherwise show as an "open" position.
+            if qty == 0:
+                continue
             out.append(
                 Position(
                     symbol=h.get("tradingsymbol", ""),

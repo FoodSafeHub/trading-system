@@ -261,19 +261,27 @@ class SchwabBroker(BrokerBase):
         account_hash = await self._get_account_hash()
         data = await self._get(f"/accounts/{account_hash}", params={"fields": "positions"})
         raw_positions = data.get("securitiesAccount", {}).get("positions", [])
-        return [
-            Position(
+        out: List[Position] = []
+        for p in raw_positions:
+            qty = (p.get("longQuantity", 0) or 0) - (p.get("shortQuantity", 0) or 0)
+            # Schwab keeps recently-CLOSED lots in the positions array with
+            # longQuantity == shortQuantity == 0 (net qty 0). Those are not held
+            # positions — skip them, otherwise a symbol you already sold (e.g.
+            # ABNB) keeps showing as "open" on the home page and in PnL's open view.
+            if qty == 0:
+                continue
+            long_qty = p.get("longQuantity", 0) or 0
+            out.append(Position(
                 symbol=p["instrument"]["symbol"],
-                quantity=p.get("longQuantity", 0) - p.get("shortQuantity", 0),
+                quantity=qty,
                 average_cost=p.get("averagePrice"),
-                current_price=p.get("marketValue") / p["longQuantity"] if p.get("longQuantity") else None,
+                current_price=p.get("marketValue") / long_qty if long_qty else None,
                 market_value=p.get("marketValue"),
                 unrealized_pnl=p.get("unrealizedProfitOrLoss"),
                 broker="schwab",
                 account_id=account_id,
-            )
-            for p in raw_positions
-        ]
+            ))
+        return out
 
     async def get_quotes(self, symbols: List[str]) -> Dict[str, Quote]:
         await self.refresh_token_if_needed()
