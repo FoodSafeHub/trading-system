@@ -1101,103 +1101,27 @@ def _run_m1_daily_scan_job(session_label: str) -> None:
 
 
 def _run_gtc_fill_sync_job() -> None:
-    """Poll the broker for fills on submitted GTC orders and update the DB.
+    """Reconcile broker fills into the DB so closes show up automatically.
 
-    GTC trailing stops placed by tighten_trail_on_sell() sit as
-    status='submitted' in our DB until Schwab fills them. The execute()
-    path only confirms status immediately after placement — it can't know
-    about fills that happen hours or days later between scheduler cycles.
+    Runs every 15 min during market hours. Delegates to
+    reconciliation.order_sync.sync_broker_orders_once(), which:
+      • polls list_orders (ALL statuses) on the global broker AND Zerodha,
+      • flips our own submitted/working rows to filled/cancelled,
+      • INGESTS orphan fills with no DB row (broker-native TRAILING_STOP fills,
+        manual closes) by creating a filled Order so FIFO can pair them,
+      • materializes realized round-trips so the PnL page updates immediately.
 
-    This job runs every 15 min and:
-      1. Finds all Order rows with status='submitted' and order_type='TRAILING_STOP'
-      2. Fetches the current status from Schwab via get_order()
-      3. If filled: updates fill_price, filled_at, status='filled' in the DB
-         → FIFO engine can now compute the round-trip P/L and the PnL audit
-           will show signal_price vs actual exit price correctly.
-
-    Also catches plain STOP and LIMIT orders that were submitted but not yet
-    confirmed (same gap exists for any GTC order type).
+    Previously this only flipped status='submitted' rows on the GLOBAL broker,
+    so India fills and orphan closes left positions looking "open" forever.
     """
     settings = get_settings()
     if not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
         return
     try:
-        import asyncio as _aio
-        from datetime import datetime as _dt, timezone as _tz
-        from app.db import SessionLocal
-        from app.models.orders import Order
-        from app.services.brokers.factory import get_broker
-
-        with SessionLocal() as db:
-            pending = (
-                db.query(Order)
-                .filter(
-                    Order.status == "submitted",
-                    Order.broker_order_id.isnot(None),
-                )
-                .all()
-            )
-
-        if not pending:
-            return
-
-        loop = _aio.new_event_loop()
-        try:
-            broker = get_broker()
-            loop.run_until_complete(broker.authenticate())
-            accounts = loop.run_until_complete(broker.get_accounts())
-            account_id = accounts[0].account_id if accounts else ""
-
-            updated = 0
-            for order in pending:
-                try:
-                    status_resp = loop.run_until_complete(
-                        broker.get_order(order.broker_order_id, account_id)
-                    )
-                    broker_status = (status_resp.status or "").lower()
-
-                    if broker_status in ("filled", "partial"):
-                        with SessionLocal() as db:
-                            row = db.query(Order).filter_by(id=order.id).first()
-                            if row and row.status == "submitted":
-                                row.status = broker_status
-                                row.fill_price = status_resp.fill_price
-                                row.filled_at = (
-                                    status_resp.raw.get("closeTime")
-                                    or _dt.now(_tz.utc)
-                                )
-                                if isinstance(row.filled_at, str):
-                                    try:
-                                        row.filled_at = _dt.fromisoformat(
-                                            row.filled_at.replace("Z", "+00:00")
-                                        )
-                                    except Exception:
-                                        row.filled_at = _dt.now(_tz.utc)
-                                db.commit()
-                                updated += 1
-                                logger.info(
-                                    "[scheduler] GTC fill sync: %s %s %s filled @ %.4f",
-                                    order.symbol, order.order_type,
-                                    order.broker_order_id, status_resp.fill_price or 0,
-                                )
-                    elif broker_status in ("canceled", "cancelled", "rejected", "expired"):
-                        with SessionLocal() as db:
-                            row = db.query(Order).filter_by(id=order.id).first()
-                            if row and row.status == "submitted":
-                                row.status = broker_status
-                                db.commit()
-                except Exception as exc:
-                    logger.debug(
-                        "[scheduler] GTC fill sync: could not check order %s: %s",
-                        order.broker_order_id, exc,
-                    )
-
-            if updated:
-                logger.info("[scheduler] GTC fill sync: updated %d order(s)", updated)
-        finally:
-            loop.close()
+        from app.services.reconciliation.order_sync import sync_broker_orders_once
+        sync_broker_orders_once()
     except Exception as exc:
-        logger.error("[scheduler] GTC fill sync job failed: %s", exc)
+        logger.error("[scheduler] Order fill sync job failed: %s", exc)
 
 
 def _has_india_assignments() -> bool:

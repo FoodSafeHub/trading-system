@@ -158,6 +158,35 @@ class OpenTrailOut(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
+_last_broker_sync_ts: float = 0.0
+_BROKER_SYNC_THROTTLE_SECONDS = 30.0
+
+
+def _maybe_sync_broker_orders() -> None:
+    """Pull fresh broker fills into the orders table, throttled.
+
+    PnL/Recent-Fills read from filled Order rows, so a close that happened at
+    the broker (native trailing-stop fill, manual close, an India order) only
+    shows up once its fill is reconciled into the DB. The 15-min scheduler job
+    does this in the background, but viewing the page should reflect reality
+    NOW — so we run the reconcile on read, throttled to at most once per
+    _BROKER_SYNC_THROTTLE_SECONDS so rapid page refreshes don't hammer the
+    broker. Best-effort: any failure is swallowed (the page still renders the
+    last-known state).
+    """
+    global _last_broker_sync_ts
+    import time as _time
+    now = _time.monotonic()
+    if now - _last_broker_sync_ts < _BROKER_SYNC_THROTTLE_SECONDS:
+        return
+    _last_broker_sync_ts = now
+    try:
+        from app.services.reconciliation.order_sync import sync_broker_orders_once
+        sync_broker_orders_once()
+    except Exception as exc:
+        logger.debug("[pnl] on-read broker order sync skipped: %s", exc)
+
+
 def _refresh(db: Session):
     """Sync new round-trips into realized_trades, then return (closed, fifo).
 
@@ -165,6 +194,9 @@ def _refresh(db: Session):
     is the canonical persisted history — same numbers across calls regardless of
     what the live walk would produce.
     """
+    # Pull any broker-side fills (closes) into the orders table first, so the
+    # round-trip sync below sees freshly-closed positions automatically.
+    _maybe_sync_broker_orders()
     _inserted, fifo = sync_realized_trades(db)
     closed = load_closed_trades(db)
     return closed, fifo
