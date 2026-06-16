@@ -1729,8 +1729,8 @@ with tab_scanner:
         except Exception as _fe:
             st.warning(f"Could not clear cache: {_fe}")
 
+    scan_failed = False
     if _run_scan:
-        scan_failed = False
         st.info(
             "**Scan running in two phases:**\n\n"
             "**Phase 1** — Bulk price+volume download for all symbols (~10–30s). "
@@ -1771,15 +1771,21 @@ with tab_scanner:
                 else:
                     st.error(f"Market scan failed: {e}")
 
-        # Stash the latest scan in session_state so the Start-from-Scanner
-        # button below stays useful after the next rerun.
+        # Stash the latest scan so the table + action buttons survive reruns
+        # (e.g. when a Quick-action ticker button is clicked below).
         st.session_state["_ms_last_ranked"] = ranked
+    else:
+        # Not a fresh scan — re-render the most recent results from session_state
+        # so clicking a ticker button doesn't make the whole table disappear.
+        ranked = st.session_state.get("_ms_last_ranked") or []
 
+    # ── Render results (fresh or persisted) ──────────────────────────────────
+    if ranked or _run_scan:
         if not ranked and not scan_failed:
-            st.info("No candidates passed the hard filters (volume / price / ATR).")
+            if _run_scan:
+                st.info("No candidates passed the hard filters (volume / price / ATR).")
         elif not ranked:
-            # scan_failed branch — error already shown above; skip the
-            # misleading "no candidates passed" info banner.
+            # scan_failed branch — error already shown above.
             pass
         else:
             rows = []
@@ -1845,17 +1851,132 @@ with tab_scanner:
                 + " · Signals-active candidates sorted to top."
             )
 
-            # Quick-backtest row: one button per top symbol, pre-fills Backtest tab
+            # ── Plain-language headline: tell the user what to do RIGHT NOW ────
+            if any_precheck_ran and n_active > 0:
+                _top = [r for r in ranked if r.get("native_signal_active")]
+                _names = ", ".join(
+                    f"**{r.get('symbol')}** ({r.get('best_native_side','?')} · "
+                    f"{r.get('best_native_strategy','?')})"
+                    for r in _top[:3]
+                )
+                st.success(
+                    f"🟢 **{n_active} setup{'s' if n_active != 1 else ''} firing now** "
+                    f"(top of table): {_names}"
+                    + (" …" if n_active > 3 else "")
+                    + "  —  these have a strategy triggering at this bar. Start here.",
+                    icon="🎯",
+                )
+            elif any_precheck_ran:
+                st.info(
+                    "No strategy is firing at this bar. The names below are today's "
+                    "best **conditions** (liquid, volatile, gapping) — watch them for a "
+                    "trigger, or re-run the scan in a few minutes.",
+                    icon="👀",
+                )
+
+            # ── How to read this table (collapsed by default) ──────────────────
+            with st.expander("📖 How to read this scan", expanded=False):
+                st.markdown(
+                    """
+**Read it in this order:**
+
+1. **`Signal?` column first.**
+   🟢 = a strategy is **triggering right now** → actionable this minute (sorted to the top).
+   `·` = checked, nothing firing yet → a watch candidate.
+   `—` = not checked (pre-check was off or ran out of budget).
+
+2. **`Score` / `Adj Score` = how good the *conditions* are** (liquidity + volatility +
+   gap), 0–1, higher is better. **`Adj Score`** is the Score after adjusting for today's
+   market regime — **sort by this**. ⚠️ A high score means "great day-trading weather,"
+   **not** "trade it now" — that's what the 🟢 is for. (So a 0.85 with no 🟢 = excellent
+   conditions, just nothing firing this second.)
+
+3. **`Bucket` = which playbook fits** (row is tinted to match):
+   🟠 **gap** = trade the opening gap · 🔵 **ORB** = opening-range breakout ·
+   🟢 **momentum** = trend continuation · 🟣 **VWAP** = mean-reversion to VWAP.
+
+4. **Supporting metrics:** `ATR %` = daily range (volatility) · `Gap %` = overnight
+   move · `Pre-Mkt Rel Vol` = early volume vs normal (>1x = unusually active) ·
+   `Avg Vol 30d` / `Float` = liquidity · `Catalyst` = a heuristic news/earnings flag
+   (not confirmed — verify before trading).
+
+**`—` in Pre-Mkt Rel Vol just means that data wasn't available yet** (common pre-open or
+on quiet names); it is not a negative signal.
+
+**Bottom line:** if there's a 🟢 row that fits your style and risk, that's your candidate.
+No 🟢? Treat the list as a watchlist and re-scan shortly.
+                    """
+                )
+
+            # Quick-action row: one button per top symbol. Clicking arms the
+            # paper autotrader on that single ticker (native-strategy entry).
+            # The actual arming + result display happen OUTSIDE this `if _run_scan`
+            # block (below) so they survive the button-click rerun — otherwise the
+            # whole scan section disappears on rerun and the click looks like a no-op.
             _top_syms = [r.get("symbol", "") for r in ranked[:8] if r.get("symbol")]
             if _top_syms:
-                st.markdown("**Quick Backtest** — click a symbol to pre-fill the Backtest tab:")
+                st.markdown(
+                    "**Quick actions** — click a ticker to **arm the paper autotrader** on it "
+                    "(native-strategy entry). 🟢 = a strategy is firing now."
+                )
                 _bt_cols = st.columns(min(len(_top_syms), 8))
                 for _ci, _sym in enumerate(_top_syms):
                     _sig_icon = "🟢 " if any(r.get("symbol") == _sym and r.get("native_signal_active") for r in ranked) else ""
-                    if _bt_cols[_ci].button(f"{_sig_icon}{_sym}", key=f"qbt_{_sym}"):
+                    if _bt_cols[_ci].button(
+                        f"{_sig_icon}{_sym}", key=f"qbt_{_sym}",
+                        help=f"Arm the paper autotrader on {_sym} now. "
+                             f"Also pre-fills the Backtest tab.",
+                    ):
+                        # Persist the request; the button click already triggers
+                        # a rerun, where the handler below picks it up. The table
+                        # re-renders from session_state so it doesn't disappear.
+                        st.session_state["_qbt_arm_symbol"] = _sym
                         st.session_state["bt_symbol"] = _sym
                         st.session_state["ca_symbol"] = _sym
-                        st.info(f"Pre-filled '{_sym}' in Backtest and Compare All tabs — switch to Research tab to run.")
+
+    # ── Handle a Quick-action arm request (survives the button-click rerun) ──
+    # Set by the per-symbol buttons above. Lives here, outside `if _run_scan`,
+    # so the feedback actually renders after the rerun instead of vanishing with
+    # the scan section.
+    _arm_sym = st.session_state.pop("_qbt_arm_symbol", None)
+    if _arm_sym:
+        with st.spinner(f"Arming paper autotrader on {_arm_sym}…"):
+            try:
+                _res = _api.autotrader_start({
+                    "symbols": [_arm_sym],
+                    "direction_mode": "long_only",
+                    "broker_name": "paper",
+                    "entry_mode": "native_strategy",
+                    "force": True,  # arm even outside RTH; paper trader idles until open
+                })
+                _started = _res.get("started") or []
+                _errs = _res.get("errors") or {}
+                if _arm_sym in _started:
+                    st.success(
+                        f"🚀 Paper autotrader armed on **{_arm_sym}** (native-strategy, long-only). "
+                        f"Open the **Auto Trader** tab to watch it.",
+                        icon="🚀",
+                    )
+                elif _arm_sym in _errs:
+                    st.warning(f"Could not arm {_arm_sym}: {_errs[_arm_sym]}")
+                else:
+                    st.info(
+                        f"Arm request sent for {_arm_sym}. "
+                        f"Response: {_res}. Check the Auto Trader tab."
+                    )
+            except Exception as _ae:
+                _msg = str(_ae)
+                if "already running" in _msg.lower() or "409" in _msg:
+                    st.warning(
+                        f"An autotrader switch is already running. Stop it in the "
+                        f"**Auto Trader** tab first, then arm {_arm_sym}. "
+                        f"(Pre-filled {_arm_sym} in the Backtest tab in the meantime.)"
+                    )
+                else:
+                    st.error(
+                        f"Couldn't arm {_arm_sym}: {_ae}. "
+                        f"(Pre-filled {_arm_sym} in the Backtest tab instead.)"
+                    )
 
     # ── Start AutoTrader from scanner ────────────────────────────────────────
     # Reuses the most-recent scan stashed in session_state. The backend
