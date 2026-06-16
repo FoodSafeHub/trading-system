@@ -671,6 +671,68 @@ class ExecutionService:
             symbol, peak, trail_level, floor, target_stop, current_price, signal_price,
         )
 
+        # ── TRAIL ALREADY HIT → EXIT NOW (not an invalid stop) ───────────────
+        # A SELL STOP must rest BELOW the market. If the computed stop is at/above
+        # the current price, price has already pulled back THROUGH the trail (or the
+        # floor sits above market) — the stop's trigger condition is already met. A
+        # broker rejects a SELL STOP placed above market, which is exactly the
+        # AMAL reject/idempotency-collision loop (stop $44.33 vs current $44.00).
+        # The correct action is to SELL NOW at market: the trail did its job (rode
+        # the peak, price reversed past the trail distance). We cancel any resting
+        # protective stops first so we don't double up.
+        if current_price <= target_stop:
+            logger.info(
+                "[exec] tighten_trail %s: trail HIT — target stop $%.2f ≥ current "
+                "$%.2f. Exiting at market now (trail rode peak $%.2f, price reversed).",
+                symbol, target_stop, current_price, peak,
+            )
+            for o in resting_sell_stops:
+                try:
+                    await self.broker.cancel_order(o.broker_order_id, account_id)
+                except Exception as exc:
+                    logger.warning(
+                        "[exec] tighten_trail %s: could not cancel resting %s before "
+                        "market exit (%s)", symbol, getattr(o, "order_type", "stop"), exc,
+                    )
+            market_req = OrderRequest(
+                symbol=symbol,
+                side="SELL",
+                order_type="MARKET",
+                quantity=quantity,
+                time_in_force="DAY",
+                source=source,  # type: ignore[arg-type]
+                idempotency_key=f"sell-trail-exit-{symbol}-{suffix}-{int(current_price * 100)}",
+            )
+            try:
+                resp = await self.broker.place_order(market_req, account_id)
+                ex_order = self._persist_order(market_req, signal_id, status="submitted")
+                self._update_order_status(
+                    ex_order.id, status="submitted",
+                    broker_order_id=resp.broker_order_id,
+                    submitted_at=datetime.now(tz=timezone.utc),
+                )
+                _audit.log(
+                    event_type="TIGHT_TRAIL_EXIT",
+                    entity_type="order",
+                    entity_id=ex_order.id,
+                    description=(
+                        f"SELL MARKET {symbol} x{quantity} — trail hit (stop "
+                        f"${target_stop:.2f} ≥ current ${current_price:.2f}, peak "
+                        f"${peak:.2f}, signal ${signal_price:.2f}, signal_id={signal_id})"
+                    ),
+                )
+                logger.info(
+                    "[exec] tighten_trail %s: market exit placed (trail hit) "
+                    "broker_id=%s", symbol, resp.broker_order_id,
+                )
+                return True
+            except Exception as exc:
+                logger.error(
+                    "[exec] tighten_trail %s: trail-hit market exit FAILED (%s) — "
+                    "POSITION STILL OPEN. Investigate manually.", symbol, exc,
+                )
+                return False
+
         # NATIVE HANDOFF DECISION. Hand off to a broker-native TRAILING_STOP only
         # when BOTH hold:
         #   (a) the trail level is at/above the floor — so native (which anchors

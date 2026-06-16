@@ -204,13 +204,12 @@ async def test_no_ratchet_when_resting_static_at_or_above_target():
 
 
 async def test_trail_measured_from_peak_not_current_on_pullback():
-    """The AMAL bug: price ran to a peak then pulled back. The stop must ratchet
-    off the PEAK, not the (lower) current price. With OHLCV unavailable (autouse
-    patch), the peak is reconstructed from the resting STOP's implied peak:
-    a resting STOP at 107.80 implies peak 107.80/0.98=110.0, so even though the
-    current price is only 104, the trail level stays 110×0.98=107.80 — the stop
-    is NOT lowered to 104×0.98=101.92."""
-    broker = _FakeBroker(working_orders=[_resting_stop("AAPL", 107.80)], price=104.0)
+    """The AMAL bug: price ran to a peak then pulled back (but NOT through the
+    trail). The stop must ratchet off the PEAK, not the lower current price. A
+    resting STOP at 107.80 implies peak 110.0; current 109 is below the peak but
+    still ABOVE the stop (trail not hit) → the stop stays at 107.80, not lowered
+    to 109×0.98=106.82, and nothing churns."""
+    broker = _FakeBroker(working_orders=[_resting_stop("AAPL", 107.80)], price=109.0)
     broker.supports_native_trailing_stop = False
     svc = _svc(broker)
 
@@ -219,10 +218,33 @@ async def test_trail_measured_from_peak_not_current_on_pullback():
     )
 
     assert ok is True
-    # Resting 107.80 already == target reconstructed from its own implied peak →
-    # no downward move, no churn. The key assertion: nothing was lowered.
+    # Resting 107.80 == target (from its implied peak) and current 109 > 107.80
+    # → trail not hit, no downward move, no churn.
     assert broker.cancel_calls == []
     assert broker.place_calls == []
+
+
+async def test_trail_hit_exits_at_market_not_invalid_stop():
+    """The reject loop: when the peak-based stop would sit AT/ABOVE the current
+    price (price pulled back THROUGH the trail), a SELL STOP there is invalid and
+    the broker rejects it. The bot must SELL AT MARKET instead. AMAL: signal
+    43.55, peak 45.23 (resting stop 44.33 implies it), current 44.00 < target
+    44.33 → exit now."""
+    broker = _FakeBroker(working_orders=[_resting_stop("AMAL", 44.33)], price=44.00)
+    broker.supports_native_trailing_stop = False
+    svc = _svc(broker)
+
+    ok = await svc.tighten_trail_on_sell(
+        symbol="AMAL", quantity=5, account_id="X", signal_price=43.55, trail_pct=2.0,
+    )
+
+    assert ok is True
+    # Cancel the resting (now-invalid) stop, then place ONE market sell.
+    assert broker.cancel_calls == ["resting-1"]
+    assert len(broker.place_calls) == 1
+    placed = broker.place_calls[0]
+    assert placed.order_type == "MARKET"
+    assert placed.side == "SELL"
 
 
 async def test_ratchets_up_when_target_higher():
@@ -337,9 +359,9 @@ async def test_zero_signal_price_falls_back_to_current():
 
 
 async def test_durable_peak_holds_on_pullback_across_cycles(_isolated_trail_peaks_db):
-    """The user's scenario: a $45 peak a few days ago, today's high is lower.
-    The DURABLE persisted peak must govern — cycle 2 (price faded to $42) must
-    NOT lower the stop to 42×0.98; it stays at the stored 45×0.98 = $44.10."""
+    """The durable persisted peak must govern the stop across cycles. Cycle 2 is
+    a SMALL pullback (peak 45 → 44.50, still above the 44.10 stop so the trail is
+    NOT hit): the stop must stay at 45×0.98 = 44.10, not drop to 44.50×0.98."""
     from app.models.trail_peaks import TrailPeak
     TestSession = _isolated_trail_peaks_db
 
@@ -358,9 +380,10 @@ async def test_durable_peak_holds_on_pullback_across_cycles(_isolated_trail_peak
         row = db.query(TrailPeak).filter_by(symbol="AMAL", signal_id=999).one()
         assert row.peak_price == pytest.approx(45.0, abs=0.01)
 
-    # Cycle 2 — price faded to $42, resting STOP at 44.10. The durable peak ($45)
-    # must win: target stays 44.10, no downward move / no churn.
-    broker2 = _FakeBroker(working_orders=[_resting_stop("AMAL", 44.10)], price=42.0)
+    # Cycle 2 — price eased to $44.50 (still ABOVE the 44.10 stop → trail not
+    # hit). The durable peak ($45) governs: target stays 44.10, no churn, and the
+    # stop is NOT lowered to 44.50×0.98 = 43.61.
+    broker2 = _FakeBroker(working_orders=[_resting_stop("AMAL", 44.10)], price=44.50)
     broker2.supports_native_trailing_stop = False
     svc2 = _svc(broker2)
     ok2 = await svc2.tighten_trail_on_sell(
@@ -368,7 +391,7 @@ async def test_durable_peak_holds_on_pullback_across_cycles(_isolated_trail_peak
         signal_price=40.0, trail_pct=2.0, signal_id=999,
     )
     assert ok2 is True
-    assert broker2.cancel_calls == []   # stop NOT lowered to 42×0.98=41.16
+    assert broker2.cancel_calls == []   # stop NOT lowered
     assert broker2.place_calls == []
     with TestSession() as db:
         row = db.query(TrailPeak).filter_by(symbol="AMAL", signal_id=999).one()

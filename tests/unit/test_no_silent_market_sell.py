@@ -44,6 +44,12 @@ ALLOWLIST_SUFFIXES = (
     "strategy/daytrading/execution/fill_simulator.py",
     # Broker driver translation layers (just naming the side they ultimately submit).
     "broker/alpaca_broker.py",
+    # tighten_trail_on_sell IS Approach C. Its one MARKET SELL is the audited
+    # "trail HIT" exit: when price has pulled back THROUGH the trail, the stop
+    # would sit above market (invalid — the broker rejects it), so the only
+    # correct action is to exit now. This is NOT the BNY silent-dump path; it is
+    # the trail doing its job, logged + audited as TIGHT_TRAIL_EXIT.
+    "execution/service.py",
     # Tests aren't scanned (tests/ dir excluded below) but be explicit.
 )
 
