@@ -279,6 +279,31 @@ async def test_force_replace_cancels_and_replaces():
     assert len(broker.place_calls) == 1
 
 
+async def test_rejected_replacement_keeps_old_stop(_isolated_trail_peaks_db):
+    """Place-then-cancel: if the new stop is REJECTED, the old resting stop must
+    NOT be cancelled (position stays protected), and the call reports success
+    (still-protected) rather than 'POSITION LEFT UNPROTECTED'."""
+    class _RejectingBroker(_FakeBroker):
+        async def place_order(self, order, account_id):
+            raise RuntimeError("rejected: stop above market")
+
+    # Ratchet up (current 105 → target 102.90) so it tries to replace the
+    # resting 100.50 stop, but placement is rejected.
+    broker = _RejectingBroker(working_orders=[_resting_stop("AAPL", 100.50)], price=105.0)
+    broker.supports_native_trailing_stop = False
+    svc = ExecutionService.__new__(ExecutionService)
+    svc.broker = broker
+    svc._persist_order = lambda *a, **k: SimpleNamespace(id=1)
+    svc._update_order_status = lambda *a, **k: None
+
+    ok = await svc.tighten_trail_on_sell(
+        symbol="AAPL", quantity=10, account_id="X", signal_price=100.0, trail_pct=2.0,
+    )
+
+    assert ok is True                  # still protected by the old stop
+    assert broker.cancel_calls == []   # old stop NOT cancelled — no naked gap
+
+
 class _StatusAwareBroker(_FakeBroker):
     """Returns the resting order ONLY for a specific status (mimics Schwab,
     which parks a resting STOP in AWAITING_STOP_CONDITION, not 'working')."""

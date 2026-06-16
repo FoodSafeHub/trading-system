@@ -782,23 +782,12 @@ class ExecutionService:
             )
             return True
 
-        # Step 1: cancel resting sell-side stops (replacing them — either ratchet
-        # up, or hand the static STOP off to a native trail).
-        for o in resting_sell_stops:
-            try:
-                await self.broker.cancel_order(o.broker_order_id, account_id)
-                logger.info(
-                    "[exec] tighten_trail %s: cancelled resting %s",
-                    symbol, getattr(o, "order_type", "stop"),
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[exec] tighten_trail %s: could not cancel resting %s (%s) "
-                    "— placing replacement anyway",
-                    symbol, getattr(o, "order_type", "stop"), exc,
-                )
-
-        # Step 2: place the protective SELL order.
+        # Step 1: build the replacement order. We PLACE it BEFORE cancelling the
+        # old resting stop (place-then-cancel), so a rejected/failed replacement
+        # never leaves the position naked — the old stop stays put until the new
+        # one is confirmed. (The old cancel-then-place order left positions
+        # unprotected whenever the new stop was rejected, e.g. a stop above
+        # market.)
         if use_native:
             # Native trailing stop — broker follows tick-by-tick from here. Safe
             # because trail_level ≥ floor: even native's initial trigger
@@ -850,6 +839,21 @@ class ExecutionService:
                 broker_order_id=resp.broker_order_id,
                 submitted_at=datetime.now(tz=timezone.utc),
             )
+            # New stop confirmed — NOW cancel the old resting stops it replaces.
+            # (place-then-cancel: never naked if the new order is rejected.)
+            for o in resting_sell_stops:
+                try:
+                    await self.broker.cancel_order(o.broker_order_id, account_id)
+                    logger.info(
+                        "[exec] tighten_trail %s: cancelled superseded resting %s",
+                        symbol, getattr(o, "order_type", "stop"),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[exec] tighten_trail %s: could not cancel superseded %s (%s) "
+                        "— new stop is live; old may linger until next reconcile",
+                        symbol, getattr(o, "order_type", "stop"), exc,
+                    )
             _detail = (
                 f"native TRAILING_STOP trail {trail_pct}%"
                 if use_native
@@ -872,12 +876,20 @@ class ExecutionService:
             )
             return True
         except Exception as exc:
+            # Replacement failed — the OLD resting stop was NOT cancelled (we
+            # place before cancelling), so the position keeps its prior protection
+            # rather than going naked.
+            still_protected = bool(resting_sell_stops)
             logger.error(
-                "[exec] tighten_trail %s: failed to place %s (%s) — POSITION "
-                "LEFT UNPROTECTED. Investigate manually.",
+                "[exec] tighten_trail %s: failed to place %s (%s). %s",
                 symbol, trail_req.order_type, exc,
+                "Prior stop still resting — position remains protected."
+                if still_protected
+                else "POSITION LEFT UNPROTECTED. Investigate manually.",
             )
-            return False
+            # Return True when the prior stop still protects us, so the caller
+            # doesn't flag the signal for an immediate retry loop.
+            return still_protected
 
     async def _buying_power_preflight(
         self,
