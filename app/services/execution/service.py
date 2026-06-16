@@ -578,17 +578,33 @@ class ExecutionService:
 
         suffix = idempotency_suffix or str(int((signal_price or current_price) * 100))
 
-        # Step 0: idempotency / ratchet. Fetch working orders ONCE and reuse the
-        # list for the peak reconstruction, the "already protected?" check and the
-        # cancel sweep.
-        try:
-            open_orders = await self.broker.list_orders(account_id, status="working")
-        except Exception as exc:
-            logger.warning(
-                "[exec] tighten_trail %s: could not list working orders (%s) "
-                "— proceeding to place a fresh stop", symbol, exc,
-            )
-            open_orders = []
+        # Step 0: idempotency / ratchet. Fetch resting orders ONCE and reuse the
+        # list for peak reconstruction, the "already protected?" check and the
+        # cancel sweep. A resting STOP does NOT sit in "working" on every broker —
+        # Schwab parks it in AWAITING_STOP_CONDITION / PENDING_ACTIVATION until the
+        # trigger is hit. Querying only "working" missed it, so the guard re-placed
+        # the SAME stop every cycle → broker accepted a fresh order each time and
+        # the deterministic idempotency_key collided in the DB. Sweep all the
+        # pending statuses (same set the scheduler reconcile uses) and dedup.
+        open_orders: list = []
+        seen_boids: set = set()
+        for _status in (
+            "working", "awaiting_stop_condition", "pending_activation",
+            "submitted", "queued", "accepted", "pending_acknowledgement",
+        ):
+            try:
+                for o in (await self.broker.list_orders(account_id, status=_status)) or []:
+                    boid = getattr(o, "broker_order_id", None)
+                    if boid and boid in seen_boids:
+                        continue
+                    if boid:
+                        seen_boids.add(boid)
+                    open_orders.append(o)
+            except Exception as exc:
+                logger.debug(
+                    "[exec] tighten_trail %s: list_orders(status=%s) failed: %s",
+                    symbol, _status, exc,
+                )
 
         resting_sell_stops = [
             o for o in open_orders
@@ -924,6 +940,8 @@ class ExecutionService:
     # ── Persistence helpers ──────────────────────────────────────────────────
 
     def _persist_order(self, req: OrderRequest, signal_id: Optional[int], status: str) -> Order:
+        from sqlalchemy.exc import IntegrityError
+
         with SessionLocal() as db:
             order = Order(
                 broker=self.broker.name,
@@ -943,7 +961,27 @@ class ExecutionService:
                 created_at=datetime.now(tz=timezone.utc),
             )
             db.add(order)
-            db.commit()
+            try:
+                db.commit()
+            except IntegrityError:
+                # Duplicate idempotency_key — a row for this logical order already
+                # exists (e.g. a prior cycle placed it). This is NOT a failure: the
+                # broker order is live. Return the existing row so the caller treats
+                # it as success rather than logging "POSITION LEFT UNPROTECTED".
+                db.rollback()
+                existing = (
+                    db.query(Order)
+                    .filter(Order.idempotency_key == req.idempotency_key)
+                    .first()
+                )
+                if existing is not None:
+                    logger.info(
+                        "[exec] _persist_order: idempotency_key %r already persisted "
+                        "(order id=%s) — reusing existing row.",
+                        req.idempotency_key, existing.id,
+                    )
+                    return existing
+                raise
             db.refresh(order)
             return order
 

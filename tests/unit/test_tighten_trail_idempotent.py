@@ -257,6 +257,70 @@ async def test_force_replace_cancels_and_replaces():
     assert len(broker.place_calls) == 1
 
 
+class _StatusAwareBroker(_FakeBroker):
+    """Returns the resting order ONLY for a specific status (mimics Schwab,
+    which parks a resting STOP in AWAITING_STOP_CONDITION, not 'working')."""
+
+    def __init__(self, orders, only_status, price=100.0):
+        super().__init__(orders, price=price)
+        self._only_status = only_status
+
+    async def list_orders(self, account_id, status=None):
+        return list(self._working) if status == self._only_status else []
+
+
+async def test_resting_stop_in_non_working_status_is_detected():
+    """The bug: Step 0 queried only status='working', so a Schwab STOP resting
+    in AWAITING_STOP_CONDITION was missed → re-placed every cycle → duplicate
+    idempotency_key. The guard must sweep all pending statuses and skip."""
+    broker = _StatusAwareBroker(
+        [_resting_stop("AAPL", 103.0)], only_status="awaiting_stop_condition", price=105.0,
+    )
+    broker.supports_native_trailing_stop = False
+    svc = _svc(broker)
+
+    ok = await svc.tighten_trail_on_sell(
+        symbol="AAPL", quantity=10, account_id="X", signal_price=100.0, trail_pct=2.0,
+    )
+
+    assert ok is True
+    # Resting 103 >= target (105×0.98=102.90) → detected, no re-place, no cancel.
+    assert broker.cancel_calls == []
+    assert broker.place_calls == []
+
+
+async def test_persist_duplicate_idempotency_key_returns_existing():
+    """A duplicate idempotency_key must NOT raise (which the caller would log as
+    'POSITION LEFT UNPROTECTED'); _persist_order returns the existing row."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.db import Base
+    from app.models.orders import Order
+    from app.schemas.orders import OrderRequest
+    import app.services.execution.service as svc_mod
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine, tables=[Order.__table__])
+    TestSession = sessionmaker(bind=engine)
+
+    svc = ExecutionService.__new__(ExecutionService)
+    svc.broker = _FakeBroker(working_orders=[])
+
+    req = OrderRequest(
+        symbol="AAPL", side="SELL", order_type="STOP", quantity=10,
+        stop_price=102.90, time_in_force="GTC", source="scheduler",
+        idempotency_key="sell-trail-AAPL-x-10290",
+    )
+    with patch.object(svc_mod, "SessionLocal", TestSession):
+        first = svc._persist_order(req, signal_id=None, status="submitted")
+        # Same key again — must return the existing row, not raise.
+        second = svc._persist_order(req, signal_id=None, status="submitted")
+
+    assert first.id == second.id
+    with TestSession() as db:
+        assert db.query(Order).filter_by(idempotency_key="sell-trail-AAPL-x-10290").count() == 1
+
+
 async def test_zero_signal_price_falls_back_to_current():
     """A missing signal_price (0.0) must NOT silently zero out the floor — it
     falls back to the current quote. With signal==current, the arm gate isn't
