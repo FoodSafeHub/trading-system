@@ -28,12 +28,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-# ── Theme ──────────────────────────────────────────────────────────────────────
-GREEN = "#26a69a"   # bullish candle / BUY marker (TradingView green)
-RED   = "#ef5350"   # bearish candle / SELL marker (TradingView red)
+# ── Theme — aligned with the "Midnight" dashboard palette (_theme.py) ───────────
+GREEN = "#34d399"   # bullish candle / BUY marker (emerald, matches --pos)
+RED   = "#fb7185"   # bearish candle / SELL marker (rose, matches --neg)
 GRID  = "rgba(255,255,255,0.06)"
-BG    = "rgba(19,23,34,1)"
-TEXT  = "rgba(230,230,230,0.9)"
+BG    = "rgba(20,22,34,1)"   # matches --panel-solid (#141622) for seamless cards
+TEXT  = "rgba(238,240,246,0.9)"
 
 _OVERLAY_COLORS = {
     "ema9":   "#26C6DA",
@@ -83,7 +83,7 @@ def _layout(fig: go.Figure, height: int, title: str | None = None, *, range_sele
         fig.update_xaxes(
             rangeselector=dict(
                 bgcolor="rgba(255,255,255,0.05)",
-                activecolor="rgba(38,166,154,0.5)",
+                activecolor="rgba(124,92,255,0.55)",
                 bordercolor="rgba(255,255,255,0.08)",
                 font=dict(color=TEXT, size=10),
                 buttons=[
@@ -107,13 +107,13 @@ def _candle_trace(dates, opens, highs, lows, closes, name: str = "Price") -> go.
         increasing=dict(line=dict(color=GREEN, width=1), fillcolor=GREEN),
         decreasing=dict(line=dict(color=RED,   width=1), fillcolor=RED),
         whiskerwidth=0.4,
-        hoverlabel=dict(bgcolor="rgba(19,23,34,0.95)", font=dict(family="monospace", size=11)),
+        hoverlabel=dict(bgcolor="rgba(20,22,34,0.95)", font=dict(family="monospace", size=11)),
     )
 
 
 def _volume_trace(dates, volumes, opens, closes) -> go.Bar:
     colors = [
-        "rgba(38,166,154,0.55)" if (c is not None and o is not None and c >= o) else "rgba(239,83,80,0.55)"
+        "rgba(52,211,153,0.55)" if (c is not None and o is not None and c >= o) else "rgba(251,113,133,0.55)"
         for o, c in zip(opens, closes)
     ]
     return go.Bar(x=dates, y=volumes, marker_color=colors, name="Volume",

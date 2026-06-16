@@ -77,7 +77,7 @@ echo.
 REM --- Launch Streamlit dashboard window ---
 REM --server.headless=true stops streamlit from auto-opening its own browser tab;
 REM we open the browser explicitly below once 8501 is responsive.
-start "Dashboard" cmd /k ".venv\Scripts\streamlit.exe run dashboard\Home.py --server.address=127.0.0.1 --server.headless=true --browser.gatherUsageStats=false"
+start "Dashboard" cmd /k ".venv\Scripts\streamlit.exe run dashboard\streamlit_app.py --server.address=127.0.0.1 --server.headless=true --browser.gatherUsageStats=false"
 
 REM --- Wait up to 20s for Streamlit to bind 8501 before opening the browser ---
 echo Waiting for dashboard on http://localhost:8501 ...

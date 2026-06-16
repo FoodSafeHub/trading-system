@@ -1,20 +1,20 @@
 [theme]
-# Institutional terminal palette. These drive Streamlit's NATIVE widgets
+# "Midnight" violet/cyan palette. These drive Streamlit's NATIVE widgets
 # (buttons, selects, sidebar, links). The richer CSS overrides live in
 # dashboard/_theme.py — keep both in sync with the token table at its top.
 base = "dark"
 
-# Restrained brushed teal (primary accent).
-primaryColor = "#37b8aa"
+# Electric violet (primary accent — start of the violet→cyan gradient).
+primaryColor = "#7c5cff"
 
-# Deep graphite canvas (not pure black — avoids OLED bleed).
-backgroundColor = "#0a0d13"
+# Blue-black canvas (not pure black — avoids OLED bleed, gives depth).
+backgroundColor = "#0b0c14"
 
 # Layered panel surface — slightly elevated off the background.
-secondaryBackgroundColor = "#111620"
+secondaryBackgroundColor = "#141622"
 
-# Soft off-white primary text.
-textColor = "#eaecf0"
+# Near-white primary text.
+textColor = "#eef0f6"
 
 font = "sans serif"
 

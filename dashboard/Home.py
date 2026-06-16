@@ -166,6 +166,38 @@ def _render_broker_block(broker: str) -> None:
         st.caption("No open positions.")
 
 
+# ── Portfolio hero band — aggregate across all brokers ───────────────────────
+def _hero_metric(label: str, value: str, sub: str = "", *, tone: str = "") -> str:
+    tone_cls = f" tx-{tone}" if tone else ""
+    sub_html = f"<div class='tx-hero-sub{tone_cls}'>{sub}</div>" if sub else ""
+    return (
+        f"<div class='tx-hero-cell'>"
+        f"<div class='tx-hero-label'>{label}</div>"
+        f"<div class='tx-hero-value'>{value}</div>"
+        f"{sub_html}"
+        f"</div>"
+    )
+
+total_equity = sum((a.get("equity") or 0) for a in accounts) or None
+total_cash   = sum((a.get("cash") or 0) for a in accounts) or None
+total_upnl   = sum((p.get("unrealized_pnl") or 0) for p in positions)
+open_pos     = len([p for p in positions if (p.get("quantity") or 0) != 0])
+day_buys     = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in today_fills if o.get("side") == "BUY")
+day_sells    = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in today_fills if o.get("side") == "SELL")
+day_realised = day_sells - day_buys
+upnl_tone    = "pos" if total_upnl > 0 else "neg" if total_upnl < 0 else "muted"
+real_tone    = "pos" if day_realised > 0 else "neg" if day_realised < 0 else "muted"
+
+st.markdown(
+    "<div class='tx-hero'>"
+    + _hero_metric("Total Equity", money(total_equity), f"{len(broker_keys)} broker(s)")
+    + _hero_metric("Cash", money(total_cash))
+    + _hero_metric("Unrealised P&L", money(total_upnl), f"{open_pos} open position(s)", tone=upnl_tone)
+    + _hero_metric("Realised P&L Today", money(day_realised), f"{len(today_fills)} fill(s)", tone=real_tone)
+    + "</div>",
+    unsafe_allow_html=True,
+)
+
 # ── Main layout: broker area (left) + risk rail (right) ──────────────────────
 broker_area, right = st.columns([11, 5], gap="medium")
 
@@ -260,9 +292,9 @@ if filled:
 
     def _fill_row_style(row):
         if row["Side"] == "BUY":
-            return ["background-color: rgba(77,184,150,0.06)"] * len(row)
+            return ["background-color: rgba(52,211,153,0.07)"] * len(row)
         elif row["Side"] == "SELL":
-            return ["background-color: rgba(208,122,122,0.06)"] * len(row)
+            return ["background-color: rgba(251,113,133,0.07)"] * len(row)
         return [""] * len(row)
 
     st.dataframe(

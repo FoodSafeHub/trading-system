@@ -75,59 +75,66 @@ def market_status_bar() -> None:
 _CSS = """
 <style>
 /* ── Typeface ─────────────────────────────────────────────────────────── */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-/* ── Design tokens ────────────────────────────────────────────────────── */
+/* ── Design tokens — "Midnight" violet/cyan system ───────────────────── */
 :root {
     /* Canvas */
-    --bg:       #0a0d13;
-    --panel:    #111620;
-    --panel-2:  #181d28;
-    --panel-3:  #1e2433;
+    --bg:       #0b0c14;
+    --panel:    rgba(20,22,34,0.72);
+    --panel-solid: #141622;
+    --panel-2:  #191c2e;
+    --panel-3:  #21253a;
 
     /* Borders */
-    --line:     rgba(255,255,255,0.06);
-    --line-2:   rgba(255,255,255,0.11);
+    --line:     rgba(255,255,255,0.07);
+    --line-2:   rgba(255,255,255,0.12);
     --line-3:   rgba(255,255,255,0.20);
 
     /* Text */
-    --text:     #eaecf0;
-    --text-2:   #8e97a8;
-    --text-3:   #5a6373;
+    --text:     #eef0f6;
+    --text-2:   #9aa3bd;
+    --text-3:   #626a86;
 
-    /* Brand / accent */
-    --teal:     #37b8aa;
-    --teal-dim: rgba(55,184,170,0.12);
-    --teal-glow:rgba(55,184,170,0.22);
-    --gold:     #b89c6b;
+    /* Brand / accent — violet primary, cyan secondary, gradient highlight */
+    --teal:      #7c5cff;   /* name kept for back-compat; now electric violet */
+    --teal-2:    #9d83ff;
+    --cyan:      #22d3ee;
+    --teal-dim:  rgba(124,92,255,0.14);
+    --teal-glow: rgba(124,92,255,0.30);
+    --cyan-glow: rgba(34,211,238,0.28);
+    --accent-grad: linear-gradient(135deg, #7c5cff 0%, #22d3ee 100%);
+    --accent-grad-soft: linear-gradient(135deg, rgba(124,92,255,0.18), rgba(34,211,238,0.14));
+    --gold:      #f0b429;
 
     /* Semantic */
-    --pos:      #4db896;
-    --pos-bg:   rgba(77,184,150,0.10);
-    --pos-bd:   rgba(77,184,150,0.28);
-    --neg:      #d07a7a;
-    --neg-bg:   rgba(208,122,122,0.10);
-    --neg-bd:   rgba(208,122,122,0.28);
-    --warn:     #c29445;
-    --warn-bg:  rgba(194,148,69,0.10);
-    --warn-bd:  rgba(194,148,69,0.28);
-    --info:     #5b92d1;
-    --info-bg:  rgba(91,146,209,0.10);
-    --info-bd:  rgba(91,146,209,0.28);
+    --pos:      #34d399;
+    --pos-bg:   rgba(52,211,153,0.11);
+    --pos-bd:   rgba(52,211,153,0.30);
+    --neg:      #fb7185;
+    --neg-bg:   rgba(251,113,133,0.11);
+    --neg-bd:   rgba(251,113,133,0.30);
+    --warn:     #fbbf24;
+    --warn-bg:  rgba(251,191,36,0.11);
+    --warn-bd:  rgba(251,191,36,0.30);
+    --info:     #38bdf8;
+    --info-bg:  rgba(56,189,248,0.11);
+    --info-bd:  rgba(56,189,248,0.30);
 
     /* Typography */
     --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    --mono: "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+    --mono: "JetBrains Mono", "SF Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
 
-    /* Shape */
-    --radius:   8px;
-    --radius-lg:12px;
-    --radius-sm:5px;
+    /* Shape — slightly rounder for the modern feel */
+    --radius:   10px;
+    --radius-lg:16px;
+    --radius-sm:6px;
 
     /* Shadow / elevation */
-    --shadow-sm: 0 1px 3px rgba(0,0,0,0.40);
-    --shadow:    0 2px 8px rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.30);
-    --shadow-lg: 0 8px 32px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.30);
+    --shadow-sm: 0 1px 3px rgba(0,0,0,0.45);
+    --shadow:    0 4px 16px rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.35);
+    --shadow-lg: 0 12px 40px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.35);
+    --shadow-glow: 0 0 0 1px rgba(124,92,255,0.20), 0 8px 28px rgba(124,92,255,0.14);
 
     /* Spacing scale — 4 px base */
     --sp-1: 4px;  --sp-2: 8px;   --sp-3: 12px;  --sp-4: 16px;
@@ -140,6 +147,20 @@ _CSS = """
     font-family: var(--font);
     font-feature-settings: "tnum" 1;   /* tabular numerics everywhere */
 }
+/* Ambient aurora — two soft radial accent washes fixed behind the content,
+   gives the flat dark canvas depth without distracting from data. */
+.stApp::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background:
+        radial-gradient(900px 520px at 12% -8%,  rgba(124,92,255,0.16), transparent 60%),
+        radial-gradient(820px 480px at 92% 4%,   rgba(34,211,238,0.10), transparent 62%),
+        radial-gradient(700px 600px at 70% 108%, rgba(124,92,255,0.07), transparent 60%);
+}
+section.main, section[data-testid="stSidebar"] { position: relative; z-index: 1; }
 section.main > div.block-container {
     padding-top: var(--sp-5);
     padding-bottom: var(--sp-8);
@@ -155,76 +176,148 @@ body, .stApp, .stMarkdown, p, span, label, div {
     color: var(--text-2);
 }
 
-/* ── Sidebar — premium dark nav rail ─────────────────────────────────── */
+/* ── Sidebar — premium dark nav rail (st.navigation) ─────────────────── */
 section[data-testid="stSidebar"] {
-    background: #080b10;
+    background: linear-gradient(180deg, #0c0e1a 0%, #090a12 100%);
     border-right: 1px solid var(--line);
-    min-width: 220px !important;
-    max-width: 244px !important;
+    min-width: 236px !important;
+    max-width: 262px !important;
+    box-shadow: inset -1px 0 0 rgba(124,92,255,0.06);
 }
-section[data-testid="stSidebar"] .block-container {
-    padding-top: 0.75rem;
-    padding-left: 0.75rem;
-    padding-right: 0.75rem;
+section[data-testid="stSidebar"] .block-container,
+section[data-testid="stSidebar"] > div > div {
+    padding-top: var(--sp-3);
+    padding-left: var(--sp-3);
+    padding-right: var(--sp-3);
 }
-/* App name at top */
-section[data-testid="stSidebar"] h1 {
-    font-size: 0.95rem !important;
-    font-weight: 700 !important;
-    letter-spacing: 0.01em;
-    color: var(--teal) !important;
-    margin-bottom: var(--sp-3) !important;
-    padding-bottom: var(--sp-3);
+/* Collapse Streamlit's own top padding so the brand sits flush */
+section[data-testid="stSidebar"] [data-testid="stSidebarHeader"] { padding-bottom: 0; }
+
+/* Brand block ------------------------------------------------------------ */
+.tx-brand {
+    padding: var(--sp-2) var(--sp-2) var(--sp-3) var(--sp-2);
+    margin-bottom: var(--sp-2);
     border-bottom: 1px solid var(--line);
 }
-/* Nav group labels injected via .tx-nav-group markdown divs */
-.tx-nav-group {
-    font-size: 0.62rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.10em;
-    color: var(--text-3);
-    padding: var(--sp-4) var(--sp-3) var(--sp-1) var(--sp-3);
-    margin-top: var(--sp-2);
+.tx-brand-row { display: flex; align-items: center; gap: var(--sp-2); }
+.tx-brand-mark {
+    font-size: 1.05rem;
+    line-height: 1;
+    background: var(--accent-grad);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 0 8px rgba(124,92,255,0.45));
 }
-/* Visual breaks between nav groups via nth-child spacing.
-   The auto-generated nav list places each page as a sibling <a> element.
-   We can't inject labels between them (Streamlit owns the DOM) so we use
-   generous top-margin on specific link positions to simulate group breaks.
-   Pages order: 0=Home, 1=Strategy, 2=Orders, 3=Charts, 4=Backtest,
-   5=Perplexity, 6=Risk, 7=DayTrading, 8=Notifications, 9=Scanner,
-   10=PnL, 11=India, 12=Schwab, 13=Webull */
-section[data-testid="stSidebar"] ul li:nth-child(2) a,
-section[data-testid="stSidebar"] ul li:nth-child(7) a,
-section[data-testid="stSidebar"] ul li:nth-child(9) a,
-section[data-testid="stSidebar"] ul li:nth-child(11) a {
-    margin-top: var(--sp-4) !important;
-    border-top: 1px solid var(--line);
-    padding-top: var(--sp-3) !important;
-}
-/* Nav links */
-section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"] {
-    border-radius: var(--radius);
-    padding: 6px var(--sp-3);
-    margin: 1px 0;
-    color: var(--text-2);
-    font-size: 0.82rem;
-    font-weight: 500;
-    letter-spacing: 0.01em;
-    transition: background 0.10s ease, color 0.10s ease;
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-}
-section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"]:hover {
-    background: rgba(255,255,255,0.04);
+.tx-brand-name {
+    font-size: 0.98rem;
+    font-weight: 800;
+    letter-spacing: 0.02em;
     color: var(--text);
 }
+.tx-brand-name-2 {
+    background: var(--accent-grad);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+.tx-brand-clock {
+    display: flex; gap: var(--sp-3);
+    margin-top: var(--sp-2);
+    font-size: 0.64rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-3);
+}
+.tx-brand-clock-item { display: inline-flex; align-items: center; gap: 4px; }
+.tx-brand-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.tx-brand-dot.open   { background: var(--pos); box-shadow: 0 0 6px var(--pos); }
+.tx-brand-dot.closed { background: var(--text-3); }
+
+/* Section headers (st.navigation group titles) -------------------------- */
+section[data-testid="stSidebar"] [data-testid="stNavSectionHeader"] {
+    font-size: 0.6rem !important;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.13em;
+    color: var(--text-3) !important;
+    padding: var(--sp-4) var(--sp-2) var(--sp-1) var(--sp-2);
+    margin: 0;
+}
+section[data-testid="stSidebar"] [data-testid="stNavSectionHeader"]:first-of-type {
+    padding-top: var(--sp-2);
+}
+
+/* Nav links ------------------------------------------------------------- */
+section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"] {
+    border-radius: var(--radius);
+    padding: 7px 10px;
+    margin: 2px 0;
+    color: var(--text-2);
+    font-size: 0.84rem;
+    font-weight: 500;
+    letter-spacing: 0.005em;
+    transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    position: relative;
+}
+/* Icon sizing/tint */
+section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"] span[data-testid="stIconMaterial"] {
+    font-size: 1.05rem !important;
+    color: var(--text-3);
+    transition: color 0.12s ease;
+}
+section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"]:hover {
+    background: rgba(255,255,255,0.045);
+    color: var(--text);
+}
+section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"]:hover span[data-testid="stIconMaterial"] {
+    color: var(--text-2);
+}
+/* Active link — gradient tint, accent bar, glowing icon */
 section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"][aria-current="page"] {
-    background: var(--teal-dim);
-    color: var(--teal);
+    background: var(--accent-grad-soft);
+    color: #d6cdff;
     font-weight: 600;
-    box-shadow: inset 3px 0 0 var(--teal);
+    box-shadow: inset 0 0 0 1px rgba(124,92,255,0.18);
+}
+section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"][aria-current="page"]::before {
+    content: "";
+    position: absolute;
+    left: -3px; top: 7px; bottom: 7px;
+    width: 3px;
+    border-radius: 3px;
+    background: var(--accent-grad);
+    box-shadow: 0 0 8px rgba(124,92,255,0.6);
+}
+section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"][aria-current="page"] span[data-testid="stIconMaterial"] {
+    color: var(--cyan);
+}
+
+/* Sidebar footer / utilities -------------------------------------------- */
+.tx-sb-divider {
+    height: 1px;
+    background: var(--line);
+    margin: var(--sp-4) 0 var(--sp-3) 0;
+}
+.tx-sb-foot {
+    font-size: 0.62rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    text-align: center;
+    margin-top: var(--sp-3);
+    opacity: 0.7;
+}
+section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
+    width: 100%;
+    background: rgba(255,255,255,0.03);
+    border-color: var(--line);
+    font-size: 0.78rem;
+    min-height: 32px;
+}
+section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover {
+    border-color: rgba(124,92,255,0.4);
+    color: var(--text);
 }
 
 /* ── Trading workflow — risk / alert emphasis ─────────────────────────── */
@@ -312,8 +405,9 @@ h2 {
     line-height: 1.3;
     margin: var(--sp-6) 0 var(--sp-3) 0;
     color: var(--text);
-    padding-left: var(--sp-2);
-    border-left: 2px solid var(--gold);
+    padding-left: var(--sp-3);
+    border-left: 3px solid transparent;
+    border-image: var(--accent-grad) 1;
 }
 h3 {
     font-size: 0.9rem;
@@ -343,9 +437,13 @@ h4 {
     border-bottom: 1px solid var(--line);
 }
 .tx-page-title {
-    font-size: 1.55rem;
-    font-weight: 700;
-    letter-spacing: -0.025em;
+    font-size: 1.6rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    background: linear-gradient(120deg, #ffffff 0%, #c8bcff 55%, #8fe7f5 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
     color: var(--text);
     line-height: 1.15;
 }
@@ -359,11 +457,13 @@ h4 {
 /* ── Metric / KPI cards ──────────────────────────────────────────────── */
 div[data-testid="stMetric"] {
     background: var(--panel);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
     border: 1px solid var(--line);
-    border-radius: var(--radius);
-    padding: var(--sp-3) var(--sp-4);
+    border-radius: var(--radius-lg);
+    padding: var(--sp-4) var(--sp-4);
     box-shadow: var(--shadow-sm);
-    transition: border-color 0.12s ease, box-shadow 0.12s ease;
+    transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
     position: relative;
     overflow: hidden;
 }
@@ -371,13 +471,16 @@ div[data-testid="stMetric"]::before {
     content: "";
     position: absolute;
     top: 0; left: 0; right: 0;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent);
+    height: 2px;
+    background: var(--accent-grad);
+    opacity: 0.55;
 }
 div[data-testid="stMetric"]:hover {
     border-color: var(--line-2);
-    box-shadow: var(--shadow);
+    box-shadow: var(--shadow-glow);
+    transform: translateY(-1px);
 }
+div[data-testid="stMetric"]:hover::before { opacity: 1; }
 div[data-testid="stMetricLabel"] {
     font-size: 0.68rem;
     text-transform: uppercase;
@@ -431,7 +534,7 @@ button[data-baseweb="tab"][aria-selected="true"] {
     font-weight: 600;
 }
 div[data-baseweb="tab-highlight"] {
-    background: var(--teal);
+    background: var(--accent-grad);
     height: 2px;
     border-radius: 2px 2px 0 0;
 }
@@ -462,15 +565,17 @@ div[data-testid="stFormSubmitButton"] > button:hover {
 }
 div[data-testid="stButton"] > button[kind="primary"],
 div[data-testid="stFormSubmitButton"] > button[kind="primary"] {
-    background: var(--teal);
-    border-color: var(--teal);
-    color: #061210;
-    font-weight: 600;
+    background: var(--accent-grad);
+    border: 1px solid transparent;
+    color: #0a0b14;
+    font-weight: 700;
+    box-shadow: 0 4px 16px rgba(124,92,255,0.30);
 }
 div[data-testid="stButton"] > button[kind="primary"]:hover,
 div[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover {
-    background: #43ccbc;
-    border-color: #43ccbc;
+    filter: brightness(1.08);
+    box-shadow: 0 6px 22px rgba(124,92,255,0.42), 0 0 0 1px rgba(34,211,238,0.30);
+    transform: translateY(-1px);
 }
 /* Destructive / danger button — opt-in via class on the markdown container */
 .tx-btn-danger div[data-testid="stButton"] > button {
@@ -563,7 +668,7 @@ div[data-testid="stDataFrame"] [role="row"]:nth-child(even) {
 
 /* ── Progress bars (risk gauges) ─────────────────────────────────────── */
 div[data-testid="stProgress"] > div > div > div {
-    background: linear-gradient(90deg, var(--teal), #2aa89c);
+    background: linear-gradient(90deg, var(--teal), var(--cyan));
     border-radius: 4px;
 }
 div[data-testid="stProgress"] > div > div {
@@ -631,8 +736,10 @@ div[data-testid="stExpander"] > div[data-testid="stExpanderDetails"] {
 /* ── Containers with border ──────────────────────────────────────────── */
 div[data-testid="stVerticalBlockBorderWrapper"] {
     border: 1px solid var(--line) !important;
-    border-radius: var(--radius) !important;
+    border-radius: var(--radius-lg) !important;
     background: var(--panel) !important;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
     padding: var(--sp-4) !important;
     box-shadow: var(--shadow-sm);
 }
@@ -672,7 +779,7 @@ div[data-testid="stSpinner"] > div { border-top-color: var(--teal) !important; }
 .tx-pill.amber  { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-bd); }
 .tx-pill.grey   { background: rgba(90,99,115,0.15); color: var(--text-2); border-color: rgba(90,99,115,0.3); }
 .tx-pill.blue   { background: var(--info-bg); color: var(--info); border-color: var(--info-bd); }
-.tx-pill.teal   { background: var(--teal-dim); color: var(--teal); border-color: rgba(55,184,170,0.3); }
+.tx-pill.teal   { background: var(--teal-dim); color: var(--teal-2); border-color: rgba(124,92,255,0.34); }
 
 /* ── Stat band (top command bar) ─────────────────────────────────────── */
 .tx-statband {
@@ -683,9 +790,20 @@ div[data-testid="stSpinner"] > div { border-top-color: var(--teal) !important; }
     padding: var(--sp-3) var(--sp-5);
     margin: var(--sp-3) 0 var(--sp-4) 0;
     background: var(--panel);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
     border: 1px solid var(--line);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     box-shadow: var(--shadow-sm);
+    position: relative;
+    overflow: hidden;
+}
+.tx-statband::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+    background: var(--accent-grad);
 }
 .tx-stat { display: inline-flex; align-items: center; gap: var(--sp-2); }
 .tx-stat-label {
@@ -751,11 +869,69 @@ div[data-testid="stSpinner"] > div { border-top-color: var(--teal) !important; }
 .tx-kpi-delta.neg { color: var(--neg); }
 .tx-kpi-delta.muted { color: var(--text-3); }
 
+/* ── Portfolio hero band (Home cockpit) ──────────────────────────────── */
+.tx-hero {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    margin: var(--sp-2) 0 var(--sp-5) 0;
+    box-shadow: var(--shadow-sm);
+    position: relative;
+}
+.tx-hero::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--accent-grad);
+    z-index: 1;
+}
+.tx-hero-cell {
+    background: var(--panel-solid);
+    padding: var(--sp-4) var(--sp-5);
+    transition: background 0.15s ease;
+}
+.tx-hero-cell:hover { background: var(--panel-2); }
+.tx-hero-label {
+    font-size: 0.64rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    color: var(--text-3);
+    margin-bottom: var(--sp-2);
+}
+.tx-hero-value {
+    font-size: 1.85rem;
+    font-weight: 750;
+    letter-spacing: -0.02em;
+    line-height: 1.05;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+.tx-hero-sub {
+    font-size: 0.72rem;
+    color: var(--text-3);
+    margin-top: var(--sp-1);
+    font-variant-numeric: tabular-nums;
+}
+.tx-hero-sub.tx-pos { color: var(--pos); }
+.tx-hero-sub.tx-neg { color: var(--neg); }
+.tx-hero-sub.tx-muted { color: var(--text-3); }
+@media (max-width: 1100px) {
+    .tx-hero { grid-template-columns: repeat(2, 1fr); }
+}
+
 /* ── Result / info card ──────────────────────────────────────────────── */
 .tx-card {
     background: var(--panel);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
     border: 1px solid var(--line);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     padding: var(--sp-4) var(--sp-5);
     box-shadow: var(--shadow-sm);
     margin-bottom: var(--sp-4);
@@ -838,6 +1014,47 @@ code, pre {
 """
 
 
+def brand_header() -> None:
+    """Render the brand block at the very top of the sidebar (above the nav).
+
+    Called by the ``streamlit_app.py`` entrypoint. Shows a gradient logo mark,
+    the product name, and a live market-session clock.
+    """
+    bits = []
+    for label, open_t, close_t, tz_name in _SESSIONS:
+        is_open, clock = _session_status(open_t, close_t, tz_name)
+        cls = "open" if is_open else "closed"
+        bits.append(
+            f"<span class='tx-brand-clock-item'>"
+            f"<span class='tx-brand-dot {cls}'></span>{label} {clock}"
+            f"</span>"
+        )
+    st.markdown(
+        "<div class='tx-brand'>"
+        "  <div class='tx-brand-row'>"
+        "    <span class='tx-brand-mark'>◆</span>"
+        "    <span class='tx-brand-name'>TRADING<span class='tx-brand-name-2'>SYS</span></span>"
+        "  </div>"
+        "  <div class='tx-brand-clock'>" + "".join(bits) + "</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def sidebar_footer() -> None:
+    """Render utility controls pinned below the nav (restart button + version)."""
+    st.markdown("<div class='tx-sb-divider'></div>", unsafe_allow_html=True)
+    try:
+        from _server_controls import render_restart_button
+        render_restart_button(key="sidebar_restart_main")
+    except Exception:
+        pass
+    st.markdown(
+        "<div class='tx-sb-foot'>v2 · Midnight UI</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def nav_group(label: str) -> None:
     """Render a nav section label inside the sidebar (call from any page top-level).
 
@@ -852,16 +1069,23 @@ def nav_group(label: str) -> None:
 
 
 def apply_theme(page_title: str, *, page_icon: str | None = None) -> None:
-    """Set page config and inject the dashboard CSS.
+    """Inject the dashboard CSS (and set page config if not already set).
 
-    Call once per page, before any other Streamlit output.
+    Call once per page, before any other Streamlit output. When the app is
+    driven by the ``streamlit_app.py`` entrypoint (``st.navigation``), page
+    config is owned by the entrypoint and ``set_page_config`` here is a no-op —
+    the second call would raise, so it's guarded.
     """
-    st.set_page_config(
-        page_title=page_title,
-        page_icon=page_icon,
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
+    try:
+        st.set_page_config(
+            page_title=page_title,
+            page_icon=page_icon,
+            layout="wide",
+            initial_sidebar_state="expanded",
+        )
+    except Exception:
+        # Already configured by the st.navigation entrypoint — fine.
+        pass
     st.markdown(_CSS, unsafe_allow_html=True)
 
 

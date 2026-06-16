@@ -242,32 +242,32 @@ _TEMPLATE = r"""
 <html><head>
 <meta charset="utf-8"/>
 <style>
-  html,body { margin:0; padding:0; background:#131722; color:#d1d4dc;
+  html,body { margin:0; padding:0; background:#141622; color:#d6d9e6;
               font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
               font-size: 12px; height:100%; overflow:hidden; }
   #wrap { display:flex; flex-direction:column; height:100%; }
   #chart-host { width:100%; flex: 1 1 auto; min-height: 0; }
-  #legend { padding: 6px 10px; background:#1a1f2c; border-bottom:1px solid #2a2e39;
+  #legend { padding: 6px 10px; background:#191c2e; border-bottom:1px solid #2a2e44;
             display:flex; flex-wrap:wrap; gap:14px; align-items:center; }
   #legend .item { display:flex; align-items:center; gap:6px; }
   #legend .swatch { width:14px; height:3px; border-radius:1px; }
   #legend .meta { margin-left:auto; opacity:0.7; }
-  #explain { background:#1a1f2c; border-top:1px solid #2a2e39; padding:10px 12px;
+  #explain { background:#191c2e; border-top:1px solid #2a2e44; padding:10px 12px;
              min-height:170px; max-height:200px; overflow-y:auto; }
-  #explain h4 { margin: 0 0 6px 0; font-size: 13px; color:#e6e6e6; }
+  #explain h4 { margin: 0 0 6px 0; font-size: 13px; color:#eef0f6; }
   #explain .row { display:flex; gap:18px; flex-wrap:wrap; margin-bottom: 4px; }
-  #explain .k { color:#9ba3b1; }
-  #explain .v { color:#e6e6e6; font-variant-numeric: tabular-nums; }
+  #explain .k { color:#9aa3bd; }
+  #explain .v { color:#eef0f6; font-variant-numeric: tabular-nums; }
   #explain .reason { margin-top: 6px; padding: 6px 8px; background:#0f1320;
-                     border-left: 3px solid #42A5F5; border-radius: 2px;
+                     border-left: 3px solid #7c5cff; border-radius: 2px;
                      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                      font-size: 11px; white-space: pre-wrap; }
   #explain .pill { display:inline-block; padding:1px 6px; border-radius:8px;
                    font-size:10px; margin-right:6px; }
-  .pill.buy  { background:#1f3b35; color:#26a69a; border:1px solid #26a69a; }
-  .pill.sell { background:#3e2326; color:#ef5350; border:1px solid #ef5350; }
-  .pill.rej  { background:#3a3526; color:#ffca28; border:1px solid #ffca28; }
-  #warn { color:#ffca28; padding: 4px 10px; }
+  .pill.buy  { background:rgba(52,211,153,0.14); color:#34d399; border:1px solid #34d399; }
+  .pill.sell { background:rgba(251,113,133,0.14); color:#fb7185; border:1px solid #fb7185; }
+  .pill.rej  { background:rgba(251,191,36,0.14); color:#fbbf24; border:1px solid #fbbf24; }
+  #warn { color:#fbbf24; padding: 4px 10px; }
 </style>
 </head><body>
 <div id="wrap">
@@ -316,18 +316,18 @@ async function main() {
   await loadScript(CFG.library_url);
   const host = document.getElementById("chart-host");
   const chart = LightweightCharts.createChart(host, {
-    layout: { background: { type: "solid", color: "#131722" }, textColor: "#d1d4dc" },
+    layout: { background: { type: "solid", color: "#141622" }, textColor: "#d6d9e6" },
     grid:   { vertLines: { color: "rgba(255,255,255,0.05)" }, horzLines: { color: "rgba(255,255,255,0.05)" } },
-    rightPriceScale: { borderColor: "#2a2e39" },
-    timeScale: { borderColor: "#2a2e39", timeVisible: true, secondsVisible: false },
+    rightPriceScale: { borderColor: "#2a2e44" },
+    timeScale: { borderColor: "#2a2e44", timeVisible: true, secondsVisible: false },
     crosshair: { mode: 1 },
     autoSize: true,
   });
 
   const candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {
-    upColor: "#26a69a", downColor: "#ef5350",
-    borderUpColor: "#26a69a", borderDownColor: "#ef5350",
-    wickUpColor: "#26a69a", wickDownColor: "#ef5350",
+    upColor: "#34d399", downColor: "#fb7185",
+    borderUpColor: "#34d399", borderDownColor: "#fb7185",
+    wickUpColor: "#34d399", wickDownColor: "#fb7185",
     priceFormat: { type: "price", precision: 2, minMove: 0.01 },
   });
   candleSeries.setData(CFG.candles || []);
@@ -425,12 +425,12 @@ async function main() {
       shape = "circle";
       prefix = "✕";
     } else if (isBuy) {
-      color = "#26a69a";
+      color = "#34d399";
       position = "belowBar";
       shape = "arrowUp";
       prefix = "▲";
     } else if (isSell) {
-      color = "#ef5350";
+      color = "#fb7185";
       position = "aboveBar";
       shape = "arrowDown";
       prefix = "▼";
@@ -487,10 +487,10 @@ async function main() {
         candleSeries.createPriceLine({ price: latest.entry_price, color: "#90caf9",
           lineStyle: 0, lineWidth: 1, axisLabelVisible: true, title: "ENTRY" });
       if (latest.stop_price)
-        candleSeries.createPriceLine({ price: latest.stop_price, color: "#ef5350",
+        candleSeries.createPriceLine({ price: latest.stop_price, color: "#fb7185",
           lineStyle: 2, lineWidth: 1, axisLabelVisible: true, title: "STOP" });
       if (latest.target_price)
-        candleSeries.createPriceLine({ price: latest.target_price, color: "#26a69a",
+        candleSeries.createPriceLine({ price: latest.target_price, color: "#34d399",
           lineStyle: 2, lineWidth: 1, axisLabelVisible: true, title: "TARGET" });
     }
   }

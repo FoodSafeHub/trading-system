@@ -2758,8 +2758,8 @@ with tab_autotrader:
                     })
                 st.dataframe(
                     pd.DataFrame(_trade_rows).style.map(
-                        lambda v: "color:#4db896" if isinstance(v, (int, float)) and v > 0
-                                  else "color:#d07a7a" if isinstance(v, (int, float)) and v < 0
+                        lambda v: "color:#34d399" if isinstance(v, (int, float)) and v > 0
+                                  else "color:#fb7185" if isinstance(v, (int, float)) and v < 0
                                   else "",
                         subset=["P&L $", "P&L %"],
                     ),

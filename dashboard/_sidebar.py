@@ -1,31 +1,14 @@
-"""Shared sidebar rendered on every page.
+"""Legacy sidebar shim.
 
-Call render_sidebar() at the top of each page (after apply_theme) to get
-consistent navigation labels, the Restart API button, and the data-source
-status pill on every page — not just Home.
+Navigation is now built by the ``streamlit_app.py`` entrypoint using
+``st.navigation`` (real grouped sections, icons, brand header, utilities).
+Every page still calls ``render_sidebar()`` near the top, so this is kept as a
+no-op to avoid editing all 14 page files — the entrypoint already renders the
+full sidebar before the page script runs.
 """
 from __future__ import annotations
 
-import streamlit as st
-
 
 def render_sidebar() -> None:
-    """Inject nav-group labels and utilities into the sidebar."""
-    from _theme import nav_group
-
-    with st.sidebar:
-        nav_group("Overview")
-        # Home, PnL
-        nav_group("Research")
-        # Strategy, Charts, Backtest, Perplexity
-        nav_group("Trading")
-        # DayTrading, Scanner, India
-        nav_group("Risk & Ops")
-        # Risk, Notifications, Schwab, Webull, Orders
-
-        st.markdown("---")
-        try:
-            from _server_controls import render_restart_button
-            render_restart_button(key=f"sidebar_restart_{id(render_sidebar)}")
-        except Exception:
-            pass
+    """No-op. The real sidebar is built in ``streamlit_app.py``."""
+    return None
