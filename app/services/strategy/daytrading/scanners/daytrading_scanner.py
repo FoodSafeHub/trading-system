@@ -353,6 +353,7 @@ class DayTradingScanner:
 
         # ── Score: pre-market relative volume ─────────────────────────────────
         rv = metrics.premarket_rel_vol
+        rv_available = rv > 0.0
         if rv < 0.02:
             score_rv = rv / 0.02 * 0.3         # 0–2% → up to 0.3
         elif rv < 0.10:
@@ -367,12 +368,25 @@ class DayTradingScanner:
         score_gap = _gap_scores.get(gs, 0.0)
 
         # ── Combined score ────────────────────────────────────────────────────
-        score = (
-            cfg.weight_volume     * score_vol
-            + cfg.weight_volatility * score_vol_atr
-            + cfg.weight_rel_vol  * score_rv
-            + cfg.weight_gap      * score_gap
-        )
+        # When rel-vol data is unavailable (rv == 0, common when the provider
+        # supplies no pre-market/opening volume), scoring it as 0 would unfairly
+        # depress every symbol by the full rel-vol weight. Instead, drop the
+        # rel-vol term and renormalize the remaining weights so the score stays
+        # on a comparable 0–1 scale and reflects only the signals we actually have.
+        if rv_available:
+            score = (
+                cfg.weight_volume       * score_vol
+                + cfg.weight_volatility * score_vol_atr
+                + cfg.weight_rel_vol    * score_rv
+                + cfg.weight_gap        * score_gap
+            )
+        else:
+            _w = cfg.weight_volume + cfg.weight_volatility + cfg.weight_gap
+            score = (
+                cfg.weight_volume       * score_vol
+                + cfg.weight_volatility * score_vol_atr
+                + cfg.weight_gap        * score_gap
+            ) / _w if _w > 0 else 0.0
 
         # ── Catalyst boost ────────────────────────────────────────────────────
         if metrics.has_catalyst:
@@ -381,28 +395,36 @@ class DayTradingScanner:
         # ── Tags ──────────────────────────────────────────────────────────────
         tags: list[str] = []
 
+        # rel_vol gates the breakout buckets, but the early-activity volume that
+        # feeds rv is frequently unavailable (provider returns no pre-market /
+        # opening volume). When rv is effectively 0 we treat it as UNKNOWN rather
+        # than "low", and let gap + ATR drive the bucket so a clear gapper still
+        # classifies as gap/momentum instead of collapsing to VWAP. When rv IS
+        # available, the original (stricter) thresholds apply.
+        rv_available = rv > 0.0
+
         # Gap tags
         if gs == "none":
             tags.append("VWAP")                 # no gap → VWAP reversion candidate
         elif gs in ("small", "medium"):
-            if rv >= 0.05:
+            if rv >= 0.05 or (not rv_available and gs == "medium"):
                 tags.append("gap_and_go")
             else:
                 tags.append("gap_fade_candidate")
         elif gs in ("large", "extreme"):
-            if rv >= 0.10:
+            if rv >= 0.10 or not rv_available:
                 tags.append("gap_and_go")
             tags.append("gap_fade_candidate")   # large gap can fade hard too
 
-        # ORB tag: wants decent ATR and some pre-market activity
-        if metrics.atr_pct >= 1.5 and rv >= 0.03:
+        # ORB tag: wants decent ATR and some early activity (or unknown activity).
+        if metrics.atr_pct >= 1.5 and (rv >= 0.03 or not rv_available):
             tags.append("ORB")
 
-        # Momentum tag: strong gap + strong rel vol
-        if abs_gap >= cfg.gap_small_pct and rv >= 0.08:
+        # Momentum tag: strong gap + strong rel vol (or strong gap when rv unknown).
+        if abs_gap >= cfg.gap_small_pct and (rv >= 0.08 or not rv_available):
             tags.append("momentum")
 
-        # Pre-market heat tag
+        # Pre-market heat tag — only when we actually measured elevated rel vol.
         if rv >= 0.10:
             tags.append("hot_rel_vol")
 
@@ -682,7 +704,17 @@ class DayTradingScanner:
 
     @staticmethod
     def _fetch_pm_vol_batched(symbols: list[str]) -> dict[str, float]:
-        """Download 1m bars for a list of symbols in batches of 50 and extract pre-market volume."""
+        """Download 1m bars for a list of symbols in batches of 50 and extract an
+        "early-activity volume" proxy for relative-volume scoring.
+
+        Primary signal: pre-market volume (04:00–09:30 ET). But yfinance often
+        returns pre-market *bars with zero volume* (and TwelveData's free tier
+        serves no pre-market bars at all). When the pre-market window sums to 0,
+        we fall back to the **opening-range volume** (first 30 min of RTH,
+        09:30–10:00 ET) — which IS reliably populated. This mirrors what the
+        India path already does (first 30 min of the NSE session) and keeps the
+        rel-vol signal alive so ORB/momentum/gap buckets don't collapse to VWAP.
+        """
         from app.services.strategy.daytrading.market_open import _normalise_yf
 
         BATCH_SIZE    = 50
@@ -713,9 +745,7 @@ class DayTradingScanner:
                         if sym_df is None or sym_df.empty:
                             continue
                         sym_df = _normalise_yf(sym_df)
-                        pm_mask = (sym_df.index.time >= time(4, 0)) & (sym_df.index.time < time(9, 30))
-                        pm_vol = float(sym_df.loc[pm_mask, "Volume"].sum()) if pm_mask.any() else 0.0
-                        out[sym] = pm_vol
+                        out[sym] = _early_activity_volume(sym_df)
                     except Exception:
                         continue
                 return out
@@ -1344,7 +1374,12 @@ class DayTradingScanner:
             return None
 
     def _get_premarket_volume(self, symbol: str, avg_daily_vol: float) -> float:
-        """Return pre-market volume (04:00–09:30 ET). Checks pm-vol cache first."""
+        """Return an early-activity volume proxy for rel-vol scoring.
+
+        Pre-market volume (04:00–09:30 ET) when available, else the opening-range
+        volume (first 30 min RTH). See ``_early_activity_volume``. Checks the
+        Phase 2a batch cache first so a prior scan() makes this free.
+        """
         # Phase 2a batch cache — free if scan() already ran
         if (DayTradingScanner._pm_vol_cache_date == date.today()
                 and symbol in DayTradingScanner._pm_vol_cache):
@@ -1352,18 +1387,19 @@ class DayTradingScanner:
 
         from app.services.strategy.daytrading.market_open import _td_fetch, _normalise_yf
         try:
+            # TwelveData first. _td_fetch already returns an ET-tz index, but the
+            # free tier serves only RTH bars — so the opening-range fallback
+            # inside _early_activity_volume is what actually fires here.
             df = _td_fetch(symbol, "1m", "1d")
             if not df.empty:
-                pm_mask = (df.index.time >= time(4, 0)) & (df.index.time < time(9, 30))
-                if pm_mask.any():
-                    return float(df.loc[pm_mask, "Volume"].sum())
+                vol = _early_activity_volume(df)
+                if vol > 0:
+                    return vol
 
             df = yf.download(symbol, period="1d", interval="1m", prepost=True, progress=False)
             if not df.empty:
-                df = _normalise_yf(df)
-                pm_mask = (df.index.time >= time(4, 0)) & (df.index.time < time(9, 30))
-                if pm_mask.any():
-                    return float(df.loc[pm_mask, "Volume"].sum())
+                df = _normalise_yf(df)   # -> ET tz, so the 04:00/09:30 masks are correct
+                return _early_activity_volume(df)
 
             return 0.0
         except Exception:
@@ -1410,6 +1446,45 @@ def _fetch_float(symbol: str) -> float:
         info = t.info or {}
         val = info.get("floatShares") or info.get("sharesOutstanding")
         return float(val) if val else 0.0
+    except Exception:
+        return 0.0
+
+
+def _early_activity_volume(df: pd.DataFrame) -> float:
+    """Return a pre-market-or-opening-range volume proxy from a 1m bar frame.
+
+    The relative-volume signal needs *early-session* conviction. The ideal source
+    is pre-market volume (04:00–09:30 ET), but data providers frequently return
+    pre-market bars with zero volume (yfinance) or none at all (TwelveData free).
+    When the pre-market window sums to zero, fall back to the **opening-range
+    volume** — the first 30 minutes of the regular session (09:30–10:00 ET) —
+    which is reliably populated and is itself a strong morning-conviction signal.
+
+    The index is converted to ET first. Earlier versions masked 04:00/09:30 ET
+    thresholds against a UTC-indexed frame, which silently selected the wrong
+    window and summed to ~0; converting up front fixes that.
+    """
+    if df is None or df.empty or "Volume" not in df.columns:
+        return 0.0
+    try:
+        idx = df.index
+        # Ensure an ET-localized index so the wall-clock masks are correct.
+        if getattr(idx, "tz", None) is None:
+            idx = idx.tz_localize("UTC").tz_convert(ET)
+        elif str(idx.tz) != str(ET):
+            idx = idx.tz_convert(ET)
+
+        vol = df["Volume"].to_numpy()
+        times = idx.time   # numpy array of datetime.time, aligned positionally
+
+        pm_mask = (times >= time(4, 0)) & (times < time(9, 30))
+        pm_vol = float(vol[pm_mask].sum()) if pm_mask.any() else 0.0
+        if pm_vol > 0:
+            return pm_vol
+
+        # Fallback: first 30 min of RTH (opening-range volume).
+        or_mask = (times >= time(9, 30)) & (times < time(10, 0))
+        return float(vol[or_mask].sum()) if or_mask.any() else 0.0
     except Exception:
         return 0.0
 
