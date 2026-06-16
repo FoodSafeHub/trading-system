@@ -1916,16 +1916,16 @@ No 🟢? Treat the list as a watchlist and re-scan shortly.
             _top_syms = [r.get("symbol", "") for r in ranked[:8] if r.get("symbol")]
             if _top_syms:
                 st.markdown(
-                    "**Quick actions** — click a ticker to **arm the paper autotrader** on it "
-                    "(native-strategy entry). 🟢 = a strategy is firing now."
+                    "**Quick actions** — click a ticker to **send it to the Auto Trader tab** "
+                    "(and pre-fill Backtest). 🟢 = a strategy is firing now."
                 )
                 _bt_cols = st.columns(min(len(_top_syms), 8))
                 for _ci, _sym in enumerate(_top_syms):
                     _sig_icon = "🟢 " if any(r.get("symbol") == _sym and r.get("native_signal_active") for r in ranked) else ""
                     if _bt_cols[_ci].button(
                         f"{_sig_icon}{_sym}", key=f"qbt_{_sym}",
-                        help=f"Arm the paper autotrader on {_sym} now. "
-                             f"Also pre-fills the Backtest tab.",
+                        help=f"Load {_sym} into the Auto Trader tab (press Start there to arm) "
+                             f"and pre-fill the Backtest tab.",
                     ):
                         # Persist the request; the button click already triggers
                         # a rerun, where the handler below picks it up. The table
@@ -1934,49 +1934,33 @@ No 🟢? Treat the list as a watchlist and re-scan shortly.
                         st.session_state["bt_symbol"] = _sym
                         st.session_state["ca_symbol"] = _sym
 
-    # ── Handle a Quick-action arm request (survives the button-click rerun) ──
-    # Set by the per-symbol buttons above. Lives here, outside `if _run_scan`,
-    # so the feedback actually renders after the rerun instead of vanishing with
-    # the scan section.
+    # ── Handle a Quick-action request (survives the button-click rerun) ──────
+    # The Auto Trader tab owns the one interactive bot (built directly into
+    # st.session_state["at_trader"]). Rather than silently arm a SEPARATE,
+    # invisible bot via the API manager — with hidden defaults the user can't see
+    # or stop from the tab they're watching — we hand the symbol to that tab and
+    # point the user at it. They press Start there, where direction / paper-vs-live
+    # / risk are all explicit. Safer for real money and keeps ONE arming flow.
     _arm_sym = st.session_state.pop("_qbt_arm_symbol", None)
     if _arm_sym:
-        with st.spinner(f"Arming paper autotrader on {_arm_sym}…"):
-            try:
-                _res = _api.autotrader_start({
-                    "symbols": [_arm_sym],
-                    "direction_mode": "long_only",
-                    "broker_name": "paper",
-                    "entry_mode": "native_strategy",
-                    "force": True,  # arm even outside RTH; paper trader idles until open
-                })
-                _started = _res.get("started") or []
-                _errs = _res.get("errors") or {}
-                if _arm_sym in _started:
-                    st.success(
-                        f"🚀 Paper autotrader armed on **{_arm_sym}** (native-strategy, long-only). "
-                        f"Open the **Auto Trader** tab to watch it.",
-                        icon="🚀",
-                    )
-                elif _arm_sym in _errs:
-                    st.warning(f"Could not arm {_arm_sym}: {_errs[_arm_sym]}")
-                else:
-                    st.info(
-                        f"Arm request sent for {_arm_sym}. "
-                        f"Response: {_res}. Check the Auto Trader tab."
-                    )
-            except Exception as _ae:
-                _msg = str(_ae)
-                if "already running" in _msg.lower() or "409" in _msg:
-                    st.warning(
-                        f"An autotrader switch is already running. Stop it in the "
-                        f"**Auto Trader** tab first, then arm {_arm_sym}. "
-                        f"(Pre-filled {_arm_sym} in the Backtest tab in the meantime.)"
-                    )
-                else:
-                    st.error(
-                        f"Couldn't arm {_arm_sym}: {_ae}. "
-                        f"(Pre-filled {_arm_sym} in the Backtest tab instead.)"
-                    )
+        # Set the Auto Trader tab's symbol widget directly (its key is "at_symbol").
+        # Safe because this handler runs earlier in the script than that widget.
+        st.session_state["at_symbol"] = _arm_sym
+        _running = bool(st.session_state.get("at_status", {}).get("running"))
+        if _running:
+            st.warning(
+                f"**{_arm_sym}** is queued for the Auto Trader tab, but a bot is "
+                f"already running. Stop it in the **Auto Trader** tab, then set the "
+                f"symbol to {_arm_sym} and press **▶ Start bot**.",
+                icon="⚠️",
+            )
+        else:
+            st.success(
+                f"**{_arm_sym}** sent to the **Auto Trader** tab. Open it, confirm "
+                f"direction / paper-vs-live / risk, then press **▶ Start bot**. "
+                f"(Also pre-filled in the Backtest tab.)",
+                icon="🎯",
+            )
 
     # ── Start AutoTrader from scanner ────────────────────────────────────────
     # Reuses the most-recent scan stashed in session_state. The backend

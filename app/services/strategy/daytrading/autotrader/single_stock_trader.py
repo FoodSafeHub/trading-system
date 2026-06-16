@@ -981,8 +981,22 @@ class SingleStockTrader:
         import uuid
         from app.schemas.orders import OrderRequest
 
-        side = action.upper()
-        if side not in ("BUY", "SELL"):
+        # Map the trader's action vocabulary to the broker's BUY/SELL:
+        #   BUY        → BUY   (open long)
+        #   SELL       → SELL  (close long)
+        #   SELL_SHORT → SELL  (open short — a sell order opens the short)
+        #   BUY_COVER  → BUY   (close short — a buy order covers it)
+        # Before this map, SELL_SHORT and BUY_COVER fell through the
+        # `not in ("BUY","SELL")` guard and were silently dropped, so live
+        # short entries AND covers never reached the broker.
+        _ACTION_TO_SIDE = {
+            "BUY": "BUY",
+            "SELL": "SELL",
+            "SELL_SHORT": "SELL",
+            "BUY_COVER": "BUY",
+        }
+        side = _ACTION_TO_SIDE.get(action.upper())
+        if side is None:
             logger.error("[autotrader] Unknown order action: %s", action)
             return 0.0
 

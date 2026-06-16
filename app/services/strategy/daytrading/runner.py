@@ -39,11 +39,11 @@ from app.services.strategy.daytrading.pipeline_diagnostics import (
 from app.services.strategy.daytrading.strategies import ALL_STRATEGIES, STRATEGY_MAP
 from app.services.strategy.daytrading.brain.symbol_policy import allows_live, allows_scan
 
-from datetime import time as _time
+from datetime import time as _dtime
 
 logger = logging.getLogger(__name__)
 
-_FIRST_HOUR_END = _time(10, 30)   # signals/bars at or before this are "first hour"
+_FIRST_HOUR_END = _dtime(10, 30)   # signals/bars at or before this are "first hour"
 
 # Process-level provider counters. Tracks how many fetch_intraday() calls each
 # provider has served since the API process started. Read by the dashboard
