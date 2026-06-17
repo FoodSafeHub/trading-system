@@ -229,10 +229,20 @@ def is_pre_market(symbol: str = "") -> bool:
     return t < sess.open_time
 
 
-def is_past_last_entry(symbol: str = "") -> bool:
-    """True after the last-entry cutoff for `symbol`'s market."""
+def is_past_last_entry(symbol: str = "", now: datetime | None = None) -> bool:
+    """True after the last-entry cutoff for `symbol`'s market.
+
+    `now` overrides the clock — pass a bar timestamp to evaluate the cutoff at
+    *bar time* instead of wall-clock (used by the paper-replay simulator so a
+    10:00 AM replayed bar isn't treated as "after hours"). A tz-aware `now` is
+    converted into the symbol's session timezone; a naive one is assumed to
+    already be in that timezone.
+    """
     sess = market_session(symbol) if symbol else _SESSION_US
-    t = datetime.now(sess.tz).time()
+    if now is not None:
+        t = (now.astimezone(sess.tz) if now.tzinfo else now).time()
+    else:
+        t = datetime.now(sess.tz).time()
     return t >= sess.last_entry_time
 
 

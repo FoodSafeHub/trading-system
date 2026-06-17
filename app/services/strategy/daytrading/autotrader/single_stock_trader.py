@@ -46,6 +46,8 @@ from app.services.strategy.daytrading.brain.symbol_policy import allows_live, ge
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_SEC   = 30
+_REPLAY_INTERVAL_SEC = 3       # paper-replay cadence: one historical bar every 3s
+_REPLAY_LOOKBACK_BARS = 78     # ~one US trading day of 5m bars to replay
 
 
 class PolicyError(RuntimeError):
@@ -92,6 +94,7 @@ class SingleStockTrader:
         account_type: str = "cash",   # "cash" | "margin" — drives PDT guard
         pdt_guard: bool = True,        # master switch for the PDT block (no-op when exempt)
         max_open_positions: int = 1,   # concurrent positions (forwarded to RiskGovernor)
+        paper_replay: bool = True,     # paper mode: replay recent bars when market closed
     ):
         self.symbol = symbol.upper()
         self._broker = broker
@@ -145,6 +148,25 @@ class SingleStockTrader:
         # broker is None ⇒ in-process paper sim. A real BaseBroker exposes
         # .is_paper (True for PaperBroker / Alpaca paper).
         self._is_paper_account = broker is None or bool(getattr(broker, "is_paper", False))
+
+        # ── Paper-replay simulator ────────────────────────────────────────────
+        # When the live market is closed, a paper bot (broker is None) would sit
+        # idle forever — it never fetches data or evaluates. paper_replay makes it
+        # instead step through the most recent trading day's bars one-at-a-time,
+        # using BAR time (not wall-clock) for every time gate, so it produces real
+        # trades/decisions exactly like the simulation backtest. Live trading is
+        # untouched: when the market is open we use live bars and _sim_now stays
+        # None. Only enabled for paper (broker is None).
+        self.paper_replay = bool(paper_replay) and broker is None
+        self._sim_now: datetime | None = None          # bar time during replay, else None
+        self._replay_5m: pd.DataFrame | None = None    # full historical frames (cached once)
+        self._replay_15m: pd.DataFrame | None = None
+        self._replay_1m: pd.DataFrame | None = None
+        self._replay_start_idx: int = 0                # first bar index of the replayed day
+        self._replay_end_idx: int = 0                  # last bar index of the replayed day
+        self._replay_cursor: int = -1                  # current position (-1 = not started)
+        self._replay_loaded: bool = False
+        self._replay_done: bool = False                # reached end of the replay window
 
         # Live data snapshots
         self._df_1m: pd.DataFrame | None = None
@@ -282,6 +304,9 @@ class SingleStockTrader:
                 "decision_log": list(self._decision_log[-20:]),
                 "session_trades": [t.to_dict() for t in tsm.session_trades],
                 "pdt": self.pdt_status(),
+                "replay_active": self._sim_now is not None,
+                "sim_time": self._sim_now.isoformat() if self._sim_now is not None else None,
+                "replay_done": self._replay_done,
             }
 
     def decision_summary(self, limit: int | None = None) -> dict[str, Any]:
@@ -434,17 +459,26 @@ class SingleStockTrader:
             # Always update heartbeat so the UI knows the thread is alive,
             # even when the market is closed.
             self._last_heartbeat = datetime.now(ET)
+            interval = _POLL_INTERVAL_SEC
             try:
                 if is_market_open(self.symbol):
+                    # Live: use real bars; clear any replay sim-clock.
+                    self._sim_now = None
                     self._refresh_data()
                     self._evaluate_cycle()
+                elif self.paper_replay:
+                    # Paper + market closed: replay recent history so the bot
+                    # still simulates live trading instead of sitting idle.
+                    self._replay_step()
+                    interval = _REPLAY_INTERVAL_SEC
                 else:
-                    # Market closed — log once, keep thread alive.
+                    # Live bot, market closed — stay alive but do nothing.
                     logger.debug("AutoTrader idle — market closed for %s", self.symbol)
             except Exception as e:
                 logger.error("AutoTrader loop error: %s", e, exc_info=True)
 
-            for _ in range(_POLL_INTERVAL_SEC * 2):
+            # Sleep in 0.5s chunks so stop() is responsive.
+            for _ in range(int(interval * 2)):
                 if not self._running:
                     return
                 _time.sleep(0.5)
@@ -475,6 +509,108 @@ class SingleStockTrader:
         except Exception as e:
             logger.warning("Data refresh error: %s", e)
 
+    def _now(self, tz=ET) -> datetime:
+        """Current 'now' for time gates: the replayed bar's timestamp when the
+        paper-replay simulator is driving, else real wall-clock. Returned in `tz`.
+        """
+        if self._sim_now is not None:
+            base = self._sim_now
+            return base.astimezone(tz) if base.tzinfo else base
+        return datetime.now(tz)
+
+    # ── Paper-replay simulator ────────────────────────────────────────────────
+
+    def _load_replay_history(self) -> None:
+        """Fetch the historical frames the replay walks through (once)."""
+        from app.services.strategy.daytrading.runner import fetch_intraday
+        try:
+            df_5m = fetch_intraday(self.symbol, "5m", "5d")
+            df_15m = fetch_intraday(self.symbol, "15m", "60d")
+            try:
+                df_1m = fetch_intraday(self.symbol, "1m", "5d")
+            except Exception:
+                df_1m = None
+        except Exception as e:
+            logger.warning("[replay] history fetch failed for %s: %s", self.symbol, e)
+            self._replay_loaded = True   # don't hammer the provider on every poll
+            return
+
+        self._replay_loaded = True
+        if df_5m is None or df_5m.empty:
+            logger.warning("[replay] no 5m history for %s — replay disabled", self.symbol)
+            return
+
+        self._replay_5m = df_5m
+        self._replay_15m = df_15m
+        self._replay_1m = df_1m
+
+        # Replay the most recent ~2 trading days of bars (more action than a
+        # single, possibly-partial day). Keep >=15 prior bars so indicators are
+        # valid from the first replayed bar. The slice presented each step keeps
+        # ALL prior bars, so lookback is never starved.
+        n = len(df_5m)
+        self._replay_end_idx = n - 1
+        self._replay_start_idx = max(15, n - 2 * _REPLAY_LOOKBACK_BARS)
+        self._replay_cursor = self._replay_start_idx - 1
+        first_day = df_5m.index[self._replay_start_idx].date()
+        last_day = df_5m.index[self._replay_end_idx].date()
+        logger.info(
+            "[replay] %s loaded: replaying bars %d..%d (%s..%s) of %d",
+            self.symbol, self._replay_start_idx, self._replay_end_idx,
+            first_day, last_day, n,
+        )
+
+    def _replay_step(self) -> None:
+        """Advance the replay by one historical bar and evaluate it.
+
+        Replays the recent window ONCE, then idles at the final bar with the
+        day's trades and P&L preserved (so the user can review the result). It
+        does not loop — restart the bot to replay again. This keeps the trade
+        list / realized P&L monotonic instead of resetting to zero mid-watch.
+        """
+        with self._lock:
+            if not self._replay_loaded:
+                self._load_replay_history()
+            if self._replay_5m is None or self._replay_5m.empty:
+                return
+
+            full5 = self._replay_5m
+            n = len(full5)
+
+            # If we've reached the end of the replay window, idle (hold last bar).
+            if self._replay_cursor >= self._replay_end_idx or self._replay_cursor >= n - 1:
+                if not self._replay_done:
+                    self._replay_done = True
+                    self._log(
+                        "REPLAY_COMPLETE",
+                        f"Replay finished — {self.tsm.trades_today} trade(s), "
+                        f"realized P&L {self.tsm.daily_pnl:+.2f}. Restart the bot to replay again.",
+                        "info",
+                    )
+                return
+
+            self._replay_cursor += 1
+            cur = self._replay_cursor
+            # Present bars up to and including the cursor (indicators see history).
+            self._df_5m = full5.iloc[: cur + 1]
+            self._sim_now = self._df_5m.index[-1].to_pydatetime()
+
+            # Slice 15m / 1m to <= sim_now so higher/lower TFs stay causal.
+            if self._replay_15m is not None and not self._replay_15m.empty:
+                self._df_15m = self._replay_15m[self._replay_15m.index <= self._sim_now]
+            if self._replay_1m is not None and not self._replay_1m.empty:
+                self._df_1m = self._replay_1m[self._replay_1m.index <= self._sim_now]
+
+            # Recompute regime from the visible window (same call as live).
+            try:
+                self._market_state = classify_market_state(self._df_5m, None)
+                self._last_market_state_str = self._market_state.state
+            except Exception:
+                pass
+
+        # Drive the same evaluation path live uses (acquires the lock itself).
+        self._evaluate_cycle()
+
     def _evaluate_cycle(self) -> None:
         """One full evaluation: check state, decide, act."""
         with self._lock:
@@ -491,13 +627,14 @@ class SingleStockTrader:
                 return
             self._last_bar_ts_5m = last_ts
 
-            # EOD force-flatten check (market-aware: IST for NSE, ET for US)
+            # EOD force-flatten check (market-aware: IST for NSE, ET for US).
+            # self._now() returns the replayed bar's time during paper-replay so
+            # the flatten fires at the *bar's* EOD, not real wall-clock.
             from app.services.strategy.daytrading.autotrader.exit_manager import (
                 _EOD_FORCE_FLAT, _EOD_FORCE_FLAT_IST,
             )
-            from datetime import datetime as _dt
             _sess = market_session(self.symbol)
-            now_t = _dt.now(_sess.tz).time()
+            now_t = self._now(_sess.tz).time()
             _eod_flat = _EOD_FORCE_FLAT_IST if _sess.tz is IST else _EOD_FORCE_FLAT
             if now_t >= _eod_flat and self.tsm.has_position:
                 close = self._last_price()
@@ -569,6 +706,7 @@ class SingleStockTrader:
             df_15m=self._df_15m if self._df_15m is not None else pd.DataFrame(),
             market_state=self._market_state,
             account_equity=self.initial_capital + self.tsm.daily_pnl,
+            now_override=self._sim_now,   # bar time during replay, else None
         )
 
         # Diagnostics: tag every decision with the mode that produced it so the
@@ -669,7 +807,11 @@ class SingleStockTrader:
             )
             if exit_filled > 0:
                 self.tsm.qty -= pm_update.exit_qty
-                if self.tsm.state not in (State.PARTIAL_EXIT_TAKEN,):
+                # Only LONG/SHORT can transition to PARTIAL_EXIT_TAKEN. If we're
+                # already TRAILING (or PARTIAL_EXIT_TAKEN), stay put — a partial
+                # while trailing is valid and must not raise an illegal-transition
+                # error. Mirrors the guard in the ExitManager partial handler.
+                if self.tsm.state in (State.LONG, State.SHORT):
                     self.tsm.transition(State.PARTIAL_EXIT_TAKEN, pm_update.reason)
                 self._log("PARTIAL_EXIT", pm_update.reason, "info")
                 self._notify_update()
@@ -678,7 +820,10 @@ class SingleStockTrader:
         elif pm_update.action == "ACTIVATE_TRAIL" and pm_update.new_stop:
             self.tsm.current_stop = pm_update.new_stop
             self.tsm.trailing_stop = pm_update.new_stop
-            self.tsm.transition(State.TRAILING, pm_update.reason)
+            # Only transition if not already TRAILING — a repeat ACTIVATE_TRAIL
+            # would otherwise raise an illegal TRAILING->TRAILING transition.
+            if self.tsm.state != State.TRAILING:
+                self.tsm.transition(State.TRAILING, pm_update.reason)
             self._active_trail_mode = pm_update.trail_mode_used
             self._log("TRAIL_ACTIVATED", pm_update.reason, "info")
             self._notify_update()
@@ -689,7 +834,7 @@ class SingleStockTrader:
             self._update_tight_trail(df_5m, df_1m, ms_str)
 
         # ── Exit manager: decide whether to close ─────────────────────────────
-        ex_decision = self.exit_manager.evaluate(self.tsm, df_5m, df_1m, ms_str)
+        ex_decision = self.exit_manager.evaluate(self.tsm, df_5m, df_1m, ms_str, now=self._sim_now)
         if ex_decision.action == "FULL_EXIT":
             price = ex_decision.exit_price or self._last_price()
 
@@ -1181,6 +1326,7 @@ class SingleStockTrader:
                 df_15m=self._df_15m if self._df_15m is not None else pd.DataFrame(),
                 market_state=self._market_state,
                 account_equity=self.initial_capital + self.tsm.daily_pnl,
+                now_override=self._sim_now,
             )
             return {
                 "mode": other_mode_name,

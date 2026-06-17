@@ -103,18 +103,22 @@ class EntryDecider:
         df_15m: pd.DataFrame,
         market_state: MarketStateResult | None,
         account_equity: float = 10_000.0,
+        now_override: "datetime | None" = None,
     ) -> EntryDecision:
         """
         Main entry point. Evaluates all conditions and returns an EntryDecision.
         Call this on every new 1m or 5m bar close.
+
+        `now_override` lets the paper-replay simulator evaluate time gates at the
+        replayed bar's timestamp instead of wall-clock.
         """
         no_trade = _no_trade  # shorthand
 
         # ── Time gate (market-aware) ───────────────────────────────────────────
         # Use the symbol's own session cutoff (15:15 ET for US, 15:15 IST for
         # NSE) instead of a US-clock literal, so an India autotrader stops taking
-        # entries at the correct wall-clock time.
-        if is_past_last_entry(symbol):
+        # entries at the correct wall-clock time. now_override = bar time in replay.
+        if is_past_last_entry(symbol, now=now_override):
             _cut = market_session(symbol).last_entry_time
             return no_trade(f"Too late in day — no new entries after {_cut.strftime('%H:%M')} (session local)")
 

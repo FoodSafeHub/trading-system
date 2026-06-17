@@ -118,14 +118,18 @@ class NativeStrategyEntry:
         df_15m: pd.DataFrame,
         market_state: MarketStateResult | None,
         account_equity: float = 10_000.0,
+        now_override: "datetime | None" = None,
     ) -> EntryDecision:
         """Mirror of EntryDecider.decide() signature so SingleStockTrader can
         call either one without branching on data plumbing.
+
+        `now_override` evaluates the time gate at a replayed bar's timestamp
+        (paper-replay simulator) instead of wall-clock.
         """
         # ── Time gate (market-aware, matches EntryDecider) ─────────────────
         # Symbol's own session cutoff (US 15:15 ET / NSE 15:15 IST), not a
         # US-clock literal — keeps India autotraders correct.
-        if is_past_last_entry(symbol):
+        if is_past_last_entry(symbol, now=now_override):
             _cut = market_session(symbol).last_entry_time
             return _no_trade(
                 f"Too late in day — no new entries after {_cut.strftime('%H:%M')} (session local)",

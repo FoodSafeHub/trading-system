@@ -2401,7 +2401,14 @@ with tab_autotrader:
                 tight_trail_on_exit_signal=bool(at_tight_trail),
                 account_type=at_account_type,
                 pdt_guard=bool(at_pdt_guard),
-                on_trade_update=lambda s: st.session_state.update({"at_status": s}),
+                # Paper mode: when the live market is closed, replay recent bars
+                # so the bot actually simulates trading instead of sitting idle.
+                paper_replay=bool(at_simulation),
+                # NOTE: no on_trade_update callback. It would write st.session_state
+                # from the bot's BACKGROUND THREAD, which has no Streamlit
+                # ScriptRunContext — the write is unreliable and spams warnings.
+                # The UI instead polls trader.get_status() on each rerun (below),
+                # driven by the 30s auto-refresh while the bot is running.
             )
 
             old = st.session_state.get("at_trader")
@@ -2565,6 +2572,25 @@ with tab_autotrader:
                 f"{'🟢' if hb_ok else '🔴'} Heartbeat {hb:.0f}s ago · "
                 f"{'Running' if status.get('running') else 'Stopped'}"
             )
+
+            # ── Paper-replay simulator status ─────────────────────────────────
+            # When the live market is closed, paper mode replays recent bars so
+            # the bot still trades. Make that explicit so the simulated clock
+            # isn't mistaken for live time.
+            if status.get("replay_active"):
+                _sim_t = (status.get("sim_time") or "")[:16].replace("T", " ")
+                st.info(
+                    f"⏪ **Replay simulation** — the live market is closed, so the bot is "
+                    f"stepping through recent bars (simulated clock: **{_sim_t}**). "
+                    f"Trades and P&L below are simulated on real historical prices.",
+                    icon="⏪",
+                )
+            elif status.get("replay_done"):
+                st.success(
+                    "⏹ Replay complete — the recent window has fully played out. "
+                    "Trades and P&L below are the simulated result. **Restart the bot** to replay again.",
+                    icon="⏹",
+                )
 
             # ── PDT guard status (live sub-$25k margin only) ──────────────────
             _pdt = status.get("pdt") or {}

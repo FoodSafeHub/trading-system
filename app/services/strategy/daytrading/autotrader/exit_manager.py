@@ -187,10 +187,15 @@ class ExitManager:
         df_5m: pd.DataFrame,
         df_1m: pd.DataFrame | None,
         market_state_str: str = "UNKNOWN",
+        now: "datetime | None" = None,
     ) -> ExitDecision:
         """
         Evaluate one bar and return exit/hold instructions.
         Call on every new 5m (and optionally 1m) bar close.
+
+        `now` overrides the clock for the EOD force-flatten check — pass the
+        replayed bar's timestamp (paper-replay simulator) so positions aren't
+        flattened by wall-clock time during an after-hours replay.
         """
         if not tsm.has_position:
             return ExitDecision(action="HOLD", reason="No active position")
@@ -246,7 +251,10 @@ class ExitManager:
         # ── 2. EOD force-flatten ──────────────────────────────────────────────
         sess = market_session(self._symbol)
         from datetime import datetime as _dt
-        now_local = _dt.now(sess.tz).time()
+        if now is not None:
+            now_local = (now.astimezone(sess.tz) if now.tzinfo else now).time()
+        else:
+            now_local = _dt.now(sess.tz).time()
         if exit_plan:
             eod_str = (
                 exit_plan.hard_exit_time_ist
@@ -364,7 +372,8 @@ class ExitManager:
             )
 
         # ── EOD approach: tighten stops ───────────────────────────────────────
-        if now_time >= _EOD_WARN_TIME and r_multiple > 0:
+        # Reuse now_local (override-aware) from the EOD force-flatten block above.
+        if now_local >= _EOD_WARN_TIME and r_multiple > 0:
             atr = _quick_atr(df_5m)
             if atr > 0:
                 eod_mult = profile.get("eod_trail_atr", 0.5)
@@ -375,7 +384,7 @@ class ExitManager:
                 if _is_better_stop(tight_stop, current_stop, side):
                     return ExitDecision(
                         action="MOVE_STOP",
-                        reason=f"EOD approach ({now_time.strftime('%H:%M')}) [{market_state_str}] — tightening to {tight_stop:.2f}",
+                        reason=f"EOD approach ({now_local.strftime('%H:%M')}) [{market_state_str}] — tightening to {tight_stop:.2f}",
                         new_stop=tight_stop,
                         urgency="medium",
                     )
