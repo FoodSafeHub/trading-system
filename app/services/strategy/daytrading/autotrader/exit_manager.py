@@ -278,10 +278,12 @@ class ExitManager:
             )
 
         # ── 2b. NEWS_RISK — flatten immediately if open ───────────────────────
-        if market_state_str == "NEWS_RISK" and r_multiple > 0:
+        # Flatten regardless of P&L: a losing position during a catalyst event
+        # is the most dangerous one to keep, so it must NOT be gated on profit.
+        if market_state_str == "NEWS_RISK":
             return ExitDecision(
                 action="FULL_EXIT",
-                reason="Regime turned NEWS_RISK with open position — flattening",
+                reason=f"Regime turned NEWS_RISK with open position ({r_multiple:+.2f}R) — flattening",
                 exit_price=close,
                 urgency="high",
             )
@@ -420,13 +422,20 @@ class ExitManager:
                     )
 
         # ── 7. Winner protection ──────────────────────────────────────────────
+        # max_favorable_excursion is a *dollar* figure (price move × qty), so it
+        # must be converted to an R-multiple before comparing against mfe_mult.
+        # The dollar risk of the original position is risk_unit × initial_qty;
+        # dividing MFE$ by it yields peak R. (Comparing MFE$ directly to the
+        # per-share risk_unit made this trigger on virtually every green trade.)
         mfe_mult = profile.get("winner_protect_mfe_mult", 1.0)
-        if tsm.max_favorable_excursion > risk_unit * mfe_mult and r_multiple < 0.1:
+        dollar_risk = risk_unit * (tsm.initial_qty or tsm.qty)
+        mfe_r = (tsm.max_favorable_excursion / dollar_risk) if dollar_risk > 0 else 0.0
+        if mfe_r > mfe_mult and r_multiple < 0.1:
             return ExitDecision(
                 action="FULL_EXIT",
                 reason=(
-                    f"Winner protection [{market_state_str}]: was up "
-                    f"{tsm.max_favorable_excursion:.2f} but now +{r_multiple:.2f}R"
+                    f"Winner protection [{market_state_str}]: peaked at "
+                    f"+{mfe_r:.2f}R but now +{r_multiple:.2f}R"
                 ),
                 exit_price=close,
                 urgency="medium",
