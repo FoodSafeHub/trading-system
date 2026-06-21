@@ -11,12 +11,22 @@ from app.schemas._serializers import serialize_et
 class ScanConfig(BaseModel):
     universe: Literal[
         "watchlist", "sp500", "nasdaq100",
+        "sp400", "sp600", "sp1500",
         "nifty50", "nifty100", "nifty200", "nifty500", "nse_all",
         "custom",
     ] = "watchlist"
     custom_symbols: List[str] = Field(default_factory=list)
     min_price: float = 5.0
+    # 0 (or any value <= min_price) disables the max-price ceiling.
+    max_price: float = 0.0
     min_avg_volume: float = 500_000.0
+    # Shares-float band, in raw shares (e.g. 50_000_000 = 50M). 0 disables that
+    # side of the band. The float filter applies to US symbols only — India
+    # (Upstox) names have no float feed, so it's a no-op there. Fetching float
+    # is slow/rate-limited, so it runs ONLY for symbols that already cleared the
+    # price/volume filters and is cached daily on disk.
+    min_float: float = 0.0
+    max_float: float = 0.0
     top_n: int = 5
     # Direction filter applied BEFORE the top-N slice. ANY keeps the legacy
     # behavior (rank all matches together). BUY/SELL drops the other side

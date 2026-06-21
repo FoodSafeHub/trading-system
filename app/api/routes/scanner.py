@@ -38,7 +38,7 @@ async def trigger_scan(config: ScanConfig, background_tasks: BackgroundTasks):
     started = True
     try:
         is_large = config.universe in (
-            "sp500", "nasdaq100",
+            "sp500", "nasdaq100", "sp400", "sp600", "sp1500",
             "nifty50", "nifty100", "nifty200", "nifty500", "nse_all",
         ) or len(config.custom_symbols) > 20
 

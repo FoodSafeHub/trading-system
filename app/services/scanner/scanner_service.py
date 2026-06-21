@@ -23,7 +23,7 @@ from app.db import SessionLocal
 from app.models.scan_results import ScanResult
 from app.schemas.scanner import ScanConfig, ScanResultOut, ScanSummary
 from app.services.market_data.provider import get_ohlcv, get_price_series
-from app.services.scanner.scan_filters import apply_filters
+from app.services.scanner.scan_filters import apply_filters, fetch_float_shares, passes_float_filter
 from app.services.scanner.universe_service import get_universe
 from app.services.strategy.engine import StrategyEngine, load_strategies_from_config
 from app.services.strategy.perplexity.runner import PERPLEXITY_STRATEGIES, run_perplexity_signal
@@ -89,6 +89,34 @@ def run_scan(config: ScanConfig) -> ScanSummary:
 
     total_scanned = 0
     total_passed_filters = 0
+    total_float_rejected = 0
+
+    # ── Shares-float filter setup ────────────────────────────────────────────
+    # Float fetching is slow/rate-limited, so it runs ONLY for symbols that
+    # already cleared the cheap price/volume gates, and reuses a disk cache that
+    # is shared with the day-trading scanner and refreshed daily. India (Upstox)
+    # symbols have no float feed, so the band is skipped for them.
+    float_filter_active = bool(config.min_float or config.max_float)
+    float_cache: dict = {}
+    float_cache_dirty = False
+    if float_filter_active:
+        try:
+            from app.services.strategy.daytrading.scanners.universe import load_float_cache
+            float_cache = load_float_cache()
+        except Exception as e:
+            logger.warning("[scanner] Could not load float cache: %s", e)
+        logger.info(
+            "[scanner] Float filter active: %s–%s shares (%d cached)",
+            f"{config.min_float/1e6:,.1f}M" if config.min_float else "0",
+            f"{config.max_float/1e6:,.1f}M" if config.max_float else "∞",
+            len(float_cache),
+        )
+
+    try:
+        from app.services.markets import is_india_symbol
+    except Exception:
+        def is_india_symbol(_s: str) -> bool:  # type: ignore
+            return False
 
     # votes[symbol][direction] = {strategies: [], perplexity_count: int, df, price, avg_vol}
     votes: dict = {}
@@ -109,10 +137,26 @@ def run_scan(config: ScanConfig) -> ScanSummary:
                 symbol, df,
                 min_price=config.min_price,
                 min_avg_volume=config.min_avg_volume,
+                max_price=config.max_price,
             )
             if not filt.passed:
                 logger.debug("[scanner] %s filtered: %s", symbol, filt.reason)
                 continue
+
+            # ── Shares-float band (US only; slow fetch, gated behind liquidity)
+            if float_filter_active and not is_india_symbol(symbol):
+                fshares = float_cache.get(symbol)
+                if fshares is None:
+                    fshares = fetch_float_shares(symbol)
+                    float_cache[symbol] = fshares
+                    float_cache_dirty = True
+                ok, why = passes_float_filter(
+                    fshares, min_float=config.min_float, max_float=config.max_float
+                )
+                if not ok:
+                    total_float_rejected += 1
+                    logger.debug("[scanner] %s float-filtered: %s", symbol, why)
+                    continue
 
             total_passed_filters += 1
             votes[symbol] = {
@@ -156,6 +200,15 @@ def run_scan(config: ScanConfig) -> ScanSummary:
         # Small pause between batches to avoid rate-limiting yfinance
         if i + config.batch_size < len(all_symbols):
             time.sleep(0.5)
+
+    # Persist any newly-fetched floats so the next scan (and the day-trading
+    # scanner) reuse them instead of re-hitting yfinance.
+    if float_cache_dirty:
+        try:
+            from app.services.strategy.daytrading.scanners.universe import save_float_cache
+            save_float_cache(float_cache)
+        except Exception as e:
+            logger.warning("[scanner] Could not save float cache: %s", e)
 
     # ── Step 5: Score and rank ───────────────────────────────────────────────
     candidates: list[dict] = []
@@ -201,8 +254,10 @@ def run_scan(config: ScanConfig) -> ScanSummary:
     top = candidates[: config.top_n]
 
     logger.info(
-        "[scanner] %s symbols scanned, %s passed filters, %s matches (direction=%s), top %s selected",
-        total_scanned, total_passed_filters, len(candidates), wanted_dir, len(top),
+        "[scanner] %s symbols scanned, %s passed filters (%s float-rejected), "
+        "%s matches (direction=%s), top %s selected",
+        total_scanned, total_passed_filters, total_float_rejected,
+        len(candidates), wanted_dir, len(top),
     )
 
     # ── Step 6: Persist to DB ────────────────────────────────────────────────

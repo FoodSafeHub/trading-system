@@ -252,24 +252,56 @@ divider()
 # ── Scan configuration ────────────────────────────────────────────────────────
 section("Run a Scan")
 
-row1_cols = filter_cols(2, 2, 1, 1, 1)
+row1_cols = filter_cols(2, 1, 1, 1, 1)
 universe = row1_cols[0].selectbox(
     "Universe",
-    ["watchlist", "sp500", "nasdaq100", "nifty50", "custom"],
-    format_func=lambda v: "nifty50 (India)" if v == "nifty50" else v,
-    help="watchlist = assigned symbols. sp500/nasdaq100 = full US index (~2–5 min). nifty50 = NSE top-50.",
+    ["watchlist", "sp500", "nasdaq100", "sp400", "sp600", "sp1500", "nifty50", "custom"],
+    format_func=lambda v: {
+        "nifty50": "nifty50 (India)",
+        "sp1500":  "sp1500 (~1500)",
+        "sp400":   "sp400 (MidCap)",
+        "sp600":   "sp600 (SmallCap)",
+    }.get(v, v),
+    help=(
+        "watchlist = assigned symbols. sp500/nasdaq100 = full US index (~2–5 min). "
+        "sp1500 = S&P Composite 1500 (~1500 stocks, ~8–15 min). nifty50 = NSE top-50."
+    ),
 )
 _is_india  = universe == "nifty50"
+_cur       = "₹" if _is_india else "$"
 min_price  = row1_cols[1].number_input(
-    "Min price (₹)" if _is_india else "Min price ($)",
+    f"Min price ({_cur})",
     min_value=1.0, value=50.0 if _is_india else 5.0, step=1.0,
 )
-min_volume = row1_cols[2].number_input("Min avg vol", min_value=0, value=500_000, step=100_000)
-top_n      = row1_cols[3].number_input("Top N", min_value=1, max_value=20, value=5, step=1)
-scan_direction = row1_cols[4].radio(
+max_price  = row1_cols[2].number_input(
+    f"Max price ({_cur})",
+    min_value=0.0, value=0.0, step=1.0,
+    help="0 = no ceiling. Must be above Min price to take effect.",
+)
+min_volume = row1_cols[3].number_input("Min avg vol", min_value=0, value=500_000, step=100_000)
+top_n      = row1_cols[4].number_input("Top N", min_value=1, max_value=20, value=5, step=1)
+
+row2_cols = filter_cols(1, 1, 2)
+min_float_m = row2_cols[0].number_input(
+    "Min float (M)", min_value=0.0, value=0.0, step=1.0,
+    help="Shares float in millions. 0 = no minimum. US symbols only (no India float feed).",
+    disabled=_is_india,
+)
+max_float_m = row2_cols[1].number_input(
+    "Max float (M)", min_value=0.0, value=0.0, step=1.0,
+    help="Shares float in millions. 0 = no maximum. Use a low cap (e.g. 50) for low-float momentum names.",
+    disabled=_is_india,
+)
+scan_direction = row2_cols[2].radio(
     "Direction", ["ANY", "BUY", "SELL"], horizontal=True,
     help="ANY returns both sides. BUY or SELL fills Top N from that side only.",
 )
+if (min_float_m or max_float_m) and not _is_india:
+    st.caption(
+        "ℹ Float filter fetches shares-outstanding per symbol (cached daily). "
+        "It only runs on symbols that clear the price/volume gates, but a first "
+        "1500-symbol run can still take a few extra minutes."
+    )
 
 custom_input = ""
 if universe == "custom":
@@ -296,22 +328,29 @@ if run_btn:
         "universe": universe,
         "custom_symbols": custom_symbols,
         "min_price": min_price,
+        "max_price": max_price,
         "min_avg_volume": int(min_volume),
+        "min_float": float(min_float_m) * 1_000_000 if not _is_india else 0.0,
+        "max_float": float(max_float_m) * 1_000_000 if not _is_india else 0.0,
         "top_n": int(top_n),
         "scan_direction": scan_direction,
         "auto_trade_top": auto_trade,
         "auto_trade_direction": auto_trade_direction,
         "batch_size": 20,
     }
-    is_large = universe in ("sp500", "nasdaq100", "nifty50") or len(custom_symbols) > 20
+    is_large = (
+        universe in ("sp500", "nasdaq100", "sp400", "sp600", "sp1500", "nifty50")
+        or len(custom_symbols) > 20
+    )
 
     with st.spinner(f"Scanning {universe}…" + (" (large — background)" if is_large else "")):
         try:
             result = api._post("/scanner/run", json=config_payload)
             if result.get("scan_run_id") == "pending":
+                _eta = "8–15 minutes" if universe == "sp1500" else "2–5 minutes"
                 st.info(
                     "Large universe scan running in the background. "
-                    "Refresh in 2–5 minutes to see results."
+                    f"Refresh in {_eta} to see results."
                 )
             else:
                 dur  = result.get("duration_seconds", "?")
@@ -377,10 +416,14 @@ with st.expander("How the scanner works"):
 - **IDLE** — score < 35; surfaced by scanner but signal is weak
 
 **Scan flow:**
-1. Build universe (watchlist / S&P 500 / NASDAQ 100 / custom)
-2. Apply liquidity filters: min price, min avg volume, min history
-3. Run all 5 Bollinger + 5 Perplexity strategies per symbol
-4. Score and rank — top N returned, saved to database
+1. Build universe (watchlist / S&P 500 / 400 / 600 / 1500 / NASDAQ 100 / nifty50 / custom)
+2. Apply liquidity filters: min **and max** price, min avg volume, min history
+3. Optional shares-**float band** (US only; min/max in millions, cached daily)
+4. Run all 5 Bollinger + 5 Perplexity strategies per symbol
+5. Score and rank — top N returned, saved to database
+
+**Universes:** `sp1500` is the S&P Composite 1500 (S&P 500 + MidCap 400 +
+SmallCap 600 ≈ 1500 stocks) — the widest single-index sweep, ~8–15 min.
 
 **Auto-scan (market hours only):** watchlist every 15 min · NASDAQ 100 every 4 h · S&P 500 every 4 h
     """)

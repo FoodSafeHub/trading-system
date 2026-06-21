@@ -7,6 +7,9 @@ Supported universes:
   watchlist  — symbols already in strategies.json + any active assignments
   sp500      — S&P 500 constituents fetched from Wikipedia via pandas
   nasdaq100  — NASDAQ 100 constituents fetched from Wikipedia via pandas
+  sp400      — S&P MidCap 400 constituents (Wikipedia)
+  sp600      — S&P SmallCap 600 constituents (Wikipedia)
+  sp1500     — S&P Composite 1500 = 500 + 400 + 600 (~1500 symbols)
   nifty50    — India: Nifty 50 NSE constituents (orders route to Zerodha)
   custom     — caller-supplied list
 """
@@ -15,6 +18,52 @@ import logging
 from typing import List
 
 logger = logging.getLogger(__name__)
+
+_WIKI_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; trading-scanner/1.0)"}
+
+
+def _fetch_wikipedia_symbols(url: str, label: str) -> List[str]:
+    """Scrape an index's constituent tickers from a Wikipedia 'List of …' page.
+
+    Parses the HTML with BeautifulSoup's built-in ``html.parser`` rather than
+    ``pandas.read_html`` — read_html requires lxml/html5lib (not installed here)
+    and its older ``timeout=`` kwarg was removed in pandas 3.x, so the previous
+    approach silently fell back to hardcoded lists. We fetch with requests (which
+    DOES honour a timeout), locate the constituents table (``id='constituents'``
+    or the first ``wikitable``), find the Symbol/Ticker column, and read it down.
+
+    Dots in tickers (BRK.B) are normalised to dashes (BRK-B) for yfinance.
+    Returns [] on any failure so the caller can fall back / combine partials.
+    """
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+
+        r = requests.get(url, timeout=20, headers=_WIKI_HEADERS)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        table = soup.find("table", id="constituents") or soup.find("table", class_="wikitable")
+        if table is None:
+            logger.warning("[universe] %s: no constituents table found", label)
+            return []
+
+        header_cells = table.find("tr").find_all(["th", "td"])
+        headers = [c.get_text(strip=True).lower() for c in header_cells]
+        idx = next((i for i, h in enumerate(headers) if h in ("symbol", "ticker")), 0)
+
+        symbols: List[str] = []
+        for tr in table.find_all("tr")[1:]:
+            cells = tr.find_all(["td", "th"])
+            if len(cells) <= idx:
+                continue
+            sym = cells[idx].get_text(strip=True).replace(".", "-").upper()
+            if sym and sym.replace("-", "").isalnum():
+                symbols.append(sym)
+        logger.info("[universe] Loaded %d %s symbols from Wikipedia", len(symbols), label)
+        return symbols
+    except Exception as e:
+        logger.warning("[universe] Wikipedia %s fetch failed (%s)", label, e)
+        return []
 
 # Hardcoded fallbacks used when the web fetch fails
 _SP500_FALLBACK = [
@@ -68,33 +117,47 @@ def get_watchlist_symbols() -> List[str]:
 
 def get_sp500_symbols() -> List[str]:
     """Fetch S&P 500 symbols from Wikipedia. Falls back to hardcoded list."""
-    try:
-        import pandas as pd
-        tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", timeout=10)
-        df = tables[0]
-        symbols = df["Symbol"].str.replace(".", "-", regex=False).str.upper().tolist()
-        logger.info("[universe] Loaded %d S&P 500 symbols from Wikipedia", len(symbols))
-        return symbols
-    except Exception as e:
-        logger.warning("[universe] Wikipedia S&P 500 fetch failed (%s) — using fallback", e)
-        return _SP500_FALLBACK
+    symbols = _fetch_wikipedia_symbols(
+        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", "S&P 500"
+    )
+    return symbols or _SP500_FALLBACK
+
+
+def get_sp400_symbols() -> List[str]:
+    """Fetch S&P MidCap 400 constituents from Wikipedia (no hardcoded fallback)."""
+    return _fetch_wikipedia_symbols(
+        "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", "S&P 400"
+    )
+
+
+def get_sp600_symbols() -> List[str]:
+    """Fetch S&P SmallCap 600 constituents from Wikipedia (no hardcoded fallback)."""
+    return _fetch_wikipedia_symbols(
+        "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies", "S&P 600"
+    )
+
+
+def get_sp1500_symbols() -> List[str]:
+    """S&P Composite 1500 = S&P 500 + S&P MidCap 400 + S&P SmallCap 600.
+
+    Combines all three tiers (deduplicated, order-preserving). If the 400/600
+    fetches fail we still return whatever did resolve — at minimum the S&P 500
+    (which has its own hardcoded fallback), so a scan never comes back empty.
+    """
+    seen: set[str] = set()
+    out: List[str] = []
+    for sym in get_sp500_symbols() + get_sp400_symbols() + get_sp600_symbols():
+        if sym and sym not in seen:
+            seen.add(sym)
+            out.append(sym)
+    logger.info("[universe] S&P Composite 1500 assembled: %d unique symbols", len(out))
+    return out
 
 
 def get_nasdaq100_symbols() -> List[str]:
     """Fetch NASDAQ 100 symbols from Wikipedia. Falls back to hardcoded list."""
-    try:
-        import pandas as pd
-        tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100", timeout=10)
-        # Find the table with a 'Ticker' or 'Symbol' column
-        for df in tables:
-            for col in df.columns:
-                if str(col).lower() in ("ticker", "symbol"):
-                    symbols = df[col].str.upper().tolist()
-                    logger.info("[universe] Loaded %d NASDAQ 100 symbols from Wikipedia", len(symbols))
-                    return symbols
-    except Exception as e:
-        logger.warning("[universe] Wikipedia NASDAQ 100 fetch failed (%s) — using fallback", e)
-    return _NASDAQ100_FALLBACK
+    symbols = _fetch_wikipedia_symbols("https://en.wikipedia.org/wiki/Nasdaq-100", "NASDAQ 100")
+    return symbols or _NASDAQ100_FALLBACK
 
 
 def get_nifty50_symbols() -> List[str]:
@@ -130,6 +193,12 @@ def get_universe(universe: str, custom_symbols: list[str] | None = None) -> List
         return get_sp500_symbols()
     elif universe == "nasdaq100":
         return get_nasdaq100_symbols()
+    elif universe == "sp400":
+        return get_sp400_symbols()
+    elif universe == "sp600":
+        return get_sp600_symbols()
+    elif universe == "sp1500":
+        return get_sp1500_symbols()
     elif universe in ("nifty50", "nifty100", "nifty200", "nifty500", "nse_all"):
         return get_india_universe(universe)
     elif universe == "custom":
