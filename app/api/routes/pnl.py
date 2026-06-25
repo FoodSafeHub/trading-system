@@ -534,13 +534,55 @@ def pnl_equity_curve(bucket: str = "trade", db: Session = Depends(get_db)):
 
 @router.get("/open-positions", response_model=List[OpenPositionOut])
 def pnl_open_positions(db: Session = Depends(get_db)):
-    """Open long lots aggregated per symbol, with unrealized P/L vs last quote."""
+    """Open long lots aggregated per symbol, with unrealized P/L vs last quote.
+
+    Held positions come from TWO sources, same as /open-trails:
+      1. FIFO ledger (positions the bot opened) — carries cost basis.
+      2. Live broker positions — catches MANUAL/external buys placed directly
+         in the broker app that never got a local BUY row. Without merging
+         these the PnL page silently omitted real holdings (the cockpit's
+         /account/positions showed them, so the two pages disagreed).
+    """
     _, fifo = _refresh(db)
-    last_prices: dict[str, float] = {}
-    if fifo.open_lots:
-        last_prices = _resolve_last_prices(sorted({l.symbol for l in fifo.open_lots}))
+    broker_positions = _broker_positions()
+
+    fifo_symbols = {l.symbol.upper() for l in fifo.open_lots}
+    all_held = sorted(fifo_symbols | set(broker_positions.keys()))
+    if not all_held:
+        return []
+
+    last_prices = _resolve_last_prices(all_held)
     rows, _total = open_position_pnl(fifo.open_lots, last_prices)
-    return [OpenPositionOut(**r) for r in rows]
+    open_by_symbol = {r["symbol"].upper(): r for r in rows}
+
+    # Synthesize a row for broker-only holdings (no FIFO cost basis). The
+    # broker's reported average_cost is used when present so unrealized P/L is
+    # still computed; otherwise avg_cost falls back to 0.0 to satisfy the schema
+    # and the position is at least visible with its live market value.
+    for sym, bp in broker_positions.items():
+        if sym in open_by_symbol:
+            continue  # FIFO row already has richer cost-basis data
+        last_px = last_prices.get(sym)
+        avg_cost = bp.get("avg_cost")
+        qty = bp["quantity"]
+        mkt_val = round(last_px * qty, 2) if last_px else None
+        upnl = upnl_pct = None
+        if avg_cost and last_px:
+            upnl = round((last_px - float(avg_cost)) * qty, 2)
+            upnl_pct = round((last_px - float(avg_cost)) / float(avg_cost) * 100, 2)
+        open_by_symbol[sym] = {
+            "symbol": sym,
+            "quantity": qty,
+            "avg_cost": float(avg_cost) if avg_cost else 0.0,
+            "last_price": last_px,
+            "market_value": mkt_val,
+            "unrealized_pnl": upnl,
+            "unrealized_pct": upnl_pct,
+            "broker": bp.get("broker") or "",
+            "is_paper": False,
+        }
+
+    return [OpenPositionOut(**r) for r in open_by_symbol.values()]
 
 
 @router.get("/open-trails", response_model=List[OpenTrailOut])
