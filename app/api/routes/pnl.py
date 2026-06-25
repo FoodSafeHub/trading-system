@@ -348,6 +348,52 @@ def _broker_positions() -> dict[str, dict]:
     return result
 
 
+def _merged_open_positions(fifo) -> tuple[list[dict], float]:
+    """Open-position rows merged from the FIFO ledger AND live broker positions.
+
+    Single source of truth for "what is open right now" so /summary's count and
+    /open-positions' table never disagree. FIFO rows keep their cost basis;
+    broker-only holdings (MANUAL/external buys with no local BUY row) get a
+    synthesized row — broker avg_cost when reported, else 0.0 — so they're at
+    least visible with live market value. Returns (rows, total_unrealized).
+    """
+    broker_positions = _broker_positions()
+    fifo_symbols = {l.symbol.upper() for l in fifo.open_lots}
+    all_held = sorted(fifo_symbols | set(broker_positions.keys()))
+    if not all_held:
+        return [], 0.0
+
+    last_prices = _resolve_last_prices(all_held)
+    rows, total_unrealized = open_position_pnl(fifo.open_lots, last_prices)
+    open_by_symbol = {r["symbol"].upper(): r for r in rows}
+
+    for sym, bp in broker_positions.items():
+        if sym in open_by_symbol:
+            continue  # FIFO row already has richer cost-basis data
+        last_px = last_prices.get(sym)
+        avg_cost = bp.get("avg_cost")
+        qty = bp["quantity"]
+        mkt_val = round(last_px * qty, 2) if last_px else None
+        upnl = upnl_pct = None
+        if avg_cost and last_px:
+            upnl = round((last_px - float(avg_cost)) * qty, 2)
+            upnl_pct = round((last_px - float(avg_cost)) / float(avg_cost) * 100, 2)
+            total_unrealized += upnl
+        open_by_symbol[sym] = {
+            "symbol": sym,
+            "quantity": qty,
+            "avg_cost": float(avg_cost) if avg_cost else 0.0,
+            "last_price": last_px,
+            "market_value": mkt_val,
+            "unrealized_pnl": upnl,
+            "unrealized_pct": upnl_pct,
+            "broker": bp.get("broker") or "",
+            "is_paper": False,
+        }
+
+    return list(open_by_symbol.values()), total_unrealized
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────
 
 @router.get("/summary", response_model=SummaryOut)
@@ -355,19 +401,25 @@ def pnl_summary(
     include_unrealized: bool = True,
     db: Session = Depends(get_db),
 ):
-    """Top-line numbers: realized so far, unrealized on open positions, counts."""
+    """Top-line numbers: realized so far, unrealized on open positions, counts.
+
+    Open-position count + unrealized P/L include MANUAL/external broker buys
+    (not just FIFO-ledger positions), so the headline matches the open-positions
+    table. include_unrealized=False keeps the legacy FIFO-only, no-quote path.
+    """
     closed, fifo = _refresh(db)
     realized = summarize(closed, key="ALL")
-    last_prices: dict[str, float] = {}
-    if include_unrealized and fifo.open_lots:
-        last_prices = _resolve_last_prices(sorted({l.symbol for l in fifo.open_lots}))
-    open_rows, total_unrealized = open_position_pnl(fifo.open_lots, last_prices)
+    if include_unrealized:
+        open_rows, total_unrealized = _merged_open_positions(fifo)
+    else:
+        open_rows, total_unrealized = open_position_pnl(fifo.open_lots, {})
+    has_live = any(r.get("last_price") for r in open_rows)
     return SummaryOut(
         realized=GroupSummaryOut(**asdict(realized)),
         total_unrealized_pnl=total_unrealized,
         open_position_count=len(open_rows),
         closed_trade_count=len(closed),
-        has_live_prices=bool(last_prices),
+        has_live_prices=has_live,
     )
 
 
@@ -532,57 +584,35 @@ def pnl_equity_curve(bucket: str = "trade", db: Session = Depends(get_db)):
     return out
 
 
+@router.post("/reconcile")
+def pnl_reconcile(lookback_days: int = 30):
+    """Force a broker→DB fill reconcile, widening the lookback window.
+
+    The routine 15-min job (and the on-read sync) only look back
+    settings.order_sync_lookback_days (default 7). A manual close older than
+    that — never ingested while the app was down, say — stays invisible to
+    realized P/L. Hit this with a larger window (default 30d, max 365) to pull
+    those orphan fills in and materialize the round-trips. Returns the sync
+    summary (orders updated, orphan fills ingested, round-trips materialized).
+    """
+    lookback_days = max(1, min(int(lookback_days), 365))
+    from app.services.reconciliation.order_sync import sync_broker_orders_once
+    result = sync_broker_orders_once(lookback_days=lookback_days)
+    result["lookback_days"] = lookback_days
+    return result
+
+
 @router.get("/open-positions", response_model=List[OpenPositionOut])
 def pnl_open_positions(db: Session = Depends(get_db)):
     """Open long lots aggregated per symbol, with unrealized P/L vs last quote.
 
-    Held positions come from TWO sources, same as /open-trails:
-      1. FIFO ledger (positions the bot opened) — carries cost basis.
-      2. Live broker positions — catches MANUAL/external buys placed directly
-         in the broker app that never got a local BUY row. Without merging
-         these the PnL page silently omitted real holdings (the cockpit's
-         /account/positions showed them, so the two pages disagreed).
+    Held positions come from TWO sources (see _merged_open_positions): the FIFO
+    ledger AND live broker positions, so MANUAL/external buys placed directly in
+    the broker app are not silently omitted.
     """
     _, fifo = _refresh(db)
-    broker_positions = _broker_positions()
-
-    fifo_symbols = {l.symbol.upper() for l in fifo.open_lots}
-    all_held = sorted(fifo_symbols | set(broker_positions.keys()))
-    if not all_held:
-        return []
-
-    last_prices = _resolve_last_prices(all_held)
-    rows, _total = open_position_pnl(fifo.open_lots, last_prices)
-    open_by_symbol = {r["symbol"].upper(): r for r in rows}
-
-    # Synthesize a row for broker-only holdings (no FIFO cost basis). The
-    # broker's reported average_cost is used when present so unrealized P/L is
-    # still computed; otherwise avg_cost falls back to 0.0 to satisfy the schema
-    # and the position is at least visible with its live market value.
-    for sym, bp in broker_positions.items():
-        if sym in open_by_symbol:
-            continue  # FIFO row already has richer cost-basis data
-        last_px = last_prices.get(sym)
-        avg_cost = bp.get("avg_cost")
-        qty = bp["quantity"]
-        mkt_val = round(last_px * qty, 2) if last_px else None
-        upnl = upnl_pct = None
-        if avg_cost and last_px:
-            upnl = round((last_px - float(avg_cost)) * qty, 2)
-            upnl_pct = round((last_px - float(avg_cost)) / float(avg_cost) * 100, 2)
-        open_by_symbol[sym] = {
-            "symbol": sym,
-            "quantity": qty,
-            "avg_cost": float(avg_cost) if avg_cost else 0.0,
-            "last_price": last_px,
-            "market_value": mkt_val,
-            "unrealized_pnl": upnl,
-            "unrealized_pct": upnl_pct,
-            "broker": bp.get("broker") or "",
-            "is_paper": False,
-        }
-
-    return [OpenPositionOut(**r) for r in open_by_symbol.values()]
+    rows, _total = _merged_open_positions(fifo)
+    return [OpenPositionOut(**r) for r in rows]
 
 
 @router.get("/open-trails", response_model=List[OpenTrailOut])

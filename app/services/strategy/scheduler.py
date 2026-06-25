@@ -1132,7 +1132,7 @@ def _run_gtc_fill_sync_job() -> None:
         return
     try:
         from app.services.reconciliation.order_sync import sync_broker_orders_once
-        sync_broker_orders_once()
+        sync_broker_orders_once(lookback_days=settings.order_sync_lookback_days)
     except Exception as exc:
         logger.error("[scheduler] Order fill sync job failed: %s", exc)
 

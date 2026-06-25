@@ -183,18 +183,22 @@ def _reconcile_one_broker(broker, loop, lookback_days: int = 7) -> tuple[int, in
     return updated, created
 
 
-def sync_broker_orders_once(lookback_days: int = 7) -> dict:
+def sync_broker_orders_once(lookback_days: int | None = None) -> dict:
     """Reconcile every relevant broker's recent orders into the DB, then
     materialize realized trades so PnL/Recent Fills update automatically.
 
-    lookback_days widens the broker order window — the default 7 covers routine
-    syncing; pass a larger value for a one-time backfill of a position that
-    closed further back.
+    lookback_days widens the broker order window. None (default) uses
+    settings.order_sync_lookback_days; pass a larger value for a one-time
+    backfill of a position that closed further back.
 
     Brokers covered: the global active broker (Schwab/Webull/paper) plus Zerodha
     when any enabled assignment routes to India. Never raises — returns a summary.
     """
     from app.services.strategy.scheduler import _has_india_assignments
+
+    if lookback_days is None:
+        from app.config import get_settings
+        lookback_days = get_settings().order_sync_lookback_days
 
     loop = asyncio.new_event_loop()
     total_updated = 0

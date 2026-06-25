@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     max_daily_loss_usd: float = 200.0
     max_orders_per_day: int = 10
     order_cooldown_seconds: int = 60
+    # How many days back the broker→DB fill reconcile polls list_orders. Covers
+    # routine syncing; raise it (or use the /pnl/reconcile?lookback_days= backfill
+    # endpoint) to pull in a manual close older than this window that was never
+    # ingested.
+    order_sync_lookback_days: int = 7
     trading_start_time: str = "09:30"
     trading_end_time: str = "16:00"
     trading_timezone: str = "America/New_York"

@@ -598,6 +598,12 @@ def pnl_open_positions():
     return _get("/pnl/open-positions", timeout=30)
 
 
+def pnl_reconcile(lookback_days: int = 30):
+    """Force a broker→DB fill reconcile over a wider window to pull in manual
+    closes older than the routine sync window."""
+    return _post("/pnl/reconcile", params={"lookback_days": lookback_days}, timeout=120)
+
+
 def pnl_open_trails():
     """Open positions with an armed tight-trail SELL stop (live trail audit)."""
     return _get("/pnl/open-trails", timeout=30)

@@ -187,6 +187,23 @@ else:
 # ── Open positions ──────────────────────────────────────────────────────────
 section("Open Positions", "Currently long lots aggregated per symbol, unrealized P/L vs last broker quote.")
 
+# Manual/older broker closes are pulled in by the routine reconcile (last ~7d).
+# This forces a wider backfill for a close that happened further back and never
+# got ingested (e.g. while the app was down).
+with st.expander("Sync broker fills (backfill older manual trades)"):
+    _lb = st.number_input("Look back days", min_value=1, max_value=365, value=30, step=1)
+    if st.button("Reconcile now"):
+        try:
+            res = api.pnl_reconcile(lookback_days=int(_lb))
+            st.success(
+                f"Reconciled (last {res.get('lookback_days', _lb)}d): "
+                f"{res.get('updated', 0)} updated, "
+                f"{res.get('created', 0)} orphan fill(s) ingested, "
+                f"{res.get('realized_inserted', 0)} round-trip(s) materialized."
+            )
+        except Exception as exc:
+            st.error(f"Reconcile failed: {exc}")
+
 try:
     opens = api.pnl_open_positions()
 except Exception as exc:
