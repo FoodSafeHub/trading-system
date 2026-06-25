@@ -403,7 +403,12 @@ class ExitManager:
                 return st_exit
 
         # ── 6. Trailing stop ──────────────────────────────────────────────────
-        if tsm.state.value in ("TRAILING",):
+        # Enforce the trail whenever one is active — that's BOTH the TRAILING
+        # state AND PARTIAL_EXIT_TAKEN (a position that scaled out keeps trailing
+        # but stays in PARTIAL_EXIT_TAKEN; gating on "TRAILING" only meant its
+        # live trailing_stop was never enforced, so it could ride all the way to
+        # the hard stop — same class of bug as the swing tight-trail arm gate).
+        if tsm.state.value in ("TRAILING", "PARTIAL_EXIT_TAKEN"):
             trail = tsm.trailing_stop
             if trail > 0:
                 if side == "LONG" and close <= trail:

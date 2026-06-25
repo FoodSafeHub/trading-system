@@ -207,8 +207,11 @@ class PositionManager:
                     trail_mode_used=trail_mode,
                 )
 
-        # ── Update trailing stop (once in TRAILING state) ─────────────────────
-        if tsm.state == State.TRAILING:
+        # ── Update trailing stop (TRAILING or PARTIAL_EXIT_TAKEN) ─────────────
+        # A scaled-out position sits in PARTIAL_EXIT_TAKEN and keeps trailing;
+        # ratcheting it here (not only in TRAILING) means its trailing_stop keeps
+        # tightening with price instead of freezing at the scale-out level.
+        if tsm.state in (State.TRAILING, State.PARTIAL_EXIT_TAKEN):
             trail_stop = self._compute_trail(close, side, df_5m, df_1m, trail_mode)
             if trail_stop and self._is_better_stop(trail_stop, current_stop, side):
                 logger.debug(
