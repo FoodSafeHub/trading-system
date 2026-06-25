@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     # endpoint) to pull in a manual close older than this window that was never
     # ingested.
     order_sync_lookback_days: int = 7
+    # Comma-separated symbols to hide from ALL PnL views (open positions,
+    # summary count/unrealized, realized/closed). For holdings the user manages
+    # outside this system (e.g. a long-term ETF) so they don't skew strategy P/L.
+    pnl_exclude_symbols: str = ""
+
+    @property
+    def pnl_excluded(self) -> set[str]:
+        return {s.strip().upper() for s in (self.pnl_exclude_symbols or "").split(",") if s.strip()}
     trading_start_time: str = "09:30"
     trading_end_time: str = "16:00"
     trading_timezone: str = "America/New_York"

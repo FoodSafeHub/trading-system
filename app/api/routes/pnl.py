@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_serializer
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import get_db
 from app.schemas._serializers import serialize_et
 from app.services.brokers.factory import get_broker
@@ -204,6 +205,13 @@ def _refresh(db: Session):
     _maybe_sync_broker_orders()
     _inserted, fifo = sync_realized_trades(db)
     closed = load_closed_trades(db)
+
+    # Drop user-excluded symbols from EVERY PnL view (closed list here; open lots
+    # below). For holdings managed outside this system so they don't skew P/L.
+    excluded = get_settings().pnl_excluded
+    if excluded:
+        closed = [c for c in closed if (getattr(c, "symbol", "") or "").upper() not in excluded]
+        fifo.open_lots = [l for l in fifo.open_lots if (l.symbol or "").upper() not in excluded]
     return closed, fifo
 
 
@@ -335,10 +343,11 @@ def _broker_positions() -> dict[str, dict]:
         logger.warning("[pnl] broker positions fetch failed: %s", exc)
         return {}
 
+    excluded = get_settings().pnl_excluded
     for p in positions or []:
         sym = (getattr(p, "symbol", "") or "").upper()
         qty = getattr(p, "quantity", 0) or 0
-        if not sym or qty <= 0:
+        if not sym or qty <= 0 or sym in excluded:
             continue
         result[sym] = {
             "quantity": float(qty),

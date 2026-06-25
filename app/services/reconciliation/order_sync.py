@@ -196,8 +196,9 @@ def sync_broker_orders_once(lookback_days: int | None = None) -> dict:
     """
     from app.services.strategy.scheduler import _has_india_assignments
 
+    from app.config import get_settings
+
     if lookback_days is None:
-        from app.config import get_settings
         lookback_days = get_settings().order_sync_lookback_days
 
     loop = asyncio.new_event_loop()
@@ -206,18 +207,48 @@ def sync_broker_orders_once(lookback_days: int | None = None) -> dict:
     try:
         brokers: list = []
         seen: set[str] = set()
+
+        def _add(b) -> None:
+            name = getattr(b, "name", "") or ""
+            if name and name not in seen:
+                seen.add(name)
+                brokers.append(b)
+
         try:
             gb = get_broker()
-            brokers.append(gb)
-            seen.add(getattr(gb, "name", ""))
+            # A MultiBroker (trade_routing="both") FANS OUT placements to every
+            # leg but its read methods (list_orders) delegate to the PRIMARY leg
+            # only. Reconciling the wrapper therefore polls just one broker and
+            # misses fills on the other leg — e.g. SO sold on Webull while the
+            # primary is Schwab stayed "open" forever. Expand to the underlying
+            # legs so EVERY broker the system trades through is reconciled.
+            legs = getattr(gb, "_brokers", None)
+            if legs:
+                for leg in legs:
+                    _add(leg)
+            else:
+                _add(gb)
         except Exception as exc:
             logger.error("[order_sync] could not build global broker: %s", exc)
 
+        # When routing is "both"/"auto" the active leg may be a single broker but
+        # orders can still have been placed at the other US broker historically.
+        # Cover both US adapters so a fill on either is reconciled regardless of
+        # the current global toggle. Best-effort: unconfigured brokers no-op.
+        try:
+            settings = get_settings()
+            if getattr(settings, "trade_routing", "") in ("both", "auto"):
+                for us in ("schwab", "webull"):
+                    try:
+                        _add(_build_one(us))
+                    except Exception as exc:
+                        logger.debug("[order_sync] skip %s leg: %s", us, exc)
+        except Exception as exc:
+            logger.debug("[order_sync] routing-aware broker expansion skipped: %s", exc)
+
         try:
             if _has_india_assignments():
-                zb = _build_one("zerodha")
-                if getattr(zb, "name", "") not in seen:
-                    brokers.append(zb)
+                _add(_build_one("zerodha"))
         except Exception as exc:
             logger.error("[order_sync] could not build Zerodha broker: %s", exc)
 
