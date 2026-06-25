@@ -542,7 +542,13 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                     .all()
                 )
                 assignments = [
-                    {"symbol": a.symbol, "system": a.system, "strategy_name": a.strategy_name,
+                    # Normalize the symbol to uppercase at the source. current_positions
+                    # and live_prices are keyed by UPPERCASE symbol (broker convention),
+                    # but the held/price lookups below use asgn["symbol"] verbatim — so a
+                    # lowercase/mixed-case assignment row (e.g. "aapl") silently missed its
+                    # position, making SELL exits skip ("held=0.0") and BUY sizing pyramid
+                    # past the cap. Uppercasing here keeps every downstream lookup aligned.
+                    {"symbol": (a.symbol or "").upper(), "system": a.system, "strategy_name": a.strategy_name,
                      "max_capital_usd": a.max_capital_usd, "max_shares": a.max_shares,
                      "broker": a.broker or "default",
                      # Per-assignment Approach C trail %. None = system default (2.0%).
@@ -697,14 +703,17 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
             if _bollinger_enabled():
                 bollinger_configs = load_strategies_from_config()
                 for config in bollinger_configs:
-                    if not config.enabled or config.symbol in assigned_symbols:
+                    # assigned_symbols is uppercase; compare case-insensitively so an
+                    # assigned symbol can never also enter the consensus pool (which
+                    # would double-trade it via two paths with different SELL policies).
+                    if not config.enabled or (config.symbol or "").upper() in assigned_symbols:
                         continue
                     try:
                         prices = get_price_series(config.symbol, period="1y")
                         sigs = _engine.run(config, prices)
                         for s in sigs:
                             if s.direction != "HOLD":
-                                votes[s.symbol][s.direction].append(config.name)
+                                votes[(s.symbol or "").upper()][s.direction].append(config.name)
                     except Exception as exc:
                         logger.error("[scheduler] Bollinger %s failed: %s", config.name, exc)
 
@@ -715,7 +724,7 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                 except Exception:
                     pool_symbols = []
                 for symbol in pool_symbols:
-                    if symbol in assigned_symbols:
+                    if (symbol or "").upper() in assigned_symbols:
                         continue
                     try:
                         df = get_ohlcv(symbol, period="2y")
@@ -724,7 +733,7 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         pool_sigs = run_perplexity_signal(symbol, df)
                         for sig in pool_sigs:
                             if sig.direction != "HOLD":
-                                votes[sig.symbol][sig.direction].append(
+                                votes[(sig.symbol or "").upper()][sig.direction].append(
                                     f"perplexity:{sig.strategy_name}"
                                 )
                     except Exception as exc:
@@ -872,6 +881,10 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
 
             # ── 4. Execute consensus signals ─────────────────────
             for symbol, directions in ({} if dry_run else votes).items():
+                # votes are keyed by the strategy signal's raw symbol, which may be
+                # mixed-case; current_positions/live_prices are uppercase. Normalize
+                # so the held lookup (and the SELL-skip / cap math) don't miss.
+                symbol = (symbol or "").upper()
                 qualifying = {d: v for d, v in directions.items() if len(v) >= min_agree}
                 if len(qualifying) != 1:
                     continue
