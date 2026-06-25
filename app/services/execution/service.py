@@ -408,6 +408,24 @@ class ExecutionService:
         except Exception:
             return 0.0
 
+    def _stored_trail_peak(self, symbol: str, signal_id: Optional[int]) -> float:
+        """Read-only durable high-water mark for an armed trail (0.0 if none).
+
+        Used by the arm gate to tell whether the trail has EVER cleared the floor
+        (i.e. already armed). Matches the same anchor key as _advance_trail_peak:
+        the specific signal_id when present, else the latest signal-less row.
+        """
+        from app.models.trail_peaks import TrailPeak
+
+        with SessionLocal() as db:
+            q = db.query(TrailPeak).filter(TrailPeak.symbol == symbol.upper())
+            if signal_id is not None:
+                q = q.filter(TrailPeak.signal_id == signal_id)
+            else:
+                q = q.filter(TrailPeak.signal_id.is_(None))
+            row = q.order_by(TrailPeak.id.desc()).first()
+            return float(row.peak_price or 0.0) if row is not None else 0.0
+
     def _advance_trail_peak(
         self, symbol: str, signal_id: Optional[int], signal_price: float,
         *, candidate_peak: float,
@@ -563,18 +581,45 @@ class ExecutionService:
             )
             return False
 
+        # Has this trail EVER armed? The arm gate (below) only governs the FIRST
+        # arming — once price has cleared the floor at any point, the trail is
+        # live and must keep protecting even after price falls back below the
+        # floor. We read the durable high-water mark (trail_peaks) and treat the
+        # trail as armed if that stored peak ever reached the floor. Without this
+        # check a momentum SELL that ran up (peak $96) then reversed below the
+        # floor (e.g. IRMD: signal $95, peak $96, now $93.87) wrongly fell back
+        # into "pending arm" and rode the position ALL THE WAY DOWN, unprotected,
+        # never exiting — the exact bug this guards against.
+        already_armed = False
+        try:
+            stored_peak = self._stored_trail_peak(symbol, signal_id)
+            if floor > 0 and stored_peak >= floor:
+                already_armed = True
+        except Exception as exc:
+            logger.debug("[exec] tighten_trail %s: stored-peak read failed: %s", symbol, exc)
+
         # ── ARM GATE ────────────────────────────────────────────────────────
         # Hold off until price has crossed the floor (signal + floor_buffer_pct%).
         # Below it, the SELL is "pending arm": ride the momentum, re-check next
         # cycle. The position keeps whatever protective stop it already had, so
         # it is not naked. Return True so the caller doesn't treat this as failure.
-        if floor > 0 and current_price < floor:
+        # SKIPPED once the trail has already armed (stored peak cleared the floor):
+        # from then on we always evaluate the trail-hit / ratchet logic below, so a
+        # reversal exits instead of riding the position down.
+        if floor > 0 and current_price < floor and not already_armed:
             logger.info(
                 "[exec] tighten_trail %s: SELL pending arm — current $%.2f < floor "
                 "$%.2f (signal $%.2f + %.2f%%). Riding momentum; re-check next cycle.",
                 symbol, current_price, floor, signal_price, floor_buffer_pct,
             )
             return True
+        if already_armed and current_price < floor:
+            logger.info(
+                "[exec] tighten_trail %s: trail already armed (stored peak ≥ floor "
+                "$%.2f) but price $%.2f fell back below floor — evaluating trail-hit "
+                "exit (do NOT re-enter pending-arm).",
+                symbol, floor, current_price,
+            )
 
         suffix = idempotency_suffix or str(int((signal_price or current_price) * 100))
 

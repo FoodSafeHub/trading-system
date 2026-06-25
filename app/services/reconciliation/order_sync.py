@@ -221,7 +221,8 @@ def sync_broker_orders_once(lookback_days: int | None = None) -> dict:
             # only. Reconciling the wrapper therefore polls just one broker and
             # misses fills on the other leg — e.g. SO sold on Webull while the
             # primary is Schwab stayed "open" forever. Expand to the underlying
-            # legs so EVERY broker the system trades through is reconciled.
+            # legs so EVERY broker the system trades through is reconciled. A
+            # single (non-multi) broker is used as-is.
             legs = getattr(gb, "_brokers", None)
             if legs:
                 for leg in legs:
@@ -230,21 +231,6 @@ def sync_broker_orders_once(lookback_days: int | None = None) -> dict:
                 _add(gb)
         except Exception as exc:
             logger.error("[order_sync] could not build global broker: %s", exc)
-
-        # When routing is "both"/"auto" the active leg may be a single broker but
-        # orders can still have been placed at the other US broker historically.
-        # Cover both US adapters so a fill on either is reconciled regardless of
-        # the current global toggle. Best-effort: unconfigured brokers no-op.
-        try:
-            settings = get_settings()
-            if getattr(settings, "trade_routing", "") in ("both", "auto"):
-                for us in ("schwab", "webull"):
-                    try:
-                        _add(_build_one(us))
-                    except Exception as exc:
-                        logger.debug("[order_sync] skip %s leg: %s", us, exc)
-        except Exception as exc:
-            logger.debug("[order_sync] routing-aware broker expansion skipped: %s", exc)
 
         try:
             if _has_india_assignments():
