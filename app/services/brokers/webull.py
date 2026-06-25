@@ -348,6 +348,21 @@ class WebullBroker(BrokerBase):
             raw=data if isinstance(data, dict) else {"data": data},
         )
 
+    @staticmethod
+    def _client_order_id(idempotency_key: Optional[str]) -> str:
+        """Webull caps client_order_id at 32 chars; our idempotency keys
+        (e.g. 'trailstop-<uuid>', 'sell-trail-NVDA-12345-<level>') run 45-46
+        chars and get rejected — which silently dropped protective-stop orders
+        on Webull BUY fills. Map any over-length key to a deterministic 32-char
+        id so the order is still accepted AND idempotent (same key → same id).
+        Short keys pass through unchanged.
+        """
+        key = idempotency_key or ""
+        if len(key) <= 32:
+            return key
+        import hashlib
+        return "wb" + hashlib.sha1(key.encode()).hexdigest()[:30]
+
     def _build_order_payload(self, order: OrderRequest, account_id: str, instrument_id: str) -> dict:
         side = _SIDE_MAP.get(order.side)
         otype = _ORDER_TYPE_MAP.get(order.order_type)
@@ -356,10 +371,16 @@ class WebullBroker(BrokerBase):
             raise ValueError(
                 f"Webull does not support side={order.side!r} order_type={order.order_type!r}"
             )
-        # MARKET orders must have extended_hours_trading=false per the SDK docstring.
-        ext_hours = False if otype == "MARKET" else False
+        # Extended-hours eligibility mirrors Schwab: only LIMIT orders may work
+        # in pre/post-market. MARKET (and the stop/trailing variants) are not
+        # extended-hours eligible — they queue for the next regular session.
+        # When we're inside regular US hours there's no need to flag ext-hours.
+        from app.utils.time_utils import is_market_hours
+        s = self._settings
+        in_regular = is_market_hours(s.trading_start_time, s.trading_end_time, s.tz)
+        ext_hours = (order.order_type == "LIMIT") and not in_regular
         stock_order: dict = {
-            "client_order_id": order.idempotency_key or "",
+            "client_order_id": self._client_order_id(order.idempotency_key),
             "instrument_id":   instrument_id,
             "qty":             str(int(order.quantity)) if order.quantity == int(order.quantity) else str(order.quantity),
             "side":            side,
