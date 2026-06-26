@@ -11,6 +11,7 @@ No live order is submitted without passing ALL risk checks.
 import json
 import logging
 import uuid
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -659,6 +660,55 @@ class ExecutionService:
             and getattr(o, "broker_order_id", None)
         ]
 
+        # ── DB supplement: some brokers' working-order list can't be relied on to
+        # surface an existing rest. Webull's list_orders hits /trade/orders/list-
+        # today (TODAY ONLY), so a tight trail armed on a prior day is invisible to
+        # the broker sweep above — which made the native-trail "leave it alone"
+        # guard miss, so every cycle RE-PLACED the native TRAILING_STOP and reset
+        # its ratchet to the current price (it could never climb → no Approach C
+        # profit capture). We persisted that order with its broker_order_id, so
+        # merge our own still-resting STOP/TRAILING_STOP rows for this symbol that
+        # the broker sweep didn't already return. Broker remains source of truth
+        # for level; this only ensures we SEE the rest exists.
+        try:
+            known_boids = {
+                getattr(o, "broker_order_id", None) for o in resting_sell_stops
+            }
+            with SessionLocal() as _db:
+                db_rows = (
+                    _db.query(Order)
+                    .filter(
+                        Order.symbol == symbol.upper(),
+                        Order.side == "SELL",
+                        Order.order_type.in_(["STOP", "TRAILING_STOP"]),
+                        Order.status.in_(["submitted", "working"]),
+                        Order.broker_order_id.isnot(None),
+                    )
+                    .all()
+                )
+            for r in db_rows:
+                if r.broker_order_id in known_boids:
+                    continue
+                known_boids.add(r.broker_order_id)
+                # Shape it like an OrderStatusResponse for the consumers below.
+                resting_sell_stops.append(
+                    SimpleNamespace(
+                        broker_order_id=r.broker_order_id,
+                        symbol=r.symbol,
+                        side="SELL",
+                        order_type=r.order_type,
+                        stop_price=r.stop_price,
+                        trail_value=r.trail_value,
+                        status=r.status,
+                        raw={},
+                    )
+                )
+        except Exception as exc:
+            logger.debug(
+                "[exec] tighten_trail %s: DB resting-stop supplement failed: %s",
+                symbol, exc,
+            )
+
         # Highest resting static-STOP level (broker = source of truth).
         resting_level = 0.0
         for o in resting_sell_stops:
@@ -802,15 +852,44 @@ class ExecutionService:
             if getattr(o, "order_type", "").upper() == "TRAILING_STOP"
         ]
 
-        # Leave a healthy native trail in place (it self-ratchets). Only replace
-        # it on force_replace (params changed).
+        # Leave a healthy native trail in place (it self-ratchets) — BUT only if
+        # it is already at least as TIGHT as the trail we now want. The protective
+        # stop placed on the BUY fill uses a wide ATR-based trail (~2.5–9%); once
+        # the ASSIGNED strategy fires its SELL, Approach C wants the tighter
+        # assignment trail (often 1–2%) so we exit closer to the peak. If the
+        # resting native trail is LOOSER (larger %) than the new tight trail_pct,
+        # leaving it would give back more profit than intended — so we fall
+        # through and replace it. We only "leave it" when its recorded trail % is
+        # ≤ the target (already tight enough); an unknown/None trail value is
+        # treated as looser so the tighter trail wins.
         if resting_native and use_native and not force_replace:
+            # Replace ONLY when we have a KNOWN, materially-looser resting trail %
+            # (the wide ATR protective-stop placed on the BUY fill, recorded in our
+            # DB with its trail_value). An unknown/None trail value means a broker
+            # order we can't compare — leave it alone (re-placing would reset its
+            # ratchet to the current price, the AMAL bug). max() = loosest resting.
+            known_pcts = [
+                float(getattr(o, "trail_value", None) or 0.0)
+                for o in resting_native
+            ]
+            loosest_known = max((p for p in known_pcts if p > 0), default=0.0)
+            resting_is_looser = loosest_known > trail_pct + 1e-9
+            if not resting_is_looser:
+                logger.info(
+                    "[exec] tighten_trail %s: native TRAILING_STOP already resting "
+                    "(%.2f%%%s ≤ target %.2f%%, trail level $%.2f ≥ floor $%.2f) — "
+                    "broker self-ratchets, leaving it.",
+                    symbol, loosest_known,
+                    "" if loosest_known > 0 else "/unknown",
+                    trail_pct, trail_level, floor,
+                )
+                return True
             logger.info(
-                "[exec] tighten_trail %s: native TRAILING_STOP already resting and "
-                "trail level $%.2f ≥ floor $%.2f — broker self-ratchets, leaving it.",
-                symbol, trail_level, floor,
+                "[exec] tighten_trail %s: resting native trail %.2f%% is LOOSER than "
+                "target %.2f%% — replacing with the tighter Approach-C trail so we "
+                "exit closer to the peak.",
+                symbol, loosest_known, trail_pct,
             )
-            return True
 
         # Static STOP already at/above target (and we still want a static STOP) →
         # no ratchet needed. Only ever move UP, ignore sub-0.1% noise, so a
