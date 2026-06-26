@@ -347,32 +347,42 @@ if assignments:
 
     # Per-symbol management
     st.markdown("**Manage a single assignment**")
-    sel_sym = st.selectbox(
-        "Symbol",
-        [a["symbol"] for a in assignments],
+    # A symbol may now carry several assignments, so each option is keyed by the
+    # full (symbol · strategy) identity — selecting one targets exactly that row.
+    def _asgn_key(a: dict) -> str:
+        return f"{a['symbol']} · {a['strategy_name']}"
+    asgn_keys = [_asgn_key(a) for a in assignments]
+    sel_key = st.selectbox(
+        "Assignment",
+        asgn_keys,
         key="mgmt_sym",
-        help="Pause, resume, or remove a single assignment.",
+        help="Pause, resume, or remove a single strategy assignment.",
     )
-    sel_asgn = next((a for a in assignments if a["symbol"] == sel_sym), None)
+    sel_asgn = next((a for a in assignments if _asgn_key(a) == sel_key), None)
     if sel_asgn:
+        sel_sym = sel_asgn["symbol"]
+        sel_system = sel_asgn["system"]
+        sel_strat = sel_asgn["strategy_name"]
         mc1, mc2, mc3 = st.columns(3)
         with mc1:
             if sel_asgn["enabled"]:
                 if st.button("⏸ Pause", key="pause_btn", use_container_width=True):
-                    api.toggle_assignment(sel_sym, enabled=False)
+                    api.toggle_assignment(sel_sym, enabled=False,
+                                          system=sel_system, strategy_name=sel_strat)
                     st.rerun()
             else:
                 if st.button("▶ Resume", key="resume_btn", type="primary",
                              use_container_width=True):
-                    api.toggle_assignment(sel_sym, enabled=True)
+                    api.toggle_assignment(sel_sym, enabled=True,
+                                          system=sel_system, strategy_name=sel_strat)
                     st.rerun()
         with mc2:
-            confirm_del = st.checkbox(f"Confirm remove {sel_sym}",
-                                      key=f"del_confirm_{sel_sym}")
+            confirm_del = st.checkbox(f"Confirm remove {sel_key}",
+                                      key=f"del_confirm_{sel_key}")
             if st.button("🗑 Remove", key="del_btn",
                          disabled=not confirm_del, use_container_width=True):
-                api.delete_assignment(sel_sym)
-                st.success(f"Removed assignment for {sel_sym}")
+                api.delete_assignment(sel_sym, system=sel_system, strategy_name=sel_strat)
+                st.success(f"Removed assignment {sel_key}")
                 st.rerun()
         with mc3:
             cur_cap = sel_asgn.get("max_capital_usd")
@@ -399,7 +409,7 @@ if assignments:
                 min_value=0.0,
                 value=float(cur_cap) if cur_cap else 0.0,
                 step=100.0,
-                key=f"edit_cap_{sel_sym}",
+                key=f"edit_cap_{sel_key}",
                 help="0 = clear dollar cap. Wins over shares cap when both are set.",
             )
         with ec2:
@@ -408,22 +418,24 @@ if assignments:
                 min_value=0.0,
                 value=float(cur_shares) if cur_shares else 0.0,
                 step=1.0,
-                key=f"edit_shares_{sel_sym}",
+                key=f"edit_shares_{sel_key}",
                 help="0 = clear shares cap. Used only when dollar cap is empty.",
             )
         with ec3:
             st.write("")
             st.write("")
-            if st.button("💾 Update caps", key=f"update_caps_{sel_sym}",
+            if st.button("💾 Update caps", key=f"update_caps_{sel_key}",
                          use_container_width=True):
                 try:
                     api.set_assignment_cap(
                         sel_sym,
                         float(edit_cap) if edit_cap and edit_cap > 0 else None,
+                        system=sel_system, strategy_name=sel_strat,
                     )
                     api.set_assignment_shares(
                         sel_sym,
                         float(edit_shares) if edit_shares and edit_shares > 0 else None,
+                        system=sel_system, strategy_name=sel_strat,
                     )
                     st.success(f"Caps updated for {sel_sym}.")
                     st.rerun()
@@ -441,7 +453,7 @@ if assignments:
                 BROKER_VALUES,
                 index=BROKER_VALUES.index(cur_broker) if cur_broker in BROKER_VALUES else 0,
                 format_func=lambda v: BROKER_LABEL.get(v, v.title()),
-                key=f"edit_broker_{sel_sym}",
+                key=f"edit_broker_{sel_key}",
                 help="Default = global toggle. Otherwise this symbol's orders "
                      "are pinned to the selected broker even if the global "
                      "toggle points somewhere else.",
@@ -449,11 +461,12 @@ if assignments:
         with br2:
             st.write("")
             st.write("")
-            if st.button("💾 Update broker", key=f"update_broker_{sel_sym}",
+            if st.button("💾 Update broker", key=f"update_broker_{sel_key}",
                          use_container_width=True,
                          disabled=(edit_broker == cur_broker)):
                 try:
-                    api.set_assignment_broker(sel_sym, edit_broker)
+                    api.set_assignment_broker(sel_sym, edit_broker,
+                                              system=sel_system, strategy_name=sel_strat)
                     st.success(f"{sel_sym} → {BROKER_LABEL[edit_broker]}.")
                     st.rerun()
                 except Exception as exc:
@@ -467,7 +480,7 @@ if assignments:
                 min_value=1.0, max_value=10.0,
                 value=float(cur_trail) if cur_trail else 2.0,
                 step=0.5,
-                key=f"edit_trail_{sel_sym}",
+                key=f"edit_trail_{sel_key}",
                 help="When the assigned strategy fires a SELL signal, a trailing stop "
                      "is placed at this % distance from the signal price. "
                      "Low-vol stocks (KO, SO): 2–3%. High-vol (NVDA, TSLA): 3–5%. "
@@ -477,11 +490,12 @@ if assignments:
             st.write("")
             st.write("")
             trail_changed = abs(edit_trail - (float(cur_trail) if cur_trail else 2.0)) > 0.01
-            if st.button("💾 Update trail", key=f"update_trail_{sel_sym}",
+            if st.button("💾 Update trail", key=f"update_trail_{sel_key}",
                          use_container_width=True,
                          disabled=not trail_changed):
                 try:
-                    api.set_assignment_trail(sel_sym, edit_trail)
+                    api.set_assignment_trail(sel_sym, edit_trail,
+                                             system=sel_system, strategy_name=sel_strat)
                     st.success(f"{sel_sym} tight trail → {edit_trail:.1f}%.")
                     st.rerun()
                 except Exception as exc:

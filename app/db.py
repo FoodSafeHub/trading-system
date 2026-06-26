@@ -65,16 +65,98 @@ def init_db() -> None:
         scan_results,
         settings as settings_model,
         signals,
+        strategy_positions,
         strategy_recommendations,
         strategy_runs,
         trail_peaks,
     )
+    # Rebuild the assignments PK to the composite (symbol, system, strategy_name)
+    # BEFORE create_all, so create_all doesn't try (and fail) to reconcile the
+    # old single-column-PK table against the new model. The rebuild is a no-op
+    # once the composite PK is in place.
+    _migrate_assignments_composite_pk()
     Base.metadata.create_all(bind=engine)
     _migrate_add_orders_source_column()
     _migrate_add_assignments_max_shares_column()
     _migrate_add_assignments_broker_column()
     _migrate_add_orders_trail_columns()
     _migrate_add_assignments_tight_trail_pct()
+
+
+def _migrate_assignments_composite_pk() -> None:
+    """Idempotent rebuild of symbol_strategy_assignments to a composite PK.
+
+    Originally the table's primary key was `symbol` alone, so a symbol could have
+    only one assignment. We now allow several strategies per symbol, keyed by
+    (symbol, system, strategy_name). SQLite can't ALTER a primary key, so when the
+    old single-column PK is detected we rebuild: rename old -> recreate with the
+    composite PK -> copy rows -> drop old. No-op once the composite PK exists, on a
+    fresh DB (table absent — create_all will make it correctly), or on non-SQLite.
+    """
+    with engine.connect() as conn:
+        try:
+            info = conn.exec_driver_sql(
+                "PRAGMA table_info(symbol_strategy_assignments)"
+            ).fetchall()
+        except Exception:
+            return  # Non-SQLite or no driver support — skip.
+        if not info:
+            return  # Table doesn't exist yet — create_all builds it fresh.
+        # PRAGMA table_info columns: (cid, name, type, notnull, dflt_value, pk).
+        # pk > 0 marks a primary-key column; count how many participate.
+        pk_cols = [r[1] for r in info if r[5]]
+        if len(pk_cols) >= 2:
+            return  # Already composite — nothing to do.
+
+        existing = {r[1] for r in info}
+        # Copy only columns present in BOTH the old table and the new schema, so a
+        # DB missing a later-added column (broker/tight_trail_pct/max_shares) still
+        # migrates; the column migrations below backfill the rest.
+        candidate_cols = [
+            "symbol", "system", "strategy_name", "enabled", "max_capital_usd",
+            "max_shares", "broker", "notes", "tight_trail_pct", "assigned_at",
+        ]
+        copy_cols = [c for c in candidate_cols if c in existing]
+        col_list = ", ".join(copy_cols)
+        try:
+            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            conn.exec_driver_sql(
+                "ALTER TABLE symbol_strategy_assignments "
+                "RENAME TO symbol_strategy_assignments_old"
+            )
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE symbol_strategy_assignments (
+                    symbol VARCHAR(16) NOT NULL,
+                    system VARCHAR(32) NOT NULL,
+                    strategy_name VARCHAR(128) NOT NULL,
+                    enabled BOOLEAN,
+                    max_capital_usd FLOAT,
+                    max_shares FLOAT,
+                    broker VARCHAR(32) NOT NULL DEFAULT 'default',
+                    notes VARCHAR(256),
+                    tight_trail_pct FLOAT,
+                    assigned_at DATETIME,
+                    PRIMARY KEY (symbol, system, strategy_name)
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                f"INSERT INTO symbol_strategy_assignments ({col_list}) "
+                f"SELECT {col_list} FROM symbol_strategy_assignments_old"
+            )
+            conn.exec_driver_sql("DROP TABLE symbol_strategy_assignments_old")
+            conn.commit()
+        except Exception:
+            # If another worker raced the rebuild, the composite PK will exist;
+            # try to leave the DB consistent by dropping the temp table if present.
+            try:
+                conn.exec_driver_sql(
+                    "DROP TABLE IF EXISTS symbol_strategy_assignments_old"
+                )
+                conn.commit()
+            except Exception:
+                pass
 
 
 def _migrate_add_orders_source_column() -> None:

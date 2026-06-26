@@ -38,6 +38,53 @@ from app.services.brokers.factory import _build_one, get_broker
 
 logger = logging.getLogger(__name__)
 
+
+def _attribute_fill_to_ledger(db, order: Order) -> None:
+    """Update the per-strategy share ledger for a freshly-filled order.
+
+    Attribution chain: Order.signal_id -> Signal.strategy_name, then match the
+    enabled assignment with that (symbol, strategy_name) to recover its `system`
+    and broker route. Orders with no signal link (orphan native-trail/manual
+    closes) or no matching assignment are skipped — the ledger only tracks lots
+    our strategies opened, and the scheduler's min(ledger, broker_held) SELL clamp
+    keeps us from overselling when an untracked lot exists.
+    """
+    try:
+        from app.models.assignments import SymbolStrategyAssignment
+        from app.models.signals import Signal
+        from app.services.strategy import strategy_ledger
+        from app.services.markets import is_india_symbol
+
+        if not order.signal_id:
+            return
+        sig = db.query(Signal).filter_by(id=order.signal_id).first()
+        if sig is None or not sig.strategy_name:
+            return
+        symbol = (order.symbol or "").upper()
+        asgn = (
+            db.query(SymbolStrategyAssignment)
+            .filter_by(symbol=symbol, strategy_name=sig.strategy_name)
+            .first()
+        )
+        if asgn is None:
+            return  # consensus / non-assigned fill — not ledger-tracked.
+        broker = asgn.broker or "default"
+        if broker == "default" and is_india_symbol(symbol):
+            broker = "zerodha"
+        strategy_ledger.apply_fill(
+            symbol=symbol,
+            system=asgn.system,
+            strategy_name=sig.strategy_name,
+            side=order.side,
+            qty=float(order.quantity or 0.0),
+            price=order.fill_price,
+            broker=broker,
+            db=db,
+        )
+    except Exception as exc:
+        logger.debug("[order_sync] ledger attribution skipped for order %s: %s",
+                     getattr(order, "id", "?"), exc)
+
 _FILLED = {"filled", "partial"}
 _DEAD = {"canceled", "cancelled", "rejected", "expired"}
 
@@ -124,6 +171,10 @@ def _reconcile_one_broker(broker, loop, lookback_days: int = 7) -> tuple[int, in
                         # filled_at: prefer broker close time when present.
                         close_t = (getattr(bo, "raw", {}) or {}).get("closeTime")
                         row.filled_at = _coerce_dt(close_t) if close_t else datetime.now(tz=timezone.utc)
+                        # Attribute this fill to the firing strategy's share ledger
+                        # so per-strategy SELL sizing stays accurate. Same session,
+                        # committed together with the status flip.
+                        _attribute_fill_to_ledger(db, row)
                         db.commit()
                         updated += 1
                         logger.info(

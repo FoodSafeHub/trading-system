@@ -1233,6 +1233,18 @@ class ExecutionService:
                 order.error_message = error_message
             if preview_json:
                 order.preview_json = preview_json
+            # When this transition is a fill, attribute it to the firing strategy's
+            # share ledger so per-strategy SELL sizing stays accurate. Reuses the
+            # same attribution helper as the reconcile path (single source of truth);
+            # no-op for non-fill statuses, orphan, or non-assigned orders.
+            if status == "filled" and order.fill_price:
+                try:
+                    from app.services.reconciliation.order_sync import (
+                        _attribute_fill_to_ledger,
+                    )
+                    _attribute_fill_to_ledger(db, order)
+                except Exception:
+                    pass
             db.commit()
 
     def _persist_preview(self, order_id: int, preview) -> None:

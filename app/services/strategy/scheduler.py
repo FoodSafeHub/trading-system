@@ -604,8 +604,14 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
             except Exception as exc:
                 logger.warning("[scheduler] Regime cap unavailable, no position cap this cycle: %s", exc)
 
-            # signals_to_act: list of (symbol, direction, label, entry_price, stop_price)
-            signals_to_act: list[tuple[str, str, str, float, float | None]] = []
+            # signals_to_act: list of
+            #   (symbol, direction, label, entry_price, stop_price, system, strategy_name)
+            # system + strategy_name identify the specific assignment that produced the
+            # signal, so the execute loop can size/sell against THAT strategy's share
+            # ledger (a symbol may now carry several independent assignments).
+            signals_to_act: list[
+                tuple[str, str, str, float, float | None, str, str]
+            ] = []
 
             # ── 1. Run assigned strategies ───────────────────────
             for asgn in assignments:
@@ -632,7 +638,7 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         label = f"perplexity:{strategy_name}"
                         _persist_signal(symbol, sig.direction, label, entry, acted_on=False)
                         if sig.direction != "HOLD":
-                            signals_to_act.append((symbol, sig.direction, label, entry, sig.stop_price))
+                            signals_to_act.append((symbol, sig.direction, label, entry, sig.stop_price, system, strategy_name))
                             logger.info(
                                 "[scheduler] Assigned %s → %s: %s entry=%.2f stop=%s (%s)",
                                 strategy_name, symbol, sig.direction, entry, sig.stop_price, sig.reason
@@ -648,7 +654,7 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                                 entry = live_prices.get(symbol) or s.price_at_signal or float(prices.iloc[-1])
                                 _persist_signal(symbol, s.direction, strategy_name, entry, acted_on=False)
                                 if s.direction != "HOLD":
-                                    signals_to_act.append((symbol, s.direction, strategy_name, entry, None))
+                                    signals_to_act.append((symbol, s.direction, strategy_name, entry, None, system, strategy_name))
                                     logger.info("[scheduler] Assigned %s → %s: %s", strategy_name, symbol, s.direction)
 
                     elif system == "scanner":
@@ -687,7 +693,7 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                                 label = f"scanner:{strategy_name}"
                                 _persist_signal(symbol, sig.direction, label, entry, acted_on=False)
                                 if sig.direction != "HOLD":
-                                    signals_to_act.append((symbol, sig.direction, label, entry, None))
+                                    signals_to_act.append((symbol, sig.direction, label, entry, None, system, strategy_name))
                                     logger.info(
                                         "[scheduler] Assigned scanner %s → %s: %s entry=%.2f",
                                         strategy_name, symbol, sig.direction, entry,
@@ -742,8 +748,20 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
             # ── 3. Execute assigned signals (no consensus needed) ─
             if dry_run:
                 logger.info("[scheduler] Dry run — %d assigned signal(s) evaluated, no orders placed.", len(signals_to_act))
-            for symbol, direction, label, entry, stop in ([] if dry_run else signals_to_act):
-                asgn = next((a for a in assignments if a["symbol"] == symbol), None)
+            from app.services.strategy import strategy_ledger
+            for symbol, direction, label, entry, stop, sig_system, sig_strategy in (
+                [] if dry_run else signals_to_act
+            ):
+                # Resolve the exact assignment that fired this signal (a symbol may
+                # carry several). Falls back to the first symbol match only if the
+                # triple lookup misses (shouldn't happen).
+                asgn = next(
+                    (a for a in assignments
+                     if a["symbol"] == symbol
+                     and a["system"] == sig_system
+                     and a["strategy_name"] == sig_strategy),
+                    None,
+                ) or next((a for a in assignments if a["symbol"] == symbol), None)
                 asgn_cap = asgn["max_capital_usd"] if asgn else None
                 asgn_shares = asgn["max_shares"] if asgn else None
                 asgn_broker = asgn["broker"] if asgn else "default"
@@ -758,26 +776,30 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                     except Exception:
                         pass
                 if direction == "BUY":
-                    # Sizing is cap-aware AND held-aware: pass the broker
-                    # quantity so a top-up can never pyramid past the user's
-                    # max_capital_usd / max_shares (which apply to the TOTAL
-                    # position, not just the new order).
-                    held = current_positions.get(symbol, 0.0)
+                    # Sizing is cap-aware AND held-aware, but "held" here is THIS
+                    # strategy's own ledger lot — not the broker aggregate — so each
+                    # assignment sizes against its own max_capital_usd / max_shares
+                    # even when another strategy also holds the same symbol.
+                    strat_held = strategy_ledger.get_held(
+                        symbol, sig_system, sig_strategy, asgn_broker
+                    )
                     qty = _compute_quantity(
                         symbol, entry, stop, asgn_cap, asgn_shares,
-                        held_qty=held,
+                        held_qty=strat_held,
                     )
                     if qty <= 0:
                         logger.info(
-                            "[scheduler] BUY %s skipped — at/over cap "
-                            "(held=%.4f, cap=%s, shares=%s, entry=%.2f).",
-                            symbol, held, asgn_cap, asgn_shares, entry,
+                            "[scheduler] BUY %s (%s:%s) skipped — at/over cap "
+                            "(strat_held=%.4f, cap=%s, shares=%s, entry=%.2f).",
+                            symbol, sig_system, sig_strategy, strat_held,
+                            asgn_cap, asgn_shares, entry,
                         )
                         continue
-                    # Regime open-position cap: only blocks BUYs that would open
-                    # a NEW symbol. A top-up to a symbol we already hold (held>0)
-                    # is exempt — it doesn't increase the count of distinct
-                    # positions. None = regime lookup failed, so no cap.
+                    # Regime open-position cap: counts DISTINCT symbols, so it uses
+                    # the broker aggregate (a symbol is one position regardless of how
+                    # many strategies hold it). Only blocks a BUY that would open a
+                    # brand-new symbol — if anything already holds it, this is a top-up.
+                    held = current_positions.get(symbol, 0.0)
                     if max_open_positions is not None and held <= 0:
                         open_count = sum(1 for q in current_positions.values() if q > 0)
                         if open_count >= max_open_positions:
@@ -788,15 +810,24 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                             )
                             continue
                 else:
-                    # SELL signal: only act on positions we actually hold.
-                    held = current_positions.get(symbol, 0.0)
-                    if held < 1.0:
+                    # SELL signal: only sell THIS strategy's lot, clamped to what the
+                    # broker actually shows. The broker reports one aggregate position
+                    # per symbol; selling all of it would dump another strategy's
+                    # shares too. min(ledger, broker) keeps each strategy's exit to its
+                    # own lot, and never oversells if the ledger drifted high.
+                    broker_held = current_positions.get(symbol, 0.0)
+                    strat_held = strategy_ledger.get_held(
+                        symbol, sig_system, sig_strategy, asgn_broker
+                    )
+                    qty = min(strat_held, broker_held)
+                    if qty < 1.0:
                         logger.info(
-                            "[scheduler] SELL %s skipped — held=%.4f (need >= 1.0)",
-                            symbol, held,
+                            "[scheduler] SELL %s (%s:%s) skipped — sellable=%.4f "
+                            "(strat_ledger=%.4f, broker_held=%.4f, need >= 1.0)",
+                            symbol, sig_system, sig_strategy, qty,
+                            strat_held, broker_held,
                         )
                         continue
-                    qty = held
 
                     # ── Assigned strategy SELL → tight trailing stop ─────────
                     # Only the ASSIGNED strategy for this symbol can trigger

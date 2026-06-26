@@ -252,9 +252,22 @@ def upsert_assignment(symbol: str, system: str, strategy_name: str, enabled: boo
                                        "tight_trail_pct": tight_trail_pct})
 
 
-def set_assignment_broker(symbol: str, broker: str):
+def _ident(system: str | None, strategy_name: str | None) -> dict:
+    """Identity query params that disambiguate WHICH assignment to act on when a
+    symbol has several. Omitted values fall through to the API's single-match
+    behaviour, so old single-assignment callers keep working."""
+    p: dict = {}
+    if system:
+        p["system"] = system
+    if strategy_name:
+        p["strategy_name"] = strategy_name
+    return p
+
+
+def set_assignment_broker(symbol: str, broker: str,
+                          system: str | None = None, strategy_name: str | None = None):
     r = requests.patch(f"{BASE}/assignments/{symbol}/broker",
-                       params={"broker": broker},
+                       params={"broker": broker, **_ident(system, strategy_name)},
                        timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
@@ -274,38 +287,51 @@ def bulk_set_assignment_broker(symbols: list[str] | None = None, broker: str = "
         "auto_by_market": auto_by_market,
     })
 
-def toggle_assignment(symbol: str, enabled: bool):
-    r = requests.patch(f"{BASE}/assignments/{symbol}/toggle", params={"enabled": str(enabled).lower()}, timeout=10, verify=False, headers=_headers())
+def toggle_assignment(symbol: str, enabled: bool,
+                      system: str | None = None, strategy_name: str | None = None):
+    r = requests.patch(f"{BASE}/assignments/{symbol}/toggle",
+                       params={"enabled": str(enabled).lower(), **_ident(system, strategy_name)},
+                       timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
 
-def set_assignment_cap(symbol: str, max_capital_usd: float | None):
+def set_assignment_cap(symbol: str, max_capital_usd: float | None,
+                       system: str | None = None, strategy_name: str | None = None):
     # When clearing the cap, send no value at all (FastAPI's Optional[float]
     # parameter accepts a missing query param as None, but rejects "").
     params = {"max_capital_usd": max_capital_usd} if max_capital_usd else {}
+    params.update(_ident(system, strategy_name))
     r = requests.patch(f"{BASE}/assignments/{symbol}/cap",
                        params=params,
                        timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
 
-def set_assignment_trail(symbol: str, tight_trail_pct: float | None):
+def set_assignment_trail(symbol: str, tight_trail_pct: float | None,
+                         system: str | None = None, strategy_name: str | None = None):
+    params = {"tight_trail_pct": tight_trail_pct} if tight_trail_pct else {}
+    params.update(_ident(system, strategy_name))
     r = requests.patch(f"{BASE}/assignments/{symbol}/trail",
-                       params={"tight_trail_pct": tight_trail_pct} if tight_trail_pct else {},
+                       params=params,
                        timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
 
-def set_assignment_shares(symbol: str, max_shares: float | None):
+def set_assignment_shares(symbol: str, max_shares: float | None,
+                          system: str | None = None, strategy_name: str | None = None):
     params = {"max_shares": max_shares} if max_shares else {}
+    params.update(_ident(system, strategy_name))
     r = requests.patch(f"{BASE}/assignments/{symbol}/shares",
                        params=params,
                        timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
 
-def delete_assignment(symbol: str):
-    r = requests.delete(f"{BASE}/assignments/{symbol}", timeout=10, verify=False, headers=_headers())
+def delete_assignment(symbol: str,
+                      system: str | None = None, strategy_name: str | None = None):
+    r = requests.delete(f"{BASE}/assignments/{symbol}",
+                        params=_ident(system, strategy_name),
+                        timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
 
