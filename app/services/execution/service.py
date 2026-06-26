@@ -567,6 +567,28 @@ class ExecutionService:
                 "[exec] tighten_trail %s: quote fetch failed (%s)", symbol, exc,
             )
 
+        # Fallback price source so a flaky/empty broker quote doesn't BLIND the
+        # trail-hit backstop. Previously a single failed get_quotes returned
+        # current_price=0 and the whole evaluation bailed (return False) — so a
+        # reversal during a quote outage went uncaught until the next clean tick.
+        # Pull last/OHLCV from the market-data provider as a second source.
+        if current_price <= 0:
+            try:
+                from app.services.market_data.provider import get_ohlcv
+                df = get_ohlcv(symbol, period="5d")
+                if df is not None and not df.empty:
+                    current_price = float(df["Close"].iloc[-1])
+                    logger.info(
+                        "[exec] tighten_trail %s: broker quote empty — using "
+                        "market-data fallback price $%.2f for trail evaluation.",
+                        symbol, current_price,
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "[exec] tighten_trail %s: fallback price fetch failed: %s",
+                    symbol, exc,
+                )
+
         if signal_price <= 0 and current_price > 0:
             signal_price = current_price
 

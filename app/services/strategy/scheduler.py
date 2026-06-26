@@ -477,8 +477,8 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
     try:
         settings = get_settings()
 
-        if not force and not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
-            logger.debug("[scheduler] Outside market hours — skipping cycle")
+        if not force and not _any_market_open():
+            logger.debug("[scheduler] Outside market hours (US + India) — skipping cycle")
             return
 
         if not force and not dry_run and _risk.is_kill_switch_active():
@@ -1060,8 +1060,7 @@ def _run_fast_trail_job() -> None:
     qualifying assigned SELL signal — idempotent and a no-op when nothing is
     armed, so it's safe to run frequently. Skips outside market hours.
     """
-    settings = get_settings()
-    if not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
+    if not _any_market_open():
         return
     try:
         reconcile_trails_now()
@@ -1128,7 +1127,7 @@ def _run_gtc_fill_sync_job() -> None:
     so India fills and orphan closes left positions looking "open" forever.
     """
     settings = get_settings()
-    if not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
+    if not _any_market_open():
         return
     try:
         from app.services.reconciliation.order_sync import sync_broker_orders_once
@@ -1160,6 +1159,30 @@ def _has_india_assignments() -> bool:
     return False
 
 
+def _any_market_open() -> bool:
+    """True if a session we trade is currently open — US always, PLUS the NSE
+    (India) session whenever any enabled assignment routes to Zerodha.
+
+    The trail/protection jobs guarded only on the US session
+    (trading_start_time/tz), so an India (Zerodha) position's tight trail was
+    never re-evaluated during the NSE session (it runs overnight in ET) — it
+    only got the 15-min main cycle, never the 60-sec fast ratchet. Gate those
+    jobs on this instead so India trails ratchet and exit at the same cadence
+    as US ones whenever the NSE is open.
+    """
+    settings = get_settings()
+    if is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
+        return True
+    try:
+        if _has_india_assignments() and is_market_hours(
+            settings.india_market_open, settings.india_market_close, settings.india_tz
+        ):
+            return True
+    except Exception as exc:
+        logger.debug("[scheduler] _any_market_open India check failed: %s", exc)
+    return False
+
+
 def _run_chandelier_trail_job() -> None:
     """Upgrade legacy static SELL STOPs to the chandelier ATR level.
 
@@ -1175,7 +1198,7 @@ def _run_chandelier_trail_job() -> None:
     STOP if the new level is >= 0.5% higher.
     """
     settings = get_settings()
-    if not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
+    if not _any_market_open():
         return
     if not settings.auto_protective_stop_enabled:
         return
@@ -1317,8 +1340,7 @@ def _run_position_sync_job() -> None:
     Skips outside US market hours so it doesn't poll the broker overnight.
     Read-only against the broker; append-only to position_snapshots.
     """
-    settings = get_settings()
-    if not is_market_hours(settings.trading_start_time, settings.trading_end_time, settings.tz):
+    if not _any_market_open():
         return
     try:
         from app.services.reconciliation.position_sync import sync_positions_once
