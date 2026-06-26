@@ -252,6 +252,43 @@ divider()
 # ── Scan configuration ────────────────────────────────────────────────────────
 section("Run a Scan")
 
+# Scan lens. Consensus = legacy symbol-first (rank by 0–100 consensus score).
+# By signal = strategy-first: list every symbol where one or more chosen
+# strategies fired the selected direction (ANY match).
+scan_mode_label = st.radio(
+    "Scan mode",
+    ["Consensus", "By signal"],
+    horizontal=True,
+    help=(
+        "Consensus ranks symbols by how many strategies agree. "
+        "By signal flips it: pick the strategy(s) you trust + a direction, and "
+        "the scan lists every symbol where any of them fired that side."
+    ),
+)
+_signal_mode = scan_mode_label == "By signal"
+
+# Strategy multiselect — only shown in signal mode. Built from the engine via
+# GET /scanner/strategies so it can't drift from the live strategy set.
+selected_strategy_ids: list[str] = []
+if _signal_mode:
+    try:
+        _strat_opts = api.scanner_strategies()
+    except Exception as exc:
+        _strat_opts = {"generic": [], "perplexity": []}
+        st.warning(f"Could not load strategy list: {exc}")
+    # id -> label map for the picker; group perplexity under a clear prefix.
+    _id_to_label: dict[str, str] = {}
+    for g in _strat_opts.get("generic", []):
+        _id_to_label[g["id"]] = g["label"]
+    for p in _strat_opts.get("perplexity", []):
+        _id_to_label[p["id"]] = f"Perplexity · {p['label']}"
+    selected_strategy_ids = st.multiselect(
+        "Strategies (signal)",
+        options=list(_id_to_label.keys()),
+        format_func=lambda i: _id_to_label.get(i, i),
+        help="A symbol matches if ANY selected strategy fired the chosen direction.",
+    )
+
 row1_cols = filter_cols(2, 1, 1, 1, 1)
 universe = row1_cols[0].selectbox(
     "Universe",
@@ -292,9 +329,16 @@ max_float_m = row2_cols[1].number_input(
     help="Shares float in millions. 0 = no maximum. Use a low cap (e.g. 50) for low-float momentum names.",
     disabled=_is_india,
 )
+# Signal mode needs a concrete side (BUY/SELL) — "scan for X firing" is
+# inherently directional. Consensus mode keeps the ANY option.
+_dir_options = ["BUY", "SELL"] if _signal_mode else ["ANY", "BUY", "SELL"]
 scan_direction = row2_cols[2].radio(
-    "Direction", ["ANY", "BUY", "SELL"], horizontal=True,
-    help="ANY returns both sides. BUY or SELL fills Top N from that side only.",
+    "Direction", _dir_options, horizontal=True,
+    help=(
+        "Pick the side the selected strategies must fire."
+        if _signal_mode else
+        "ANY returns both sides. BUY or SELL fills Top N from that side only."
+    ),
 )
 if (min_float_m or max_float_m) and not _is_india:
     st.caption(
@@ -319,6 +363,11 @@ st.caption(
 run_col, _ = st.columns([2, 8])
 run_btn = run_col.button("🔭 Run Scan Now", type="primary", use_container_width=True)
 
+if run_btn and _signal_mode and not selected_strategy_ids:
+    # Guard: signal mode is meaningless without at least one strategy picked.
+    st.error("Pick at least one strategy to run a signal scan.")
+    run_btn = False
+
 if run_btn:
     custom_symbols = []
     if universe == "custom" and custom_input:
@@ -334,6 +383,8 @@ if run_btn:
         "max_float": float(max_float_m) * 1_000_000 if not _is_india else 0.0,
         "top_n": int(top_n),
         "scan_direction": scan_direction,
+        "scan_mode": "signal" if _signal_mode else "consensus",
+        "signal_strategies": selected_strategy_ids if _signal_mode else [],
         "auto_trade_top": auto_trade,
         "auto_trade_direction": auto_trade_direction,
         "batch_size": 20,

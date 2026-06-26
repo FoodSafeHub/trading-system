@@ -122,6 +122,10 @@ def scanner_results(limit: int = 50):
 def scanner_latest():
     return _get("/scanner/latest")
 
+def scanner_strategies():
+    """Selectable strategies for a signal-mode scan: {generic:[...], perplexity:[...]}."""
+    return _get("/scanner/strategies")
+
 def upstox_resolve(symbol: str):
     """Validate a free-typed NSE ticker. Returns {symbol, tradeable, instrument_key}."""
     return _get(f"/upstox/resolve/{symbol}")

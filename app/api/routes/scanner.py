@@ -108,3 +108,32 @@ async def get_scan_status():
 async def get_default_config():
     """Return the default scan configuration."""
     return ScanConfig()
+
+
+@router.get("/strategies")
+async def list_scan_strategies():
+    """Selectable strategies for a signal-mode scan.
+
+    Returns the picker identifiers + friendly labels. `generic` are the 5
+    regime-aware strategy TYPES the live scanner runs on every symbol; `perplexity`
+    are the perplexity strategies (identified by the prefixed label the scan stores
+    in its votes). The dashboard builds the strategy multiselect from this so the
+    list can never drift from the engine.
+    """
+    from app.services.scanner.scanner_service import _make_generic_configs
+    from app.services.strategy.perplexity.runner import PERPLEXITY_STRATEGIES
+
+    def _friendly(text: str) -> str:
+        return text.replace("_", " ")
+
+    generic = [
+        {"id": cfg.type, "label": _friendly(
+            cfg.name[len("AAPL_"):] if cfg.name.startswith("AAPL_") else cfg.name
+        )}
+        for cfg in _make_generic_configs("AAPL")
+    ]
+    perplexity = [
+        {"id": f"perplexity:{s.name}", "label": _friendly(s.name)}
+        for s in PERPLEXITY_STRATEGIES
+    ]
+    return {"generic": generic, "perplexity": perplexity}

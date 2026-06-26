@@ -34,6 +34,16 @@ class ScanConfig(BaseModel):
     # direction — useful when you want, say, 20 BUY candidates and don't want
     # SELL signals crowding them out.
     scan_direction: Literal["ANY", "BUY", "SELL"] = "ANY"
+    # Scan lens. "consensus" is the legacy symbol-first scan (rank all matches by
+    # the 0–100 consensus score). "signal" flips it strategy-first: return every
+    # symbol where one or more of `signal_strategies` fired in `scan_direction`
+    # (ANY match — at least one selected strategy). Same universe/filters/score.
+    scan_mode: Literal["consensus", "signal"] = "consensus"
+    # Strategy identifiers selected in signal mode. Generic regime-aware strategies
+    # are identified by TYPE (e.g. "rsi2_mean_reversion"); perplexity strategies by
+    # the prefixed label "perplexity:NAME" (matches how votes store them). Empty in
+    # consensus mode.
+    signal_strategies: List[str] = Field(default_factory=list)
     auto_trade_top: bool = False
     # When auto-trading, only act on signals in this direction.
     # ANY keeps the old behavior (top candidate fires regardless of side).

@@ -70,6 +70,43 @@ def _score_candidate(
     return min(round(score, 1), 100.0)
 
 
+# ── Signal-scan strategy identity ────────────────────────────────────────────
+# Maps a generic strategy TYPE (the stable identifier the picker uses) to the
+# label suffix the scanner stores in votes via cfg.name = f"{symbol}_{Label}".
+# Built once from the factory so it can't drift from _make_generic_configs.
+def _generic_type_to_label() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for cfg in _make_generic_configs("AAPL"):
+        # cfg.name == "AAPL_<Label>"; strip the "AAPL_" prefix to recover <Label>.
+        label = cfg.name[len("AAPL_"):] if cfg.name.startswith("AAPL_") else cfg.name
+        out[cfg.type] = label
+    return out
+
+
+def _strategy_matches(stored_name: str, selected: set[str]) -> bool:
+    """True if a vote's stored strategy name matches any selected identifier.
+
+    `stored_name` is what the scan recorded in votes:
+      * generic  -> "{symbol}_{Label}" (e.g. "AAPL_RSI2_Mean_Reversion")
+      * perplexity -> "perplexity:{Name}" (e.g. "perplexity:RSI_Swing_Reversal")
+    `selected` holds the picker identifiers:
+      * generic  -> the TYPE (e.g. "rsi2_mean_reversion")
+      * perplexity -> "perplexity:{Name}"
+    """
+    if not stored_name:
+        return False
+    # Perplexity: exact label match.
+    if stored_name.startswith("perplexity:"):
+        return stored_name in selected
+    # Generic: stored name is "{symbol}_{label}", so match the exact "_{label}"
+    # suffix (not a bare endswith, which could misfire if one label were a suffix
+    # of another future label).
+    for stype, label in _generic_type_to_label().items():
+        if stype in selected and stored_name.endswith("_" + label):
+            return True
+    return False
+
+
 def run_scan(config: ScanConfig) -> ScanSummary:
     """
     Execute a full scan and return a ScanSummary with top candidates.
@@ -213,8 +250,19 @@ def run_scan(config: ScanConfig) -> ScanSummary:
     # ── Step 5: Score and rank ───────────────────────────────────────────────
     candidates: list[dict] = []
 
+    # Signal mode: keep only the agreeing strategies the user selected (ANY match).
+    signal_mode = (config.scan_mode == "signal")
+    selected_strats = set(config.signal_strategies or [])
+
     for symbol, data in votes.items():
         for direction, strategy_list in data["directions"].items():
+            if signal_mode:
+                # Strategy-first lens: narrow the agreeing list to the user's
+                # picks. The symbol qualifies (ANY) iff at least one selected
+                # strategy fired this direction; score/reason reflect only those.
+                strategy_list = [
+                    s for s in strategy_list if _strategy_matches(s, selected_strats)
+                ]
             if len(strategy_list) < 1:
                 continue
             perp_count = data["perplexity_counts"].get(direction, 0)
@@ -225,9 +273,14 @@ def run_scan(config: ScanConfig) -> ScanSummary:
                 price=data["price"],
                 df=data["df"],
             )
-            reason = f"{len(strategy_list)} strategies agree: {', '.join(strategy_list[:3])}"
-            if len(strategy_list) > 3:
-                reason += f" +{len(strategy_list)-3} more"
+            if signal_mode:
+                reason = f"{', '.join(strategy_list[:3])} fired {direction}"
+                if len(strategy_list) > 3:
+                    reason += f" +{len(strategy_list)-3} more"
+            else:
+                reason = f"{len(strategy_list)} strategies agree: {', '.join(strategy_list[:3])}"
+                if len(strategy_list) > 3:
+                    reason += f" +{len(strategy_list)-3} more"
 
             candidates.append({
                 "symbol": symbol,
