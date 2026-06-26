@@ -43,11 +43,18 @@ def _attribute_fill_to_ledger(db, order: Order) -> None:
     """Update the per-strategy share ledger for a freshly-filled order.
 
     Attribution chain: Order.signal_id -> Signal.strategy_name, then match the
-    enabled assignment with that (symbol, strategy_name) to recover its `system`
-    and broker route. Orders with no signal link (orphan native-trail/manual
-    closes) or no matching assignment are skipped — the ledger only tracks lots
-    our strategies opened, and the scheduler's min(ledger, broker_held) SELL clamp
-    keeps us from overselling when an untracked lot exists.
+    enabled assignment to recover its broker route. Orders with no signal link
+    (orphan native-trail/manual closes) or no matching assignment are skipped —
+    the ledger only tracks lots our strategies opened, and the scheduler's
+    min(ledger, broker_held) SELL clamp keeps us from overselling when an
+    untracked lot exists.
+
+    IMPORTANT: the Signal row stores the scheduler's *label*, which for scanner
+    and perplexity systems is prefixed ("scanner:NAME", "perplexity:NAME"). The
+    assignment row — and the scheduler's ledger reads (strategy_ledger.get_held)
+    — use the BARE system + strategy name. We must split the label back into
+    (system, bare_name) and key the ledger by those, or the keys won't line up
+    and every BUY would see held=0 and re-buy the full cap each cycle.
     """
     try:
         from app.models.assignments import SymbolStrategyAssignment
@@ -61,11 +68,23 @@ def _attribute_fill_to_ledger(db, order: Order) -> None:
         if sig is None or not sig.strategy_name:
             return
         symbol = (order.symbol or "").upper()
-        asgn = (
-            db.query(SymbolStrategyAssignment)
-            .filter_by(symbol=symbol, strategy_name=sig.strategy_name)
-            .first()
+
+        # Split a possible "system:NAME" label into bare (system, name). Bollinger
+        # labels carry no prefix, so default the system to "bollinger".
+        label = sig.strategy_name
+        if ":" in label:
+            prefix, bare_name = label.split(":", 1)
+            sys_name = prefix
+        else:
+            bare_name, sys_name = label, None
+
+        # Resolve the exact assignment. Prefer an exact (symbol, system, name)
+        # match; fall back to (symbol, name) so a missing/odd prefix still maps
+        # when the symbol+name pair is unambiguous.
+        q = db.query(SymbolStrategyAssignment).filter_by(
+            symbol=symbol, strategy_name=bare_name
         )
+        asgn = (q.filter_by(system=sys_name).first() if sys_name else None) or q.first()
         if asgn is None:
             return  # consensus / non-assigned fill — not ledger-tracked.
         broker = asgn.broker or "default"
@@ -74,7 +93,7 @@ def _attribute_fill_to_ledger(db, order: Order) -> None:
         strategy_ledger.apply_fill(
             symbol=symbol,
             system=asgn.system,
-            strategy_name=sig.strategy_name,
+            strategy_name=asgn.strategy_name,
             side=order.side,
             qty=float(order.quantity or 0.0),
             price=order.fill_price,

@@ -776,13 +776,21 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                     except Exception:
                         pass
                 if direction == "BUY":
-                    # Sizing is cap-aware AND held-aware, but "held" here is THIS
-                    # strategy's own ledger lot — not the broker aggregate — so each
-                    # assignment sizes against its own max_capital_usd / max_shares
-                    # even when another strategy also holds the same symbol.
+                    # Held-qty for the cap. Start from THIS strategy's ledger lot so
+                    # several strategies on one symbol each size against their own
+                    # cap. BUT when the symbol has only ONE assignment, the broker
+                    # aggregate IS that strategy's lot — so take max(ledger, broker)
+                    # to self-heal if the ledger lagged or an older fill was never
+                    # attributed (otherwise a held=0 read re-buys the full cap every
+                    # cycle and pyramids past max_capital_usd / max_shares).
                     strat_held = strategy_ledger.get_held(
                         symbol, sig_system, sig_strategy, asgn_broker
                     )
+                    n_asgn_for_symbol = sum(
+                        1 for a in assignments if a["symbol"] == symbol
+                    )
+                    if n_asgn_for_symbol <= 1:
+                        strat_held = max(strat_held, current_positions.get(symbol, 0.0))
                     qty = _compute_quantity(
                         symbol, entry, stop, asgn_cap, asgn_shares,
                         held_qty=strat_held,

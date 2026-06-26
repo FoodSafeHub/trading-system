@@ -91,6 +91,31 @@ def test_attribute_fill_maps_order_to_assignment(db):
     assert _held(db, "MSFT", "scanner", "Y") == 50
 
 
+def test_attribute_fill_strips_system_prefix_from_label(db):
+    # Regression: scanner/perplexity signals store a PREFIXED label
+    # ("scanner:NAME"), but the assignment + the scheduler's ledger reads use the
+    # BARE name. If attribution doesn't strip the prefix, the ledger stays 0 and
+    # every BUY re-buys the full cap (the NVDA over-buy bug).
+    db.add(SymbolStrategyAssignment(
+        symbol="NVDA", system="scanner", strategy_name="Squeeze", enabled=True,
+        broker="default", assigned_at=datetime.now(tz=timezone.utc),
+    ))
+    sig = Signal(strategy_name="scanner:Squeeze", symbol="NVDA", direction="BUY",
+                 created_at=datetime.now(tz=timezone.utc))
+    db.add(sig)
+    db.commit()
+    order = Order(broker="paper", symbol="NVDA", side="BUY", order_type="MARKET",
+                  quantity=3, status="filled", fill_price=100.0, signal_id=sig.id)
+    db.add(order)
+    db.commit()
+
+    from app.services.reconciliation.order_sync import _attribute_fill_to_ledger
+    _attribute_fill_to_ledger(db, order)
+    db.commit()
+    # Ledger must be keyed by the BARE (system, name) the scheduler reads with.
+    assert _held(db, "NVDA", "scanner", "Squeeze") == 3
+
+
 def test_attribute_fill_ignores_unmapped_order(db):
     # No signal link -> orphan/manual fill -> ledger untouched.
     order = Order(broker="paper", symbol="TSLA", side="SELL", order_type="MARKET",
