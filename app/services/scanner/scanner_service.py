@@ -223,7 +223,10 @@ def run_scan(config: ScanConfig) -> ScanSummary:
 
             # ── Step 4b: Run Perplexity strategies ───────────────────────────
             try:
-                if len(df) >= 220:
+                # Each strategy enforces its own min_data_bars (some need 270);
+                # use a low floor here so the per-strategy guard decides, rather
+                # than silently excluding the longer-history strategies.
+                if len(df) >= 60:
                     perp_sigs = run_perplexity_signal(symbol, df)
                     for sig in perp_sigs:
                         if sig.direction != "HOLD":

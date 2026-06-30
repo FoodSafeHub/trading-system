@@ -35,6 +35,16 @@ KEEP = {
 RESEARCH_ONLY = {
     # Still too sparse even at 5y (5 trades).
     "RSI_Swing_Reversal",
+    # India swing revamp (2026-06-29): new India-tuned strategies, research-only
+    # pending the Nifty-100+midcap backtest verdict. See project_india_swing_revamp.
+    "India_Leader_Pullback",
+    "India_52wk_Breakout",
+    "India_VCP_Breakout",
+    "India_Momentum_Breakout",
+    "India_Trend_Pullback",
+    "India_Trend_Following",
+    "India_SR_Bounce",
+    "India_Wyckoff_Spring",
 }
 RETIRE = {
     "Supertrend_Swing",

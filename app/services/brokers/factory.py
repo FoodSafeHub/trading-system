@@ -9,20 +9,46 @@ from app.services.brokers.base import BrokerBase
 logger = logging.getLogger(__name__)
 
 
+# Cache of built broker adapters, keyed by broker name. Brokers hold their auth
+# state (access token + expiry) in memory; previously get_broker() built a fresh
+# instance per request, so that in-memory token was always empty and EVERY call
+# re-loaded tokens from the DB (and re-ran the refresh check). Reusing one
+# instance per broker lets the cached token survive across requests — the DB
+# load happens once, and refresh only fires near real expiry. Account/position
+# args are passed per-call, so the adapters carry no request-specific state that
+# makes reuse unsafe.
+_BROKER_CACHE: dict[str, BrokerBase] = {}
+
+
 def _build_one(name: str) -> BrokerBase:
+    cached = _BROKER_CACHE.get(name)
+    if cached is not None:
+        return cached
+
     if name == "paper":
         from app.services.brokers.paper import PaperBroker
-        return PaperBroker()
-    if name == "schwab":
+        broker: BrokerBase = PaperBroker()
+    elif name == "schwab":
         from app.services.brokers.schwab import SchwabBroker
-        return SchwabBroker()
-    if name == "webull":
+        broker = SchwabBroker()
+    elif name == "webull":
         from app.services.brokers.webull import WebullBroker
-        return WebullBroker()
-    if name == "zerodha":
+        broker = WebullBroker()
+    elif name == "zerodha":
         from app.services.brokers.zerodha import ZerodhaBroker
-        return ZerodhaBroker()
-    raise ValueError(f"Unknown broker: {name!r}. Choose: paper | schwab | webull | zerodha")
+        broker = ZerodhaBroker()
+    else:
+        raise ValueError(f"Unknown broker: {name!r}. Choose: paper | schwab | webull | zerodha")
+
+    _BROKER_CACHE[name] = broker
+    return broker
+
+
+def reset_broker_cache() -> None:
+    """Drop cached broker adapters — forces a rebuild (and DB token reload) on the
+    next get_broker(). Call after re-running an OAuth flow so the new tokens are
+    picked up instead of a stale cached instance."""
+    _BROKER_CACHE.clear()
 
 
 def _resolve_routing(routing: str, active_broker: str) -> List[str]:

@@ -163,7 +163,11 @@ def run_perplexity_backtest(
     position_pct: float = 0.0,             # >0 = fixed % of capital per trade (overrides risk sizing)
     df_full: Optional[pd.DataFrame] = None,   # inject pre-fetched OHLCV to skip the download
     spy_close: Optional[pd.Series] = None,    # inject pre-fetched SPY Close for regime detection
+    mom_index_close: Optional[pd.Series] = None,  # inject pre-fetched momentum index close (skip per-run download)
+    mom_vix_close: Optional[pd.Series] = None,    # inject pre-fetched momentum VIX close (skip per-run download)
     cost_model: Optional[CostModel] = None,   # opt-in slippage/commission; None == identity (no behaviour change)
+    approach_c: bool = False,                 # opt-in: SELL signal arms a tight trail instead of exiting
+    tight_trail_pct: float = 2.0,             # trail % from the post-signal high-water mark when approach_c=True
 ) -> PerplexityBacktestResult:
     # Callers that compare many strategies on one symbol can fetch the bars once
     # and pass them in (df_full/spy_close), avoiding a redundant Yahoo download per
@@ -210,22 +214,29 @@ def run_perplexity_backtest(
     _mom_breadth: Optional[dict[str, pd.Series]] = None
     try:
         from app.services.market_regime_advanced import (
-            _MARKET_CFG, get_momentum_regime_at,
+            _MARKET_CFG, get_momentum_regime_at, get_momentum_regime_series,
         )
         _mom_market = "india" if _is_india else "us"
         _mom_cfg = _MARKET_CFG[_mom_market]
-        # Reuse already-fetched SPY series for the US case.
-        if _mom_market == "us":
+        # Prefer caller-injected series (backtest-all fetches them ONCE and shares
+        # across all strategies) to avoid a redundant index/VIX download per run.
+        if mom_index_close is not None:
+            _mom_index_close = mom_index_close
+        elif _mom_market == "us":
+            # Reuse already-fetched SPY series for the US case.
             _mom_index_close = spy_raw
         else:
             try:
                 _mom_index_close = get_ohlcv(_mom_cfg["index"], period="10y")["Close"]
             except Exception:
                 _mom_index_close = None
-        try:
-            _mom_vix_close = get_ohlcv(_mom_cfg["vix"], period="10y")["Close"]
-        except Exception:
-            _mom_vix_close = None
+        if mom_vix_close is not None:
+            _mom_vix_close = mom_vix_close
+        else:
+            try:
+                _mom_vix_close = get_ohlcv(_mom_cfg["vix"], period="10y")["Close"]
+            except Exception:
+                _mom_vix_close = None
         # Breadth is heavy: 10 daily fetches per backtest. Skip it on the
         # backtest hot-path -- the classifier degrades gracefully when
         # breadth is None (same code path as live when ^SPXA50R is down).
@@ -262,12 +273,77 @@ def run_perplexity_backtest(
     entry_target: Optional[float] = None
     open_risk_usd: float = 0.0
     bars_held: int = 0                         # bars since current position opened
+    # ── Approach C state (only used when approach_c=True) ─────────────────────
+    # When a strategy fires a SELL while long, instead of exiting we arm a tight
+    # trailing stop from the signal bar's close and ride the remaining move; the
+    # position exits only when price falls tight_trail_pct from its post-signal
+    # high-water mark. Mirrors the live scheduler's tighten_trail_on_sell.
+    _c_in_trail = False
+    _c_trail_high = 0.0
+    _c_trail_stop = 0.0
+    _c_signal_price = 0.0
     trades: List[dict] = []
     equity_curve: List[dict] = []
     peak_equity = initial_capital
     max_drawdown = 0.0
     daily_returns: List[float] = []
     prev_equity = initial_capital
+
+    # ── Loop-invariant precompute (was recomputed every bar → O(n²)) ──
+    # 1) Regime per SPY date: detect_regime_series computes the rolling SMAs
+    #    ONCE and labels every date, instead of re-running detect_market_regime
+    #    over a growing slice on each bar. Identical labels to _regime_from_spy
+    #    except the <200-bar warm-up window, where we keep the legacy BULL
+    #    fallback rather than the series' BEAR default.
+    try:
+        from app.services.market_regime import detect_regime_series
+        _regime_series = detect_regime_series(pd.DataFrame({"Close": spy_raw}))
+    except Exception:
+        _regime_series = None
+
+    def _regime_at(as_of_date: pd.Timestamp) -> MarketRegime:
+        if _regime_series is None:
+            return _regime_from_spy(spy_raw, as_of_date)
+        hist = spy_raw.loc[spy_raw.index <= as_of_date]
+        if len(hist) < 200:
+            return MarketRegime.BULL   # legacy warm-up fallback
+        try:
+            sub = _regime_series.loc[_regime_series.index <= as_of_date]
+            if not len(sub):
+                return MarketRegime.BULL
+            # MarketRegime is a str-enum, so pandas stores the bare string;
+            # coerce back to the enum the callers expect (regime.value etc).
+            return MarketRegime(sub.iloc[-1])
+        except Exception:
+            return _regime_from_spy(spy_raw, as_of_date)
+
+    # 2) Suitability config: a disk read + JSON parse — same result every bar.
+    try:
+        _suitability_config = load_suitability_config()
+    except Exception:
+        _suitability_config = None
+
+    # 3) Momentum snapshots per date: was an O(n) rolling-SMA recompute per bar
+    #    (O(n²) per run). Precompute the whole {date: snapshot} map in one pass.
+    _mom_snap_series = None
+    if get_momentum_regime_series is not None and _mom_index_close is not None:
+        try:
+            _snaps = get_momentum_regime_series(
+                index_close=_mom_index_close,
+                vix_close=_mom_vix_close,
+                market="india" if _is_india else "us",
+            )
+            # Series indexed by date → as-of lookup matches the per-date slice
+            # (index_close <= as_of_date).iloc[-1] the old path used.
+            _mom_snap_series = pd.Series(_snaps).sort_index()
+        except Exception:
+            _mom_snap_series = None
+
+    def _mom_at(as_of_date):
+        if _mom_snap_series is None or len(_mom_snap_series) == 0:
+            return None
+        sub = _mom_snap_series.loc[_mom_snap_series.index <= as_of_date]
+        return sub.iloc[-1] if len(sub) else None
 
     for i in range(lookback, len(df_full)):
         df_slice = df_full.iloc[:i]
@@ -412,14 +488,45 @@ def run_perplexity_backtest(
             trades.append(_trade("COVER (time)", today, cover_px, shares, cover_value, pnl))
             position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None; open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
 
+        # ── Approach C: tight trail active (long only) — check before strategy eval ──
+        # Ratchet the trail up with this bar's high; exit when the low breaches
+        # the stop. While the trail is live we DON'T re-run the strategy (the
+        # SELL already fired; we're just managing the exit).
+        if approach_c and _c_in_trail and position > 0:
+            bar_high = float(df_full["High"].iloc[i])
+            bar_low = float(df_full["Low"].iloc[i])
+            if bar_high > _c_trail_high:
+                _c_trail_high = bar_high
+                _c_trail_stop = round(_c_trail_high * (1 - tight_trail_pct / 100), 2)
+            if bar_low <= _c_trail_stop:
+                sell_px = _c_trail_stop if cost_model is None else cost_model.apply_sell(_c_trail_stop)
+                proceeds = sell_px * position
+                commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
+                pnl = proceeds - commission - position_cost
+                capital += proceeds - commission
+                trades.append(_trade(
+                    f"SELL (tight_trail {tight_trail_pct:.1f}%)", today, sell_px, position, proceeds, pnl
+                ))
+                position = 0.0; position_cost = 0.0; entry_stop = None; entry_target = None
+                open_risk_usd = 0.0; entry_price_rec = None; initial_risk = None; bars_held = 0
+                _c_in_trail = False; _c_trail_high = 0.0; _c_trail_stop = 0.0; _c_signal_price = 0.0
+            # In trail (hit or not): mark-to-market and skip strategy eval this bar.
+            equity = capital + position * current_close
+            equity_curve.append({"date": today, "equity": round(equity, 2)})
+            if equity > peak_equity:
+                peak_equity = equity
+            dd = (peak_equity - equity) / peak_equity * 100 if peak_equity > 0 else 0
+            if dd > max_drawdown:
+                max_drawdown = dd
+            ret = (equity - prev_equity) / prev_equity if prev_equity > 0 else 0
+            daily_returns.append(ret)
+            prev_equity = equity
+            continue
+
         # ── Run strategy signal ──────────────────────────────────
-        regime = _regime_from_spy(spy_raw, df_full.index[i - 1])
+        regime = _regime_at(df_full.index[i - 1])
         regime_caps = get_regime_risk_caps(regime)
-        suitability_config = None
-        try:
-            suitability_config = load_suitability_config()
-        except Exception:
-            suitability_config = None
+        suitability_config = _suitability_config
 
         volatility_bucket = bucket_atr_pct(_current_atr(df_slice))
 
@@ -429,17 +536,25 @@ def run_perplexity_backtest(
         # class). NaN-safe: failures return None and the strategies fall back
         # to their existing live snapshot path (which is what we replaced).
         _mom_snapshot_today = None
-        if get_momentum_regime_at is not None and _mom_index_close is not None:
+        if _mom_snap_series is not None:
             try:
-                _mom_snapshot_today = get_momentum_regime_at(
-                    as_of_date=df_full.index[i - 1],
-                    index_close=_mom_index_close,
-                    vix_close=_mom_vix_close,
-                    breadth_close_by_symbol=_mom_breadth,
-                    market="india" if _is_india else "us",
-                )
+                _mom_snapshot_today = _mom_at(df_full.index[i - 1])
             except Exception:
                 _mom_snapshot_today = None
+
+        # Point-in-time benchmark close series (the market index: ^NSEI for
+        # India, SPY for US), sliced to the prior bar so RS-relative strategies
+        # can compute a same-horizon relative-strength rating without lookahead.
+        # Additive kwarg; strategies that don't use it ignore it.
+        _benchmark_close_today = None
+        if _mom_index_close is not None:
+            try:
+                _benchmark_close_today = _mom_index_close.loc[
+                    _mom_index_close.index <= df_full.index[i - 1]
+                ]
+            except Exception:
+                _benchmark_close_today = None
+
         if position == 0:
             try:
                 sig = strategy.run(
@@ -449,6 +564,7 @@ def run_perplexity_backtest(
                     volatility_bucket=volatility_bucket,
                     suitability_config=suitability_config,
                     momentum_snapshot=_mom_snapshot_today,
+                    benchmark_close=_benchmark_close_today,
                 )
             except Exception:
                 sig = None
@@ -587,11 +703,33 @@ def run_perplexity_backtest(
                     volatility_bucket=volatility_bucket,
                     suitability_config=suitability_config,
                     momentum_snapshot=_mom_snapshot_today,
+                    benchmark_close=_benchmark_close_today,
                 )
             except Exception:
                 sig = None
 
-            if sig and sig.direction == "SELL":
+            if sig and sig.direction == "SELL" and approach_c and not _c_in_trail:
+                # Approach C: arm a tight trail from this bar's close instead of
+                # exiting. The trail check at the top of the next bar manages the
+                # exit. Record a zero-qty marker so the trade log shows the signal.
+                _c_signal_price = current_close
+                _c_trail_high = current_close
+                _c_trail_stop = round(current_close * (1 - tight_trail_pct / 100), 2)
+                _c_in_trail = True
+                trades.append({
+                    "date": today, "side": "SELL_SIGNAL",
+                    "price": round(current_close, 2), "quantity": 0.0,
+                    "value": 0.0, "pnl": None,
+                    "stop": None, "target": None,
+                    "confidence": sig.confidence if sig else None,
+                    "reason": (sig.reason if sig else "") + f" → Approach C {tight_trail_pct:.1f}% trail armed",
+                    "risk_usd": None,
+                    "regime": regime.value,
+                    "strategy_name": strategy.name,
+                    "symbol": symbol,
+                    "commission": 0.0,
+                })
+            elif sig and sig.direction == "SELL":
                 sell_px = fill_price if cost_model is None else cost_model.apply_sell(fill_price)
                 proceeds = sell_px * position
                 commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
@@ -623,6 +761,7 @@ def run_perplexity_backtest(
                     volatility_bucket=volatility_bucket,
                     suitability_config=suitability_config,
                     momentum_snapshot=_mom_snapshot_today,
+                    benchmark_close=_benchmark_close_today,
                 )
             except Exception:
                 sig = None
@@ -687,7 +826,13 @@ def run_perplexity_backtest(
 
     # Long exits: "SELL" / "SELL (...)"; short exits: "COVER" / "COVER (...)".
     # Both are round-trip closes — count and PF-weight them together.
-    exit_trades = [t for t in trades if "SELL" in t["side"] or "COVER" in t["side"]]
+    # Exclude Approach C "SELL_SIGNAL" markers: they're zero-qty signal events
+    # (pnl=None), not round-trip closes; counting them would inflate trade count
+    # and register as phantom losses.
+    exit_trades = [
+        t for t in trades
+        if t["side"] != "SELL_SIGNAL" and ("SELL" in t["side"] or "COVER" in t["side"])
+    ]
     # Entry legs (no realized P&L on the entry record itself):
     entry_trades = [t for t in trades if t["side"] in ("BUY", "SHORT")]
     winning = [t for t in exit_trades if (t.get("pnl") or 0) > 0]

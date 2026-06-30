@@ -20,17 +20,17 @@ from app.config import get_settings
 from _theme import apply_theme, section, divider  # noqa: E402
 from _components import page_header, stat_band  # noqa: E402
 
-apply_theme("Perplexity Strategies")
+apply_theme("India Swing Strategies")
 
 from _sidebar import render_sidebar
 render_sidebar()
 
 page_header(
-    "Perplexity Swing Strategies",
+    "India Swing Strategies",
     subtitle=(
-        "12 swing & momentum strategies — EMA reversion, MA crossover, BB breakout, Fibonacci, "
-        "RSI reversal, Supertrend, plus four candle-pattern setups. "
-        "Daily bars · 3–20 day holds."
+        "India-tuned daily swing strategies — Nifty leader pullback, 52-week-high breakout, "
+        "VCP contraction breakout, plus the three-bar-push and hammer/star candle setups. "
+        "Regime-gated on ^NSEI / India VIX. Daily bars · 3–40 day holds."
     ),
 )
 
@@ -86,9 +86,39 @@ STRATEGY_DESCRIPTIONS = {
                               "shooting star (long upper tail, after a 3-bar advance, RSI > 65) for shorts — a "
                               "candlestick reversal confirmed by volume ≥ 1.1× and the momentum regime. "
                               "ATR stop below/above the tail, ATR-multiple target. Best on: liquid names at exhaustion.",
+    # ── India swing set (regime-gated on ^NSEI / India VIX; long-only) ──
+    "India_Leader_Pullback": "Trend pullback for NSE leaders: price in a rising EMA(50)>EMA(200) stack, "
+                              "pulls back to within 3% of the 20-EMA with RSI(14) 40–60 turning up. "
+                              "Stop: 2×ATR (and below the pullback low). Target: 4×ATR. R:R ≥ 1.5. Max hold: 20 bars. "
+                              "Best on: Nifty 50 leaders that trend persistently — RELIANCE, HDFCBANK, TCS.",
+    "India_52wk_Breakout":   "Donchian breakout to a new 52-week (252-bar) high above EMA(200), confirmed by "
+                              "volume ≥ 1.3× and RSI ≥ 55. Stop: 2.5×ATR. Target: 6×ATR (lets momentum run). "
+                              "R:R ≥ 2.0. Max hold: 40 bars. Best on: large/midcaps making fresh highs.",
+    "India_VCP_Breakout":    "Minervini VCP-lite: recent ATR contracts to ≤ 75% of its 50-bar baseline while price "
+                              "coils near a recent high, then breaks out above the range on volume ≥ 1.3×. "
+                              "Tight stop at the contraction low. Target: 4×ATR. R:R ≥ 1.8. Max hold: 25 bars. "
+                              "Best on: Indian midcaps that tighten before a move.",
+    # ── Five advanced spec-driven strategies (research-only until backtested) ──
+    "India_Momentum_Breakout": "RS-leader breakout: relative strength vs ^NSEI ≥ threshold, price 0–10% below its "
+                              "52-week high, breaks the prior 20-bar high on volume ≥ 1.5×, in a stage-2 uptrend "
+                              "(close > rising 150/200 SMA, 150 > 200). Stop below the breakout level (≤2×ATR). "
+                              "Target 6×ATR, R:R ≥ 2.0. Exit on 2 closes below EMA200.",
+    "India_Trend_Pullback":  "Pullback into the 20–50 EMA zone of a rising-EMA50 uptrend, with pullback volume below "
+                              "the prior impulse, confirmed by a bullish engulfing or pinbar. Stop below the pullback "
+                              "low / EMA50. Target the previous swing high (≥ 2R). 20-EMA trail.",
+    "India_Trend_Following": "Higher-high/higher-low structure after a 50/200 golden cross, RSI 50–70, strong RS "
+                              "(momentum-rank proxy for the Nifty 200 Momentum 30). Entry on a higher-low reclaim. "
+                              "Stop below the recent swing low (≤2×ATR). Exit on 2 closes below SMA50.",
+    "India_SR_Bounce":       "Rebound off a support shelf touched ≥2× within the lookback, reclaimed today on volume "
+                              "≥ 1.1× with RSI > 50. Stop below support (3–5% / 1.5×ATR). Target the nearest "
+                              "resistance swing high (≥ 2R).",
+    "India_Wyckoff_Spring":  "Wyckoff spring: a ≥20-session range, a false breakdown below range low that closes back "
+                              "inside on high volume, then a lower-volume test, then a breakout above the range high. "
+                              "Stop below the spring low / 1×ATR. Target = range high + one range width.",
 }
 
-SYMBOLS = ["SPY", "QQQ", "IWM", "AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "META", "GOOGL"]
+SYMBOLS = ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS",
+           "ITC", "LT", "SBIN", "BHARTIARTL", "KOTAKBANK"]
 
 # ── Shared indicator label map ─────────────────────────────────
 INDICATOR_LABELS = {
@@ -181,6 +211,10 @@ def _plot_equity_curve(result: dict, height: int = 380, show_markers: bool = Tru
     )
 
 
+# ── Strategy roster (used across multiple tabs; defined once, before layout) ──
+from app.services.strategy.perplexity.runner import PERPLEXITY_STRATEGIES as _ALL_STRATEGIES
+_STRATEGY_NAMES = [s.name for s in _ALL_STRATEGIES]
+
 # ── Tab layout ────────────────────────────────────────────────
 tab_signals, tab_scanner, tab_sizer, tab_backtest, tab_compare, tab_portfolio, tab_walkforward, tab_profiles, tab_analysis, tab_config = st.tabs([
     "📡 Live Signals", "🔭 Market Scanner", "📐 Position Sizer", "🔬 Backtest", "📊 Compare All",
@@ -192,12 +226,12 @@ tab_signals, tab_scanner, tab_sizer, tab_backtest, tab_compare, tab_portfolio, t
 # ══════════════════════════════════════════════════════════════
 with tab_signals:
     section("Current Signals")
-    st.caption("Runs all 12 strategies on the latest market data — no trade is placed, just analysis.")
+    st.caption("Runs all live strategies on the latest market data — no trade is placed, just analysis.")
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        sig_symbol = st.text_input("Symbol", value="AAPL", key="sig_sym",
-                                   help="Type any US stock ticker — not limited to the default list.").upper().strip()
+        sig_symbol = st.text_input("Symbol", value="RELIANCE", key="sig_sym",
+                                   help="Type any NSE ticker (e.g. RELIANCE, TCS) — not limited to the default list.").upper().strip()
     with col2:
         st.write("")
         st.write("")
@@ -284,9 +318,6 @@ with tab_signals:
 # ══════════════════════════════════════════════════════════════
 # TAB 2 — MARKET SCANNER
 # ══════════════════════════════════════════════════════════════
-from app.services.strategy.perplexity.runner import PERPLEXITY_STRATEGIES as _ALL_STRATEGIES
-_STRATEGY_NAMES = [s.name for s in _ALL_STRATEGIES]
-
 with tab_scanner:
     section("Market Scanner")
     st.caption(
@@ -296,7 +327,7 @@ with tab_scanner:
 
     st.info(
         "**How to use:** Paste tickers you want to watch — one per line or comma-separated. "
-        "The scanner runs all 12 strategies and shows only signals that pass your confidence threshold. "
+        "The scanner runs all live strategies and shows only signals that pass your confidence threshold. "
         "Signals from this scanner can be auto-executed by assigning them in the **Strategy** page.",
         icon="ℹ️",
     )
@@ -311,7 +342,7 @@ with tab_scanner:
     st.markdown("**Tickers to scan** — enter comma-separated or one per line:")
     scan_universe_input = st.text_area(
         "Tickers",
-        placeholder="AAPL\nMSFT\nNVDA\nTSLA\nSPY,QQQ,AMD",
+        placeholder="RELIANCE\nHDFCBANK\nTCS\nINFY\nICICIBANK,SBIN,LT",
         height=140,
         key="scan_universe",
         label_visibility="collapsed",
@@ -473,8 +504,8 @@ If the stop is hit you lose ~1% of your account. If the target is hit you typica
     st.markdown("**Step 1 — Enter symbol and load current price**")
     sz_col1, sz_col2 = st.columns([2, 1])
     with sz_col1:
-        sz_symbol = st.text_input("Symbol", value="AAPL", key="sz_sym",
-                                  help="Type any US stock ticker.").upper().strip()
+        sz_symbol = st.text_input("Symbol", value="RELIANCE", key="sz_sym",
+                                  help="Type any NSE ticker (e.g. RELIANCE, TCS).").upper().strip()
     with sz_col2:
         st.write("")
         st.write("")
@@ -661,8 +692,8 @@ with tab_backtest:
     with col1:
         chosen_strat = st.selectbox("Strategy", strat_names, key="px_strat")
     with col2:
-        bt_symbol = st.text_input("Symbol", value="AAPL", key="px_sym",
-                                  help="Type any US stock ticker.").upper().strip()
+        bt_symbol = st.text_input("Symbol", value="RELIANCE", key="px_sym",
+                                  help="Type any NSE ticker (e.g. RELIANCE, TCS).").upper().strip()
     with col3:
         bt_period = st.selectbox("Period", ["6mo", "1y", "2y", "5y", "10y"], index=2, key="px_period")
     with col4:
@@ -687,6 +718,31 @@ with tab_backtest:
 
     st.caption(STRATEGY_DESCRIPTIONS.get(chosen_strat, ""))
 
+    # ── Approach C: SELL signal → tight trailing stop (opt-in) ───────────────
+    with st.expander("Approach C — SELL signal → tight trailing stop", expanded=False):
+        st.caption(
+            "Simulates the live Approach C exit: when the strategy fires a SELL, instead of "
+            "exiting at market the backtest arms a tight trailing stop from the signal price and "
+            "rides the remaining move — exiting only when price falls the trail % from its "
+            "post-signal high. Enable it, pick a trail %, and re-run to compare against the default."
+        )
+        ac1, ac2 = st.columns([1, 2])
+        with ac1:
+            bt_approach_c = st.checkbox(
+                "Enable Approach C", value=False, key="px_bt_approach_c",
+                help="OFF (default): SELL exits at market. ON: SELL arms a tight trailing stop.",
+            )
+        with ac2:
+            bt_c_trail = st.slider(
+                "Tight trail % to test", 1.0, 10.0, 2.0, 0.5, key="px_bt_c_trail",
+                disabled=not bt_approach_c,
+            )
+        if bt_approach_c:
+            st.info(f"Approach C **ON** — SELL → **{bt_c_trail:.1f}% trailing stop** from signal price. "
+                    "Run, then compare against the default (Approach C off) result.")
+        else:
+            st.info("Approach C **OFF** — SELL exits at market (default).")
+
     run_bt = st.button("▶ Run Backtest", type="primary", key="px_run_bt")
 
     if run_bt:
@@ -694,8 +750,23 @@ with tab_backtest:
             try:
                 r = api.perplexity_backtest(chosen_strat, bt_symbol, period=bt_period,
                                             initial_capital=bt_capital, position_pct=bt_pos_pct,
-                                            breakdown=True)
+                                            breakdown=True,
+                                            approach_c=bt_approach_c,
+                                            tight_trail_pct=float(bt_c_trail))
                 st.session_state["px_bt_result"] = r
+                # When Approach C is ON, also run the default so the user sees
+                # the side-by-side improvement (or regression).
+                if bt_approach_c:
+                    try:
+                        r_def = api.perplexity_backtest(
+                            chosen_strat, bt_symbol, period=bt_period,
+                            initial_capital=bt_capital, position_pct=bt_pos_pct,
+                            breakdown=False, approach_c=False)
+                        st.session_state["px_bt_default"] = r_def
+                    except Exception:
+                        st.session_state.pop("px_bt_default", None)
+                else:
+                    st.session_state.pop("px_bt_default", None)
             except Exception as e:
                 st.error(f"Backtest failed: {e}")
 
@@ -725,6 +796,60 @@ with tab_backtest:
         c12.metric("Avg Hold",    f"{r.get('average_holding_days', 0):.1f} bars")
 
         _plot_equity_curve(r)
+
+        # ── Approach C vs default comparison TABLE ───────────────────────────
+        r_def = st.session_state.get("px_bt_default")
+        if r_def and not r_def.get("error"):
+            st.divider()
+            _c_trail_used = float(st.session_state.get("px_bt_c_trail", 2.0))
+            section(f"Approach C ({_c_trail_used:.1f}% trail) vs Default")
+
+            # How many SELL signals did Approach C actually intercept? If zero,
+            # the strategy exits only via stop/target — Approach C is a no-op
+            # here and the two runs are identical. Say so plainly.
+            _sig_count = sum(1 for t in r.get("trades", []) if t.get("side") == "SELL_SIGNAL")
+
+            def _pf(v):
+                return f"{v:.2f}" if v else "—"
+
+            cmp_rows = [
+                {
+                    "Mode": "Default (market exit on SELL)",
+                    "Net P&L": f"${r_def['total_pnl']:,.0f}",
+                    "Return %": f"{r_def['total_return_pct']:+.1f}%",
+                    "Win Rate": f"{r_def['win_rate_pct']:.1f}%",
+                    "Profit Factor": _pf(r_def.get("profit_factor")),
+                    "Max DD": f"{r_def['max_drawdown_pct']:.1f}%",
+                    "Trades": r_def["total_trades"],
+                },
+                {
+                    "Mode": f"Approach C @ {_c_trail_used:.1f}% trail",
+                    "Net P&L": f"${r['total_pnl']:,.0f}",
+                    "Return %": f"{r['total_return_pct']:+.1f}%",
+                    "Win Rate": f"{r['win_rate_pct']:.1f}%",
+                    "Profit Factor": _pf(r.get("profit_factor")),
+                    "Max DD": f"{r['max_drawdown_pct']:.1f}%",
+                    "Trades": r["total_trades"],
+                },
+            ]
+            st.dataframe(pd.DataFrame(cmp_rows), use_container_width=True, hide_index=True)
+
+            if _sig_count == 0:
+                st.warning(
+                    f"⚠️ **Approach C never triggered for {r['strategy_name']}.** This strategy "
+                    "exits via stop-loss / target / time, not an explicit SELL *signal*, so there "
+                    "was nothing for the tight trail to intercept — both runs are identical. "
+                    "Approach C only changes the outcome for strategies that emit SELL signals "
+                    "(e.g. EMA Mean Reversion, BB Mean Reversion, RSI Swing)."
+                )
+            else:
+                _delta = r["total_pnl"] - r_def["total_pnl"]
+                verdict = ("**helped**" if _delta > 0 else "**hurt**" if _delta < 0 else "made no difference")
+                st.caption(
+                    f"Approach C intercepted **{_sig_count} SELL signal(s)** and {verdict}: "
+                    f"net P&L moved **${_delta:+,.0f}** vs market-exit. "
+                    "Try a few trail %s to find the best for this strategy/symbol."
+                )
 
         # Trade log
         if r.get("trades"):
@@ -758,6 +883,71 @@ with tab_backtest:
             with st.expander("📊 Performance Breakdown", expanded=False):
                 _breakdown_tables(r["breakdown"])
 
+        # ── Promote this backtest to auto-trade ──────────────────────────────
+        # Mirrors the Compare All promote flow, for a single-strategy backtest.
+        # Approach C (tight trailing stop on SELL) is OFF by default — opt-in.
+        st.divider()
+        section("Promote this strategy to auto-trade")
+        st.caption(
+            f"Assign **{r['strategy_name']}** → **{r['symbol']}** so the live scheduler "
+            "trades it. Promoting only creates the assignment; it does not place an order now."
+        )
+        bp1, bp2, bp3 = st.columns([2, 2, 2])
+        with bp1:
+            bt_promote_cap = st.text_input(
+                "Max capital ($)", value="", placeholder="optional",
+                key=f"bt_promote_cap_{r['symbol']}_{r['strategy_name']}",
+                help="Leave blank to use the global account cap.",
+            )
+        with bp2:
+            bt_promote_enabled = st.checkbox(
+                "Enabled", value=True,
+                key=f"bt_promote_en_{r['symbol']}_{r['strategy_name']}",
+            )
+        with bp3:
+            # Pre-fill from the Approach C backtest run, if one was done — so a
+            # validated-C result promotes with C on at the same trail %.
+            _c_tested = bool(st.session_state.get("px_bt_approach_c", False))
+            _c_tested_pct = float(st.session_state.get("px_bt_c_trail", 2.0))
+            bt_use_c = st.checkbox(
+                "Enable Approach C (tight trail on SELL)", value=_c_tested,
+                key=f"bt_promote_usec_{r['symbol']}_{r['strategy_name']}",
+                help="OFF (default): SELL exits at market. ON: SELL arms a tight trailing stop. "
+                     "Pre-filled from your Approach C backtest run if you did one.",
+            )
+        bt_trail = st.slider(
+            "Approach C tight trail %", 1.0, 10.0, _c_tested_pct, 0.5,
+            key=f"bt_promote_trail_{r['symbol']}_{r['strategy_name']}",
+            disabled=not bt_use_c,
+        )
+        if bt_use_c:
+            st.info(f"SELL signal → **{bt_trail:.1f}% tight trailing stop** from signal price.")
+        else:
+            st.info("Approach C OFF → **SELL signal exits at market** (no trailing stop).")
+        if st.button("Promote", type="primary",
+                     key=f"bt_promote_btn_{r['symbol']}_{r['strategy_name']}"):
+            try:
+                _cap = float(bt_promote_cap.strip()) if bt_promote_cap.strip() else None
+                _note_c = (f"trail={bt_trail:.1f}%" if bt_use_c else "Approach C off")
+                api.upsert_assignment(
+                    symbol=r["symbol"],
+                    system="perplexity",
+                    strategy_name=r["strategy_name"],
+                    enabled=bt_promote_enabled,
+                    notes=f"Promoted from Backtest ({r['period']}), {_note_c}",
+                    max_capital_usd=_cap,
+                    tight_trail_pct=(bt_trail if bt_use_c else None),
+                    approach_c_enabled=bt_use_c,
+                )
+                st.success(
+                    f"Assigned **{r['strategy_name']}** → **{r['symbol']}** "
+                    f"(enabled={bt_promote_enabled}). "
+                    + (f"SELL → **{bt_trail:.1f}% tight trail**." if bt_use_c
+                       else "Approach C **off** — SELL exits at market.")
+                )
+            except Exception as exc:
+                st.error(f"Promote failed: {exc}")
+
         st.divider()
         st.info(
             f"**Want to understand why trades win or lose?**  "
@@ -771,13 +961,13 @@ with tab_backtest:
 # TAB 3 — COMPARE ALL STRATEGIES ON ONE SYMBOL
 # ══════════════════════════════════════════════════════════════
 with tab_compare:
-    section("Compare All 5 Strategies")
+    section(f"Compare All {len(_STRATEGY_NAMES)} Strategies")
     st.caption("Runs all strategies on the same symbol and period — easy to see which works best.")
 
     col1, col2, col3 = st.columns([2, 2, 2])
     with col1:
-        cmp_symbol = st.text_input("Symbol", value="AAPL", key="cmp_sym",
-                                   help="Type any US stock ticker.").upper().strip()
+        cmp_symbol = st.text_input("Symbol", value="RELIANCE", key="cmp_sym",
+                                   help="Type any NSE ticker (e.g. RELIANCE, TCS).").upper().strip()
     with col2:
         cmp_period = st.selectbox("Period", ["6mo", "1y", "2y", "5y", "10y"], index=2, key="cmp_period")
     with col3:
@@ -801,11 +991,11 @@ with tab_compare:
     with cmp_btn2:
         run_wf_cmp = st.button("🔀 Compare Walk-Forward (all strategies)", key="px_run_wf_cmp",
                                 use_container_width=True,
-                                help="Runs rolling walk-forward for all 12 strategies on this symbol. "
+                                help=f"Runs rolling walk-forward for all {len(_STRATEGY_NAMES)} strategies on this symbol. "
                                      "Shows which strategy has real edge right now vs which is overfit.")
 
     if run_cmp:
-        with st.spinner(f"Running all 12 strategies on {cmp_symbol} over {cmp_period}..."):
+        with st.spinner(f"Running all {len(_STRATEGY_NAMES)} strategies on {cmp_symbol} over {cmp_period}..."):
             try:
                 results = api.perplexity_backtest_all(cmp_symbol, period=cmp_period,
                                                       initial_capital=cmp_capital,
@@ -815,7 +1005,7 @@ with tab_compare:
                 st.error(f"Comparison failed: {e}")
 
     if run_wf_cmp:
-        with st.spinner(f"Running walk-forward for all 12 strategies on {cmp_symbol} (10y, 3y IS / 1y OOS)... this takes ~2 min"):
+        with st.spinner(f"Running walk-forward for all {len(_STRATEGY_NAMES)} strategies on {cmp_symbol} (10y, 3y IS / 1y OOS)... this takes ~2 min"):
             try:
                 wf_results = api.perplexity_walkforward_all(cmp_symbol, period="10y",
                                                              train_years=3.0, test_years=1.0, step_years=1.0,
@@ -955,20 +1145,30 @@ with tab_compare:
             with p3:
                 enabled = st.checkbox("Enabled", value=True, key=f"px_promote_en_{cmp_symbol}")
 
+            px_use_c = st.checkbox(
+                "Enable Approach C (tight trailing stop on SELL)",
+                value=False, key=f"px_promote_usec_{cmp_symbol}",
+                help="OFF (default): a SELL signal exits at market. "
+                     "ON: a SELL signal arms a tight trailing stop instead.",
+            )
             pt1, pt2 = st.columns([2, 3])
             with pt1:
                 px_tight_trail = st.slider(
                     "Approach C tight trail %",
                     min_value=1.0, max_value=10.0, value=2.0, step=0.5,
                     key=f"px_promote_trail_{cmp_symbol}",
+                    disabled=not px_use_c,
                     help="Tight trailing stop % when the assigned strategy fires a SELL signal. "
-                         "Perplexity strategies tend to be swing-style — 2–3% is a good starting point.",
+                         "Swing-style strategies — 2–3% is a good starting point.",
                 )
             with pt2:
-                st.info(
-                    f"SELL signal → **{px_tight_trail:.1f}% tight trailing stop** from signal price. "
-                    "The position only exits when price drops this % from its post-signal high."
-                )
+                if px_use_c:
+                    st.info(
+                        f"SELL signal → **{px_tight_trail:.1f}% tight trailing stop** from signal price. "
+                        "The position only exits when price drops this % from its post-signal high."
+                    )
+                else:
+                    st.info("Approach C OFF → **SELL signal exits at market** (no trailing stop).")
 
             pg_col, _ = st.columns([1, 3])
             with pg_col:
@@ -980,20 +1180,22 @@ with tab_compare:
                     cap_val: float | None = None
                     if cap_str.strip():
                         cap_val = float(cap_str.strip())
+                    _note_c = (f"trail={px_tight_trail:.1f}%" if px_use_c else "Approach C off")
                     api.upsert_assignment(
                         symbol=cmp_symbol,
                         system="perplexity",
                         strategy_name=pick,
                         enabled=enabled,
-                        notes=f"Promoted from Compare All ({cmp_period}), trail={px_tight_trail:.1f}%",
+                        notes=f"Promoted from Compare All ({cmp_period}), {_note_c}",
                         max_capital_usd=cap_val,
-                        tight_trail_pct=px_tight_trail,
+                        tight_trail_pct=(px_tight_trail if px_use_c else None),
+                        approach_c_enabled=px_use_c,
                     )
                     st.success(
-                        f"Assigned **{pick}** to **{cmp_symbol}** "
-                        f"with **{px_tight_trail:.1f}% tight trail** "
-                        f"(perplexity, enabled={enabled}). "
-                        "SELL signals will place a tight trailing stop at this distance."
+                        f"Assigned **{pick}** to **{cmp_symbol}** (perplexity, enabled={enabled}). "
+                        + (f"SELL signals will place a **{px_tight_trail:.1f}% tight trailing stop**."
+                           if px_use_c else
+                           "Approach C is **off** — SELL signals exit at market.")
                     )
                 except Exception as exc:
                     st.error(f"Promote failed: {exc}")
@@ -1163,7 +1365,7 @@ with tab_portfolio:
     with pc5:
         port_max_pos = st.slider("Max simultaneous positions", 1, 10, 5, 1, key="port_max_pos")
     with pc6:
-        port_symbols_input = st.text_input("Symbols (comma-separated)", value="SPY,QQQ,IWM,AAPL,NVDA", key="port_syms")
+        port_symbols_input = st.text_input("Symbols (comma-separated)", value="RELIANCE,HDFCBANK,TCS,INFY,ICICIBANK", key="port_syms")
 
     if st.button("▶ Run Portfolio Backtest", type="primary", key="port_run"):
         with st.spinner(f"Running {port_strat} across portfolio..."):
@@ -1224,7 +1426,7 @@ with tab_walkforward:
     with wf_c1:
         wf_strat = st.selectbox("Strategy", list(STRATEGY_DESCRIPTIONS.keys()), key="wf_strat")
     with wf_c2:
-        wf_sym = st.text_input("Symbol", value="SPY", key="wf_sym").upper().strip()
+        wf_sym = st.text_input("Symbol", value="RELIANCE", key="wf_sym").upper().strip()
     with wf_c3:
         wf_period = st.selectbox("Full Period", ["5y", "10y"], index=1, key="wf_period")
 
@@ -1713,7 +1915,7 @@ with tab_profiles:
 
     ac1, ac2, ac3, ac4 = st.columns([2, 1, 1, 1])
     with ac1:
-        cal_sym = st.text_input("Symbol to calibrate", value="AAPL",
+        cal_sym = st.text_input("Symbol to calibrate", value="RELIANCE",
                                 key="cal_sym").upper().strip()
     with ac2:
         cal_period = st.selectbox("Data period", ["3y", "5y", "10y"], index=1, key="cal_period")
@@ -1895,7 +2097,7 @@ with tab_profiles:
     st.divider()
     st.markdown("### Batch Calibrate Multiple Symbols")
     st.caption("Runs Auto-Calibrate on all symbols in the list sequentially. Takes ~2 min per symbol.")
-    batch_input = st.text_input("Symbols (comma-separated)", value="AAPL,SPY,QQQ,NVDA,MSFT",
+    batch_input = st.text_input("Symbols (comma-separated)", value="RELIANCE,HDFCBANK,TCS,INFY,SBIN",
                                 key="batch_syms")
     batch_period = st.selectbox("Period", ["3y", "5y"], index=1, key="batch_period")
     if st.button("⚡ Batch Calibrate All", key="batch_run"):
@@ -1942,7 +2144,7 @@ with tab_analysis:
     compare_btn = st.button("📊 Compare All Strategies", key="compare_strats")
 
     if compare_btn and an_symbol:
-        with st.spinner(f"Running all 12 strategies on {an_symbol} ({an_period})…"):
+        with st.spinner(f"Running all {len(_STRATEGY_NAMES)} strategies on {an_symbol} ({an_period})…"):
             compare_rows = []
             for sname in STRATEGY_DESCRIPTIONS.keys():
                 try:
@@ -2242,6 +2444,7 @@ with tab_config:
     try:
         strats = api.perplexity_strategies()
         strat_enabled = {s["name"]: s["enabled"] for s in strats}
+        strat_research = {s["name"]: s.get("research_only", False) for s in strats}
     except Exception as e:
         st.error(f"Cannot reach API: {e}")
         st.stop()
@@ -2298,8 +2501,10 @@ with tab_config:
 
     for s_name, s_obj in _cfg_map.items():
         enabled = strat_enabled.get(s_name, True)
+        is_research = strat_research.get(s_name, False)
+        badge = " 🔬 _research-only (backtest, not live)_" if is_research else ""
         with st.expander(
-            f"{'✅' if enabled else '⬜'} **{s_name.replace('_', ' ')}**",
+            f"{'✅' if enabled else '⬜'} **{s_name.replace('_', ' ')}**{badge}",
             expanded=False
         ):
             st.caption(STRATEGY_DESCRIPTIONS.get(s_name, ""))

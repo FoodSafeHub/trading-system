@@ -410,3 +410,58 @@ def get_momentum_regime_at(
         vix=vix_val, breadth_pct=breadth_pct,
         reasons=reasons,
     )
+
+
+def get_momentum_regime_series(
+    *,
+    index_close: pd.Series,
+    vix_close: Optional[pd.Series] = None,
+    market: str = "us",
+) -> dict[pd.Timestamp, "RegimeSnapshot"]:
+    """Vectorized equivalent of calling get_momentum_regime_at() for every date.
+
+    The per-bar path recomputes a full rolling SMA(200)/SMA(50) over a growing
+    slice on each call — O(n²) across a backtest. Here the rolling means are
+    computed ONCE over the whole series, then each date's snapshot is built from
+    the precomputed values. Breadth is omitted (the backtest hot-path passes
+    breadth=None), matching get_momentum_regime_at's breadth-None behaviour.
+
+    Returns a {date: RegimeSnapshot} dict keyed by the index's timestamps.
+    """
+    cfg = _MARKET_CFG.get(market, _MARKET_CFG["us"])
+    label = cfg["index"]
+    vix_hot = cfg["vix_hot"]
+
+    sma50_s = index_close.rolling(50).mean()
+    sma200_s = index_close.rolling(200).mean()
+    # As-of VIX: forward-fill so a date with no exact VIX bar reuses the last
+    # known value — same as the per-date `<= as_of_date` slice + iloc[-1].
+    vix_aligned = None
+    if vix_close is not None and not vix_close.empty:
+        vix_aligned = vix_close.reindex(index_close.index, method="ffill")
+
+    out: dict[pd.Timestamp, RegimeSnapshot] = {}
+    for pos, idx in enumerate(index_close.index):
+        if pos + 1 < 200:
+            out[idx] = RegimeSnapshot(
+                regime=MomentumRegime.NO_TRADE,
+                spy_close=0.0, spy_sma50=0.0, spy_sma200=0.0,
+                vix=None, breadth_pct=None,
+                reasons=[f"Not enough {label} history at {idx.date()} for 200-DMA"],
+            )
+            continue
+        close = float(index_close.iloc[pos])
+        sma50 = float(sma50_s.iloc[pos])
+        sma200 = float(sma200_s.iloc[pos])
+        vix_val = None
+        if vix_aligned is not None:
+            v = vix_aligned.iloc[pos]
+            vix_val = None if pd.isna(v) else float(v)
+        regime, reasons = _classify(label, close, sma50, sma200, vix_val, vix_hot, None)
+        out[idx] = RegimeSnapshot(
+            regime=regime,
+            spy_close=close, spy_sma50=sma50, spy_sma200=sma200,
+            vix=vix_val, breadth_pct=None,
+            reasons=reasons,
+        )
+    return out

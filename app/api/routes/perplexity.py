@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 logger = logging.getLogger(__name__)
 
 from app.config import get_settings
+from app.services.backtest import compare_pool
 from app.services.backtest.perplexity_engine import run_perplexity_backtest
 from app.services.backtest.portfolio_engine import run_portfolio_backtest
 from app.services.backtest.walkforward_engine import (
@@ -40,7 +41,14 @@ _STRATEGY_MAP = {s.name: s for s in PERPLEXITY_STRATEGIES}
 
 @router.get("/strategies")
 def list_strategies():
-    return [{"name": s.name, "enabled": s.enabled} for s in PERPLEXITY_STRATEGIES]
+    return [
+        {
+            "name": s.name,
+            "enabled": s.enabled,
+            "research_only": bool(getattr(s, "research_only", False)),
+        }
+        for s in PERPLEXITY_STRATEGIES
+    ]
 
 
 @router.get("/regime/{market}")
@@ -345,16 +353,21 @@ def backtest(
     initial_capital: float = 100_000.0,
     position_pct: float = 0.0,
     breakdown: bool = False,
+    approach_c: bool = False,
+    tight_trail_pct: float = 2.0,
 ):
     """Run a single Perplexity strategy backtest.
     position_pct: 0 = risk-based sizing (1% risk/trade); >0 = fixed % of capital per trade (e.g. 0.20 = 20%).
+    approach_c: when True, a SELL signal arms a tight_trail_pct% trailing stop instead of exiting immediately.
     """
     strategy = _STRATEGY_MAP.get(strategy_name)
     if not strategy:
         raise HTTPException(404, f"Strategy '{strategy_name}' not found")
     try:
         result = run_perplexity_backtest(strategy, symbol.upper(), period, initial_capital,
-                                         position_pct=position_pct)
+                                         position_pct=position_pct,
+                                         approach_c=approach_c,
+                                         tight_trail_pct=tight_trail_pct)
         return {
             "strategy_name": result.strategy_name,
             "symbol": result.symbol,
@@ -420,37 +433,50 @@ def backtest_all(
     except Exception:
         spy_close = df_full["Close"]
 
-    def _run_one(strategy):
+    # Pre-fetch the momentum index + VIX ONCE here and share across every strategy.
+    # Otherwise each momentum strategy in the parallel pool re-downloads VIX (and the
+    # index for India) from Yahoo — the redundant per-run fetch that made this endpoint
+    # lag the scanner. Pick the market series by symbol (India = Nifty/India VIX).
+    mom_index_close = None
+    mom_vix_close = None
+    try:
+        from app.services.markets import is_india_symbol as _is_india_symbol
+        from app.services.market_regime_advanced import _MARKET_CFG
+        _mom_cfg = _MARKET_CFG["india" if _is_india_symbol(sym) else "us"]
         try:
-            r = run_perplexity_backtest(
-                strategy, sym, period, initial_capital,
-                position_pct=position_pct,
-                df_full=df_full, spy_close=spy_close,
+            mom_index_close = (
+                spy_close if _mom_cfg["index"] == "SPY"
+                else get_ohlcv(_mom_cfg["index"], period="10y")["Close"]
             )
-            return {
-                "strategy_name": r.strategy_name,
-                "total_trades": r.total_trades,
-                "win_rate_pct": r.win_rate_pct,
-                "profit_factor": r.profit_factor,
-                "avg_win_pct": r.avg_win_pct,
-                "avg_loss_pct": r.avg_loss_pct,
-                "expectancy_pct": r.expectancy_pct,
-                "expectancy_r": r.expectancy_r,
-                "average_holding_days": r.average_holding_days,
-                "average_r_multiple": r.average_r_multiple,
-                "total_return_pct": r.total_return_pct,
-                "cagr": r.cagr,
-                "total_pnl": r.total_pnl,
-                "capital_employed": r.capital_employed,
-                "max_drawdown_pct": r.max_drawdown_pct,
-                "sharpe_ratio": r.sharpe_ratio,
-            }
-        except Exception as exc:
-            return {"strategy_name": strategy.name, "error": str(exc)}
+        except Exception:
+            mom_index_close = None
+        try:
+            mom_vix_close = get_ohlcv(_mom_cfg["vix"], period="10y")["Close"]
+        except Exception:
+            mom_vix_close = None
+    except Exception:
+        pass
 
-    # Run the independent strategy backtests in parallel over the shared data.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(PERPLEXITY_STRATEGIES))) as ex:
-        results = list(ex.map(_run_one, PERPLEXITY_STRATEGIES))
+    # The per-strategy backtest is CPU-bound pandas work, so threads barely help
+    # (GIL). Run each strategy in its OWN process for a near-linear speedup; the
+    # shared frames are handed to each worker once via the pool initializer, so
+    # only the strategy name crosses the process boundary. Falls back to threads
+    # if the platform can't spawn processes.
+    names = [s.name for s in PERPLEXITY_STRATEGIES]
+    init_args = (df_full, spy_close, mom_index_close, mom_vix_close,
+                 period, initial_capital, position_pct)
+    try:
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=min(8, len(names)),
+            initializer=compare_pool._pool_init,
+            initargs=init_args,
+        ) as ex:
+            results = list(ex.map(compare_pool.run_one, names, [sym] * len(names)))
+    except Exception as exc:
+        logger.warning("Compare-all process pool failed (%s); falling back to threads", exc)
+        compare_pool._pool_init(*init_args)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(names))) as tex:
+            results = list(tex.map(lambda n: compare_pool.run_one(n, sym), names))
     return results
 
 

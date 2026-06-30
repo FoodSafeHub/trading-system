@@ -177,9 +177,14 @@ _INDIA_UNIVERSES = {
 
 
 def get_india_universe(universe: str) -> List[str]:
-    """Return an India tier's symbol list (nifty50/100/200/500 or nse_all)."""
+    """Return an India tier's symbol list (nifty50/100/200/500 or nse_all).
+
+    ``nifty500`` maps to the full Upstox NSE list (~2,466) by user decision —
+    the repo has no verified 500-constituent list, so the widest accurate
+    coverage is the full instrument map (same source as ``nse_all``).
+    """
     import app.services.markets as mk
-    if universe == "nse_all":
+    if universe in ("nse_all", "nifty500"):
         return mk.nse_all_symbols()
     attr = _INDIA_UNIVERSES.get(universe, "NIFTY_50")
     return list(getattr(mk, attr))

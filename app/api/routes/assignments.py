@@ -31,6 +31,9 @@ class AssignmentIn(BaseModel):
     # Approach C tight trailing stop % — set during backtesting, stored per assignment.
     # None = use system default (2.0%). Range 1.0–10.0.
     tight_trail_pct: float | None = None
+    # Approach C master switch (optional). None/True = tight-trail on SELL
+    # (historical default). False = Approach C OFF → SELL exits at market.
+    approach_c_enabled: bool | None = None
 
 
 class AssignmentOut(BaseModel):
@@ -43,6 +46,7 @@ class AssignmentOut(BaseModel):
     broker: str
     notes: str | None
     tight_trail_pct: float | None = None
+    approach_c_enabled: bool | None = None
     assigned_at: datetime
 
     model_config = {"from_attributes": True}
@@ -116,6 +120,7 @@ def upsert_assignment(body: AssignmentIn, db: Session = Depends(get_db)):
         row.broker = body.broker
         row.notes = body.notes
         row.tight_trail_pct = body.tight_trail_pct
+        row.approach_c_enabled = body.approach_c_enabled
         row.assigned_at = datetime.now(tz=timezone.utc)
     else:
         row = SymbolStrategyAssignment(
@@ -128,6 +133,7 @@ def upsert_assignment(body: AssignmentIn, db: Session = Depends(get_db)):
             broker=body.broker,
             notes=body.notes,
             tight_trail_pct=body.tight_trail_pct,
+            approach_c_enabled=body.approach_c_enabled,
             assigned_at=datetime.now(tz=timezone.utc),
         )
         db.add(row)

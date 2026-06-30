@@ -469,6 +469,8 @@ def backtest_custom_compare_all(
         default exit_policy. Lets you preview the new suite without changing the
         default page behaviour.
     """
+    import concurrent.futures
+    from app.services.market_data.provider import get_ohlcv
     from app.services.scanner.scanner_service import (
         _make_generic_configs_full, _make_unified_configs,
     )
@@ -479,8 +481,14 @@ def backtest_custom_compare_all(
 
     configs = (_make_unified_configs(sym) if strategy_set == "unified"
                else _make_generic_configs_full(sym))
-    results: list[dict] = []
-    for cfg in configs:
+
+    # Fetch the symbol's bars ONCE and share across every strategy run. Previously
+    # each of the 7 strategies re-downloaded the same history from Yahoo, and the
+    # runs were serial — on an 8y span that blew past the client read timeout. The
+    # runs are independent and read-only over the shared frame, so parallelise them.
+    df_shared = get_ohlcv(sym, period=period)
+
+    def _run_cfg(cfg) -> dict:
         try:
             r = run_backtest(
                 strategy_name=cfg.name,
@@ -490,10 +498,10 @@ def backtest_custom_compare_all(
                 period=period,
                 initial_capital=initial_capital,
                 quantity=0,
+                df=df_shared,
             )
         except Exception as exc:
-            results.append({"strategy_name": cfg.name, "error": str(exc)})
-            continue
+            return {"strategy_name": cfg.name, "error": str(exc)}
 
         # Compute per-roundtrip P&L so we can derive profit_factor / avg_win / expectancy.
         buys = [t for t in r.trades if t.side == "BUY"]
@@ -539,7 +547,7 @@ def backtest_custom_compare_all(
         if pf_out is not None and pf_out == float("inf"):
             pf_out = None
 
-        results.append({
+        return {
             "strategy_name": r.strategy_name,
             "symbol": r.symbol,
             "strategy_type": cfg.type,
@@ -570,7 +578,26 @@ def backtest_custom_compare_all(
                  "quantity": t.quantity, "value": round(t.value, 2)}
                 for t in r.trades
             ],
-        })
+        }
+
+    # CPU-bound pandas work → run each config in its own process (threads are
+    # GIL-bound and barely speed this up). The shared frame is handed to each
+    # worker once via the initializer. Falls back to threads if spawn fails.
+    from app.services.backtest import compare_pool
+    triples = [(c.name, c.type, c.params) for c in configs]
+    try:
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=min(8, len(triples)),
+            initializer=compare_pool._custom_pool_init,
+            initargs=(df_shared, sym, period, initial_capital),
+        ) as ex:
+            results = list(ex.map(compare_pool.run_one_custom,
+                                  [t[0] for t in triples],
+                                  [t[1] for t in triples],
+                                  [t[2] for t in triples]))
+    except Exception:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(configs))) as tex:
+            results = list(tex.map(_run_cfg, configs))
     return results
 
 

@@ -184,11 +184,58 @@ def _backtest_on_slice(
     daily_returns: list = []
     prev_equity = initial_capital
 
+    # ── Point-in-time regime / momentum / benchmark injection ─────────────────
+    # Without this, strategy.run() falls back to LIVE get_momentum_regime()
+    # (a lookahead leak) and RS strategies get no benchmark_close (never fire).
+    # Mirror the main perplexity_engine: precompute a per-date momentum snapshot
+    # series + benchmark close, routed to ^NSEI/^INDIAVIX for India symbols.
+    _mom_snap_series = None
+    _benchmark_full = None
+    try:
+        from app.services.markets import is_india_symbol as _is_india_symbol
+        _is_india = bool(_is_india_symbol(symbol))
+    except Exception:
+        _is_india = False
+    try:
+        from app.services.market_regime_advanced import (
+            _MARKET_CFG, get_momentum_regime_series,
+        )
+        _mkt = "india" if _is_india else "us"
+        _cfg = _MARKET_CFG[_mkt]
+        _idx_close = get_ohlcv(_cfg["index"], period="10y")["Close"]
+        _benchmark_full = _idx_close
+        try:
+            _vix_close = get_ohlcv(_cfg["vix"], period="10y")["Close"]
+        except Exception:
+            _vix_close = None
+        _snaps = get_momentum_regime_series(index_close=_idx_close, vix_close=_vix_close, market=_mkt)
+        _mom_snap_series = pd.Series(_snaps).sort_index()
+    except Exception:
+        _mom_snap_series = None
+        _benchmark_full = None
+
+    def _mom_at(as_of):
+        if _mom_snap_series is None or len(_mom_snap_series) == 0:
+            return None
+        sub = _mom_snap_series.loc[_mom_snap_series.index <= as_of]
+        return sub.iloc[-1] if len(sub) else None
+
+    def _bench_at(as_of):
+        if _benchmark_full is None:
+            return None
+        try:
+            return _benchmark_full.loc[_benchmark_full.index <= as_of]
+        except Exception:
+            return None
+
     for i in range(effective_start, len(df_full)):
         df_bar = df_full.iloc[:i]
         current_close = float(df_full["Close"].iloc[i])
         fill_price    = float(df_full["Open"].iloc[i])
         today = dates[i]
+        _asof = df_full.index[i - 1]
+        _mom_today = _mom_at(_asof)
+        _bench_today = _bench_at(_asof)
 
         # ── Gap stop / target check on open ──
         if position > 0 and entry_stop is not None:
@@ -226,7 +273,7 @@ def _backtest_on_slice(
         # ── Strategy signal ──
         if position == 0:
             try:
-                sig = strategy.run(symbol, df_bar)
+                sig = strategy.run(symbol, df_bar, momentum_snapshot=_mom_today, benchmark_close=_bench_today)
             except Exception:
                 sig = None
             if sig and sig.direction == "BUY":
@@ -256,7 +303,7 @@ def _backtest_on_slice(
                                    "quantity": round(qty, 4), "value": round(cost, 2), "pnl": None})
         elif position > 0:
             try:
-                sig = strategy.run(symbol, df_bar)
+                sig = strategy.run(symbol, df_bar, momentum_snapshot=_mom_today, benchmark_close=_bench_today)
             except Exception:
                 sig = None
             if sig and sig.direction == "SELL":

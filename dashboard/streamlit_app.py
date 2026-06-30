@@ -48,7 +48,7 @@ nav = {
         _p("pages/1_Strategy.py",   "Strategy",   ":material/insights:"),
         _p("pages/3_Charts.py",     "Charts",     ":material/candlestick_chart:"),
         _p("pages/4_Backtest.py",   "Backtest",   ":material/science:"),
-        _p("pages/5_Perplexity.py", "Perplexity", ":material/auto_awesome:"),
+        _p("pages/5_Perplexity.py", "India Swing", ":material/auto_awesome:"),
     ],
     "Trading": [
         _p("pages/7_DayTrading.py",    "Day Trading", ":material/bolt:"),

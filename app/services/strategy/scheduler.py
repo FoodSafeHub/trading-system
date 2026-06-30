@@ -552,7 +552,10 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                      "max_capital_usd": a.max_capital_usd, "max_shares": a.max_shares,
                      "broker": a.broker or "default",
                      # Per-assignment Approach C trail %. None = system default (2.0%).
-                     "tight_trail_pct": a.tight_trail_pct}
+                     "tight_trail_pct": a.tight_trail_pct,
+                     # Approach C master switch. None/True = on (historical default);
+                     # False = OFF → SELL exits at market instead of tight-trailing.
+                     "approach_c_enabled": a.approach_c_enabled}
                     for a in active_assignments
                 ]
 
@@ -837,6 +840,37 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         )
                         continue
 
+                    # ── Approach C OFF → market exit on SELL ─────────────────
+                    # approach_c_enabled is False only when the user explicitly
+                    # opted out (None/True keep the historical tight-trail
+                    # default, so existing assignments are unchanged). When off,
+                    # a SELL signal sells at market immediately — no trailing
+                    # stop is armed.
+                    if asgn.get("approach_c_enabled") is False:
+                        exec_svc, exec_acct = _svc_for(asgn_broker)
+                        sig_id = _mark_signal_acted_on(symbol, direction, label)
+                        logger.info(
+                            "[scheduler] SELL signal %s: Approach C OFF — market exit %.4f sh",
+                            symbol, qty,
+                        )
+                        try:
+                            from app.services.notifications.bus import notify_signal
+                            notify_signal(symbol=symbol, direction=direction, strategy=label,
+                                          source="scheduler", price=entry)
+                        except Exception:
+                            pass
+                        loop.run_until_complete(exec_svc.execute(
+                            OrderRequest(
+                                symbol=symbol, side=direction,  # type: ignore[arg-type]
+                                order_type="MARKET", quantity=qty,
+                                limit_price=None, stop_price=None, source="scheduler",
+                            ),
+                            account_id=exec_acct,
+                            signal_id=sig_id,
+                            estimated_price=entry,
+                        ))
+                        continue
+
                     # ── Assigned strategy SELL → tight trailing stop ─────────
                     # Only the ASSIGNED strategy for this symbol can trigger
                     # the tight trail. Trail % comes from the assignment row
@@ -958,11 +992,40 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                                 c_broker = "zerodha"
                         except Exception:
                             pass
-                    c_trail_pct = float(
-                        (c_asgn.get("tight_trail_pct") if c_asgn else None) or 2.0
-                    )
                     consensus_label = (
                         "consensus:" + "+".join(agreeing) if agreeing else "consensus"
+                    )
+
+                    # Approach C OFF (only when a matching assignment explicitly
+                    # opted out) → market exit instead of a tight trail.
+                    if c_asgn is not None and c_asgn.get("approach_c_enabled") is False:
+                        sig_id = _persist_signal(symbol, direction, consensus_label, entry_p or None)
+                        exec_svc, exec_acct = _svc_for(c_broker)
+                        logger.info(
+                            "[scheduler] Consensus SELL %s: Approach C OFF — market exit %.4f sh",
+                            symbol, qty,
+                        )
+                        loop.run_until_complete(exec_svc.execute(
+                            OrderRequest(
+                                symbol=symbol, side=direction,  # type: ignore[arg-type]
+                                order_type="MARKET", quantity=qty,
+                                limit_price=None, stop_price=None, source="scheduler",
+                            ),
+                            account_id=exec_acct,
+                            signal_id=sig_id,
+                            estimated_price=entry_p,
+                        ))
+                        try:
+                            from app.services.notifications.bus import notify_signal
+                            notify_signal(symbol=symbol, direction=direction,
+                                          strategy=consensus_label, source="scheduler",
+                                          price=entry_p)
+                        except Exception:
+                            pass
+                        continue
+
+                    c_trail_pct = float(
+                        (c_asgn.get("tight_trail_pct") if c_asgn else None) or 2.0
                     )
                     sig_id = _persist_signal(symbol, direction, consensus_label, entry_p or None)
                     exec_svc, exec_acct = _svc_for(c_broker)

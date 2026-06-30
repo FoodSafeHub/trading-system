@@ -38,17 +38,61 @@ def _safe(call, default):
         return default
 
 
+# Broker-backed reads fan out to every broker; the Webull leg alone can take
+# ~15s. Two problems were stacked: (1) the calls ran serially on every render
+# (account_summary ~2s + positions ~6s ≈ 8s), and (2) nothing cached them, so
+# EVERY Streamlit rerun — every button click — re-paid that ~8s, making the page
+# feel frozen. Fix: fetch all the independent reads concurrently in ONE cached
+# snapshot with a short TTL. The TTL bounds staleness (≤10s on a cockpit you
+# actively watch is fine); the parallel fetch bounds the cold-render cost by the
+# slowest call instead of the sum. The whole gather is inside the cached function
+# so the thread pool never touches Streamlit's (thread-local) cache machinery.
+import concurrent.futures as _futures
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def _dashboard_snapshot():
+    jobs = {
+        "risk":      (api.risk_status, {}),
+        "accounts":  (api.account_summary, []),
+        "positions": (api.positions, []),
+        "orders":    (api.orders, []),
+        "autot":     (api.autotrader_status, {"running": False, "traders": {}}),
+        "notif":     (api.notifications_unread_count, {"unread": 0}),
+    }
+    out = {}
+    with _futures.ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+        futs = {ex.submit(_safe, fn, default): key for key, (fn, default) in jobs.items()}
+        for fut in _futures.as_completed(futs):
+            out[futs[fut]] = fut.result()
+    return out
+
+
+def _clear_dashboard_cache():
+    """Drop the cached snapshot so the next render shows fresh state. Call after
+    any action that mutates server state (kill switch, auto-trader)."""
+    _dashboard_snapshot.clear()
+
+
+# A manual refresh that bypasses the TTL for when you want state *now*.
+_hdr_l, _hdr_r = st.columns([5, 1])
+with _hdr_r:
+    if st.button("↻ Refresh", use_container_width=True, help="Force-refresh broker & risk data"):
+        _clear_dashboard_cache()
+        st.rerun()
+
 health    = _safe(api.health, None)
 if health is None:
     st.error("Cannot reach the API — is the backend running on 127.0.0.1:8001?")
     st.stop()
 
-risk      = _safe(api.risk_status, {})
-accounts  = _safe(api.account_summary, [])
-positions = _safe(api.positions, [])
-orders    = _safe(api.orders, [])
-autot     = _safe(api.autotrader_status, {"running": False, "traders": {}})
-notif_cnt = _safe(api.notifications_unread_count, {"unread": 0}).get("unread", 0)
+_data     = _dashboard_snapshot()
+risk      = _data["risk"]
+accounts  = _data["accounts"]
+positions = _data["positions"]
+orders    = _data["orders"]
+autot     = _data["autot"]
+notif_cnt = _data["notif"].get("unread", 0)
 
 # ── Page header ──────────────────────────────────────────────────────────────
 now_et = datetime.now(tz=ET).strftime("%H:%M ET · %a %b %d")
@@ -242,10 +286,12 @@ with right:
             st.error("**Kill switch is ACTIVE** — all new orders are blocked.", icon="🛑")
             if st.button("Deactivate kill switch", type="primary", use_container_width=True, key="home_ks_off"):
                 api.set_kill_switch(False)
+                _clear_dashboard_cache()
                 st.rerun()
         else:
             if st.button("⚡ Activate kill switch", use_container_width=True, key="home_ks_on"):
                 api.set_kill_switch(True)
+                _clear_dashboard_cache()
                 st.rerun()
     else:
         st.warning("Risk data unavailable.", icon="⚠️")
@@ -260,9 +306,11 @@ with right:
         st.caption(f"Active: {symbols}")
         if st.button("Stop (keep positions)", use_container_width=True, key="home_auto_stop"):
             api.autotrader_stop(flatten=False)
+            _clear_dashboard_cache()
             st.rerun()
         if st.button("Stop & flatten all", use_container_width=True, key="home_auto_flatten"):
             api.autotrader_stop(flatten=True)
+            _clear_dashboard_cache()
             st.rerun()
     else:
         st.markdown(pill("OFFLINE", "grey"), unsafe_allow_html=True)

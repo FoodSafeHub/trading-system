@@ -2,8 +2,21 @@ from __future__ import annotations
 
 import os
 import requests
+import urllib3
 
 BASE = os.getenv("TRADING_API_BASE", "https://127.0.0.1:8001")
+
+# A single pooled session reused across every call. Without this, each request
+# opened a fresh connection and — over self-signed HTTPS — paid a full TLS
+# handshake every time. The dashboard fires several calls per page on every
+# Streamlit rerun, so the per-call handshake cost dominated page-refresh latency.
+# A keep-alive pool collapses repeated calls to the same host onto one connection.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+_SESSION = requests.Session()
+_SESSION.verify = False
+_adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=0)
+_SESSION.mount("https://", _adapter)
+_SESSION.mount("http://", _adapter)
 
 
 def _load_bearer_token() -> str:
@@ -63,21 +76,21 @@ def _raise_with_body(r: requests.Response) -> None:
 
 def _get(path: str, timeout: int = 10, **kwargs):
     kwargs = _merge_headers(kwargs)
-    r = requests.get(f"{BASE}{path}", timeout=timeout, verify=False, **kwargs)
+    r = _SESSION.get(f"{BASE}{path}", timeout=timeout, **kwargs)
     _raise_with_body(r)
     return r.json()
 
 
 def _post(path: str, timeout: int = 10, **kwargs):
     kwargs = _merge_headers(kwargs)
-    r = requests.post(f"{BASE}{path}", timeout=timeout, verify=False, **kwargs)
+    r = _SESSION.post(f"{BASE}{path}", timeout=timeout, **kwargs)
     _raise_with_body(r)
     return r.json()
 
 
 def _delete(path: str, timeout: int = 10, **kwargs):
     kwargs = _merge_headers(kwargs)
-    r = requests.delete(f"{BASE}{path}", timeout=timeout, verify=False, **kwargs)
+    r = _SESSION.delete(f"{BASE}{path}", timeout=timeout, **kwargs)
     _raise_with_body(r)
     return r.json()
 
@@ -214,7 +227,7 @@ def update_scheduler_config(run_bollinger: bool | None = None, run_perplexity: b
         params["run_bollinger"] = str(run_bollinger).lower()
     if run_perplexity is not None:
         params["run_perplexity"] = str(run_perplexity).lower()
-    r = requests.post(f"{BASE}/strategy/scheduler/config", params=params, timeout=10, verify=False, headers=_headers())
+    r = _SESSION.post(f"{BASE}/strategy/scheduler/config", params=params, timeout=10, headers=_headers())
     r.raise_for_status()
     return r.json()
 
@@ -246,14 +259,16 @@ def upsert_assignment(symbol: str, system: str, strategy_name: str, enabled: boo
                       notes: str = "", max_capital_usd: float | None = None,
                       max_shares: float | None = None,
                       broker: str = "default",
-                      tight_trail_pct: float | None = None):
+                      tight_trail_pct: float | None = None,
+                      approach_c_enabled: bool | None = None):
     return _post("/assignments", json={"symbol": symbol, "system": system,
                                        "strategy_name": strategy_name, "enabled": enabled,
                                        "notes": notes,
                                        "max_capital_usd": max_capital_usd,
                                        "max_shares": max_shares,
                                        "broker": broker,
-                                       "tight_trail_pct": tight_trail_pct})
+                                       "tight_trail_pct": tight_trail_pct,
+                                       "approach_c_enabled": approach_c_enabled})
 
 
 def _ident(system: str | None, strategy_name: str | None) -> dict:
@@ -270,7 +285,7 @@ def _ident(system: str | None, strategy_name: str | None) -> dict:
 
 def set_assignment_broker(symbol: str, broker: str,
                           system: str | None = None, strategy_name: str | None = None):
-    r = requests.patch(f"{BASE}/assignments/{symbol}/broker",
+    r = _SESSION.patch(f"{BASE}/assignments/{symbol}/broker",
                        params={"broker": broker, **_ident(system, strategy_name)},
                        timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
@@ -293,7 +308,7 @@ def bulk_set_assignment_broker(symbols: list[str] | None = None, broker: str = "
 
 def toggle_assignment(symbol: str, enabled: bool,
                       system: str | None = None, strategy_name: str | None = None):
-    r = requests.patch(f"{BASE}/assignments/{symbol}/toggle",
+    r = _SESSION.patch(f"{BASE}/assignments/{symbol}/toggle",
                        params={"enabled": str(enabled).lower(), **_ident(system, strategy_name)},
                        timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
@@ -305,7 +320,7 @@ def set_assignment_cap(symbol: str, max_capital_usd: float | None,
     # parameter accepts a missing query param as None, but rejects "").
     params = {"max_capital_usd": max_capital_usd} if max_capital_usd else {}
     params.update(_ident(system, strategy_name))
-    r = requests.patch(f"{BASE}/assignments/{symbol}/cap",
+    r = _SESSION.patch(f"{BASE}/assignments/{symbol}/cap",
                        params=params,
                        timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
@@ -315,7 +330,7 @@ def set_assignment_trail(symbol: str, tight_trail_pct: float | None,
                          system: str | None = None, strategy_name: str | None = None):
     params = {"tight_trail_pct": tight_trail_pct} if tight_trail_pct else {}
     params.update(_ident(system, strategy_name))
-    r = requests.patch(f"{BASE}/assignments/{symbol}/trail",
+    r = _SESSION.patch(f"{BASE}/assignments/{symbol}/trail",
                        params=params,
                        timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
@@ -325,7 +340,7 @@ def set_assignment_shares(symbol: str, max_shares: float | None,
                           system: str | None = None, strategy_name: str | None = None):
     params = {"max_shares": max_shares} if max_shares else {}
     params.update(_ident(system, strategy_name))
-    r = requests.patch(f"{BASE}/assignments/{symbol}/shares",
+    r = _SESSION.patch(f"{BASE}/assignments/{symbol}/shares",
                        params=params,
                        timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
@@ -333,7 +348,7 @@ def set_assignment_shares(symbol: str, max_shares: float | None,
 
 def delete_assignment(symbol: str,
                       system: str | None = None, strategy_name: str | None = None):
-    r = requests.delete(f"{BASE}/assignments/{symbol}",
+    r = _SESSION.delete(f"{BASE}/assignments/{symbol}",
                         params=_ident(system, strategy_name),
                         timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
@@ -354,8 +369,8 @@ def perplexity_strategies():
     return _get("/perplexity/strategies")
 
 def perplexity_toggle_strategy(name: str, enabled: bool):
-    r = requests.post(f"{BASE}/perplexity/strategies/{name}/toggle",
-                      params={"enabled": str(enabled).lower()}, timeout=10, verify=False, headers=_headers())
+    r = _SESSION.post(f"{BASE}/perplexity/strategies/{name}/toggle",
+                      params={"enabled": str(enabled).lower()}, timeout=10, headers=_headers())
     r.raise_for_status()
     return r.json()
 
@@ -388,11 +403,15 @@ def perplexity_size(symbol: str, entry_price: float, stop_price: float,
 
 def perplexity_backtest(strategy_name: str, symbol: str, period: str = "5y",
                         initial_capital: float = 10000, position_pct: float = 0.0,
-                        breakdown: bool = True, timeout: int = 180):
+                        breakdown: bool = True, approach_c: bool = False,
+                        tight_trail_pct: float = 2.0, timeout: int = 180):
+    params = {"period": period, "initial_capital": initial_capital,
+              "position_pct": position_pct, "breakdown": str(breakdown).lower()}
+    if approach_c:
+        params["approach_c"] = "true"
+        params["tight_trail_pct"] = tight_trail_pct
     return _get(f"/perplexity/backtest/{strategy_name}/{symbol}",
-                params={"period": period, "initial_capital": initial_capital,
-                        "position_pct": position_pct, "breakdown": str(breakdown).lower()},
-                timeout=timeout)
+                params=params, timeout=timeout)
 
 def perplexity_backtest_all(symbol: str, period: str = "5y", initial_capital: float = 10000,
                             position_pct: float = 0.0, timeout: int = 600):

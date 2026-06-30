@@ -39,6 +39,10 @@ class SymbolStrategyAssignment(Base):
     # at this % distance from the signal price instead of a market sell.
     # None means use the system default (2.0%). Range 1.0–10.0.
     tight_trail_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Approach C master switch (optional). True/None = tight-trail on SELL
+    # (the historical default — kept so existing assignments are unchanged).
+    # False = Approach C OFF: a SELL signal exits at MARKET, no trailing stop.
+    approach_c_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     assigned_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
     )

@@ -281,7 +281,7 @@ if _signal_mode:
     for g in _strat_opts.get("generic", []):
         _id_to_label[g["id"]] = g["label"]
     for p in _strat_opts.get("perplexity", []):
-        _id_to_label[p["id"]] = f"Perplexity · {p['label']}"
+        _id_to_label[p["id"]] = f"Swing · {p['label']}"
     selected_strategy_ids = st.multiselect(
         "Strategies (signal)",
         options=list(_id_to_label.keys()),
@@ -292,19 +292,25 @@ if _signal_mode:
 row1_cols = filter_cols(2, 1, 1, 1, 1)
 universe = row1_cols[0].selectbox(
     "Universe",
-    ["watchlist", "sp500", "nasdaq100", "sp400", "sp600", "sp1500", "nifty50", "custom"],
+    ["watchlist", "sp500", "nasdaq100", "sp400", "sp600", "sp1500",
+     "nifty50", "nifty100", "nifty200", "nifty500", "nse_all", "custom"],
     format_func=lambda v: {
-        "nifty50": "nifty50 (India)",
-        "sp1500":  "sp1500 (~1500)",
-        "sp400":   "sp400 (MidCap)",
-        "sp600":   "sp600 (SmallCap)",
+        "nifty50":  "nifty50 (India)",
+        "nifty100": "nifty100 (India)",
+        "nifty200": "nifty200 (India)",
+        "nifty500": "nifty500 (India — full NSE ~2466)",
+        "nse_all":  "nse_all (India — full NSE)",
+        "sp1500":   "sp1500 (~1500)",
+        "sp400":    "sp400 (MidCap)",
+        "sp600":    "sp600 (SmallCap)",
     }.get(v, v),
     help=(
         "watchlist = assigned symbols. sp500/nasdaq100 = full US index (~2–5 min). "
-        "sp1500 = S&P Composite 1500 (~1500 stocks, ~8–15 min). nifty50 = NSE top-50."
+        "sp1500 = S&P Composite 1500 (~1500 stocks, ~8–15 min). "
+        "nifty50/100/200/500 = NSE tiers; nse_all = full NSE (slow)."
     ),
 )
-_is_india  = universe == "nifty50"
+_is_india  = universe in ("nifty50", "nifty100", "nifty200", "nifty500", "nse_all")
 _cur       = "₹" if _is_india else "$"
 min_price  = row1_cols[1].number_input(
     f"Min price ({_cur})",
@@ -390,7 +396,8 @@ if run_btn:
         "batch_size": 20,
     }
     is_large = (
-        universe in ("sp500", "nasdaq100", "sp400", "sp600", "sp1500", "nifty50")
+        universe in ("sp500", "nasdaq100", "sp400", "sp600", "sp1500",
+                     "nifty50", "nifty100", "nifty200", "nifty500", "nse_all")
         or len(custom_symbols) > 20
     )
 

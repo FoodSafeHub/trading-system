@@ -81,6 +81,7 @@ def init_db() -> None:
     _migrate_add_assignments_broker_column()
     _migrate_add_orders_trail_columns()
     _migrate_add_assignments_tight_trail_pct()
+    _migrate_add_assignments_approach_c_enabled()
 
 
 def _migrate_assignments_composite_pk() -> None:
@@ -250,6 +251,31 @@ def _migrate_add_assignments_tight_trail_pct() -> None:
             try:
                 conn.exec_driver_sql(
                     "ALTER TABLE symbol_strategy_assignments ADD COLUMN tight_trail_pct REAL"
+                )
+                conn.commit()
+            except Exception:
+                pass
+
+
+def _migrate_add_assignments_approach_c_enabled() -> None:
+    """Idempotent ALTER TABLE to add symbol_strategy_assignments.approach_c_enabled.
+
+    Approach C master switch. NULL/1 = tight-trail on SELL (historical default —
+    existing rows get NULL so their behaviour is unchanged). 0 = Approach C OFF
+    (SELL exits at market). Stored as INTEGER (SQLite bool).
+    """
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql(
+                "PRAGMA table_info(symbol_strategy_assignments)"
+            ).fetchall()
+        except Exception:
+            return
+        cols = {r[1] for r in rows}
+        if "approach_c_enabled" not in cols:
+            try:
+                conn.exec_driver_sql(
+                    "ALTER TABLE symbol_strategy_assignments ADD COLUMN approach_c_enabled INTEGER"
                 )
                 conn.commit()
             except Exception:

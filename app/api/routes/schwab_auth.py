@@ -106,6 +106,10 @@ async def schwab_auth_callback(code: str, request: Request, state: str | None = 
     broker = SchwabBroker()
     try:
         await broker.exchange_code_for_tokens(code)
+        # Drop any cached broker instance so the next request rebuilds and loads
+        # the freshly-stored tokens instead of reusing a stale in-memory token.
+        from app.services.brokers.factory import reset_broker_cache
+        reset_broker_cache()
         return {"status": "success", "message": "Schwab tokens stored. You can now use the trading API."}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {exc}")

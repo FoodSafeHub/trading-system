@@ -90,7 +90,21 @@ class SchwabBroker(BrokerBase):
             logger.info("[schwab] Tokens exchanged successfully")
 
     async def authenticate(self) -> None:
-        """Load tokens from DB or env, refresh if needed."""
+        """Load tokens from DB or env, refresh if needed.
+
+        Fast path: if we already hold an access token in memory that is still
+        well within its validity window, trust it and skip the DB round-trip.
+        The broker instance is cached (see factory.get_broker), so this token
+        survives across requests — eliminating a per-call DB read on every
+        endpoint hit. Falls through to the DB/refresh path once near expiry.
+        """
+        now = datetime.now(tz=timezone.utc)
+        expiry = self._token_expiry
+        if expiry and expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        if self._access_token and expiry and (expiry - now).total_seconds() > TOKEN_REFRESH_BUFFER_SECONDS:
+            return
+
         # Try loading from DB first
         stored = await self._load_tokens_from_db()
         if not stored:

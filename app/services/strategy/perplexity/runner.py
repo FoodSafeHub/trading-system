@@ -29,6 +29,18 @@ from app.services.strategy.perplexity.momentum_strategies import (
     PerpThreeBarPush,
     PerpHammerShootingStar,
 )
+from app.services.strategy.perplexity.india_swing_strategies import (
+    NiftyLeaderPullback,
+    FiftyTwoWeekHighBreakout,
+    VcpContractionBreakout,
+)
+from app.services.strategy.perplexity.india_advanced_strategies import (
+    MomentumBreakout,
+    TrendPullbackEma,
+    TrendFollowingHHHL,
+    SupportResistanceBounce,
+    WyckoffSpringTest,
+)
 
 PERPLEXITY_STRATEGIES: List[PerplexityStrategy] = [
     EmaMeanReversionUptrend(),
@@ -43,6 +55,17 @@ PERPLEXITY_STRATEGIES: List[PerplexityStrategy] = [
     PerpNarrowRangeBreakout(),
     PerpThreeBarPush(),
     PerpHammerShootingStar(),
+    # India swing set (research_only until the Nifty-100+midcap backtest
+    # justifies flipping each flag — see project_india_swing_revamp).
+    NiftyLeaderPullback(),
+    FiftyTwoWeekHighBreakout(),
+    VcpContractionBreakout(),
+    # Five advanced India strategies (spec-driven; research_only until backtested).
+    MomentumBreakout(),
+    TrendPullbackEma(),
+    TrendFollowingHHHL(),
+    SupportResistanceBounce(),
+    WyckoffSpringTest(),
 ]
 
 
@@ -81,6 +104,23 @@ def _current_atr(df: pd.DataFrame, period: int = 14) -> float:
     return v
 
 
+def _live_benchmark_close(symbol: str) -> "pd.Series | None":
+    """Latest benchmark index close series for RS-relative strategies (live path).
+
+    India symbols rate vs ^NSEI, US vs SPY. This is the LIVE path, so using
+    current data is correct (no point-in-time concern). The provider caches the
+    fetch, so repeated scanner calls don't hammer the network. Returns None on
+    any failure — RS strategies then degrade to "no RS" (HOLD), never crash.
+    """
+    try:
+        from app.services.markets import is_india_symbol
+        from app.services.market_data.provider import get_ohlcv
+        ticker = "^NSEI" if is_india_symbol(symbol) else "SPY"
+        return get_ohlcv(ticker, period="2y")["Close"]
+    except Exception:
+        return None
+
+
 def run_perplexity_signal(
     symbol: str,
     df: pd.DataFrame,
@@ -99,15 +139,18 @@ def run_perplexity_signal(
         suitability_config = None
 
     volatility_bucket = bucket_atr_pct(_current_atr(df)) if not df.empty else "unknown"
+    # Benchmark for RS-relative India strategies (Momentum_Breakout, Trend_Following).
+    # Without this they get no benchmark and never fire. Live data is correct here.
+    benchmark_close = _live_benchmark_close(symbol) if not df.empty else None
 
     for strategy in get_perplexity_strategies():
-        # Skip strategies that are off entirely (RETIRE set) or held back from
-        # live signals pending further research (RESEARCH-ONLY / NEEDS-FOLLOW-
-        # UP sets). Backtests still load these via PERPLEXITY_STRATEGIES — the
-        # filter applies only to the LIVE signal path.
+        # Skip strategies that are off entirely (RETIRE set). RESEARCH-ONLY
+        # strategies ARE surfaced here so their signals appear in Live Signals /
+        # Scanner for inspection — but they remain net-losing in backtest and
+        # must NOT be auto-traded until validated. Going live (auto-trade)
+        # requires a separate, explicit symbol→strategy assignment on the
+        # Strategy page; surfacing a signal here does not place any order.
         if not strategy.enabled:
-            continue
-        if getattr(strategy, "research_only", False):
             continue
         try:
             sig = strategy.run(
@@ -116,6 +159,7 @@ def run_perplexity_signal(
                 regime=regime,
                 volatility_bucket=volatility_bucket,
                 suitability_config=suitability_config,
+                benchmark_close=benchmark_close,
             )
             if sig.direction == "BUY" and suitability_config is not None:
                 allowed, reason = is_strategy_suitable(
