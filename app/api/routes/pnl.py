@@ -844,7 +844,9 @@ def pnl_open_trails(db: Session = Depends(get_db)):
 
         est_trail_trigger = None
         if order_type == "SIGNAL_ONLY" and sig_price and sig_price > 0:
-            _tp = assigned_trail_pct.get(sym, 2.0)
+            # None = assignment left trail unset (live trail derives it from ATR);
+            # for this display estimate fall back to 2% since we don't compute ATR here.
+            _tp = assigned_trail_pct.get(sym) or 2.0
             floor = sig_price * 1.0025
             # Use the persisted peak when present; else reconstruct from OHLCV.
             peak = peak_price or 0.0

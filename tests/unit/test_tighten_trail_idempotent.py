@@ -270,6 +270,45 @@ async def test_trail_hit_exits_at_market_not_invalid_stop():
     assert placed.side == "SELL"
 
 
+async def test_trail_pct_none_derives_from_atr():
+    """When the caller passes no explicit trail_pct (assignment left it unset),
+    the width is derived from the ATR engine (_volatility_trail_pct), NOT the old
+    flat 2%. Here we stub ATR to return 4% → trail level = 105×0.96 = 100.80, and
+    the native handoff uses trail_value 4.0 rather than 2.0."""
+    broker = _FakeBroker(working_orders=[], price=105.0)
+    svc = _svc(broker)
+
+    with patch.object(svc, "_volatility_trail_pct", return_value=4.0) as vol:
+        ok = await svc.tighten_trail_on_sell(
+            symbol="AAPL", quantity=10, account_id="X", signal_price=100.0,
+            trail_pct=None,
+        )
+
+    assert ok is True
+    vol.assert_called_once()               # ATR engine consulted
+    placed = broker.place_calls[0]
+    assert placed.order_type == "TRAILING_STOP"
+    assert placed.trail_value == pytest.approx(4.0)  # ATR width, not 2.0
+
+
+async def test_explicit_trail_pct_skips_atr():
+    """An explicit per-assignment trail_pct wins — the ATR engine is NOT consulted
+    (assignment overrides ATR)."""
+    broker = _FakeBroker(working_orders=[], price=105.0)
+    svc = _svc(broker)
+
+    with patch.object(svc, "_volatility_trail_pct", return_value=4.0) as vol:
+        ok = await svc.tighten_trail_on_sell(
+            symbol="AAPL", quantity=10, account_id="X", signal_price=100.0,
+            trail_pct=2.0,
+        )
+
+    assert ok is True
+    vol.assert_not_called()                # explicit value → ATR bypassed
+    placed = broker.place_calls[0]
+    assert placed.trail_value == pytest.approx(2.0)
+
+
 async def test_ratchets_up_when_target_higher():
     # No native broker; resting STOP 100.50 < target 102.90 → ratchet up.
     # (resting 100.50 implies peak 102.55; current 105 implies peak 105 — the

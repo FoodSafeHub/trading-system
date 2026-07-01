@@ -244,7 +244,8 @@ def _reconcile_trail_stops(
                 continue  # assigned strategy hasn't flagged an exit — leave it
 
             asgn = next((a for a in assignments if a["symbol"].upper() == symbol), None)
-            trail_pct = trail_pcts.get(symbol, 2.0)
+            # None → tighten_trail_on_sell derives an ATR-adaptive width.
+            trail_pct = trail_pcts.get(symbol)
             sig_price = float(sig.price_at_signal)
             exec_svc, exec_acct = svc_for((asgn or {}).get("broker", "default") or "default")
 
@@ -254,8 +255,9 @@ def _reconcile_trail_stops(
             # holds off below the arm gate and only ratchets the floored STOP up.
             logger.info(
                 "[scheduler] Trail reconcile: %s held=%.4f assigned SELL @ $%.2f "
-                "(%s) — evaluating %.1f%% floored trail.",
-                symbol, qty, sig_price, sig.strategy_name, trail_pct,
+                "(%s) — evaluating %s floored trail.",
+                symbol, qty, sig_price, sig.strategy_name,
+                f"{trail_pct:.1f}%" if trail_pct is not None else "ATR-adaptive",
             )
             try:
                 ok = loop.run_until_complete(exec_svc.tighten_trail_on_sell(
@@ -1263,10 +1265,12 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                     # ── Assigned strategy SELL → tight trailing stop ─────────
                     # Only the ASSIGNED strategy for this symbol can trigger
                     # the tight trail. Trail % comes from the assignment row
-                    # (set during backtesting via the Promote UI). Falls back
-                    # to 2.0% when not explicitly configured.
+                    # (set during backtesting via the Promote UI). When not
+                    # explicitly configured we pass None → tighten_trail_on_sell
+                    # derives an ATR-adaptive width.
                     exec_svc, exec_acct = _svc_for(asgn_broker)
-                    trail_pct = float(asgn.get("tight_trail_pct") or 2.0)
+                    _tp = asgn.get("tight_trail_pct")
+                    trail_pct = float(_tp) if _tp else None
 
                     # Resolve (don't yet consume) the signal id so we can link it
                     # to the trail order. We only mark it acted_on if the trail
@@ -1277,9 +1281,11 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                     sig_id = _pending_signal_id(symbol, direction, label)
 
                     logger.info(
-                        "[scheduler] SELL signal %s: placing %.1f%% tight trail "
+                        "[scheduler] SELL signal %s: placing %s tight trail "
                         "(assignment trail_pct=%s)",
-                        symbol, trail_pct, asgn.get("tight_trail_pct"),
+                        symbol,
+                        f"{trail_pct:.1f}%" if trail_pct is not None else "ATR-adaptive",
+                        asgn.get("tight_trail_pct"),
                     )
                     trail_ok = loop.run_until_complete(exec_svc.tighten_trail_on_sell(
                         symbol=symbol,
@@ -1437,15 +1443,16 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                             pass
                         continue
 
-                    c_trail_pct = float(
-                        (c_asgn.get("tight_trail_pct") if c_asgn else None) or 2.0
-                    )
+                    _c_tp = c_asgn.get("tight_trail_pct") if c_asgn else None
+                    c_trail_pct = float(_c_tp) if _c_tp else None
                     sig_id = _persist_signal(symbol, direction, consensus_label, entry_p or None)
                     exec_svc, exec_acct = _svc_for(c_broker)
                     logger.info(
-                        "[scheduler] Consensus SELL %s: placing %.1f%% tight trail "
+                        "[scheduler] Consensus SELL %s: placing %s tight trail "
                         "(broker=%s, trail_pct=%s)",
-                        symbol, c_trail_pct, c_broker,
+                        symbol,
+                        f"{c_trail_pct:.1f}%" if c_trail_pct is not None else "ATR-adaptive",
+                        c_broker,
                         (c_asgn or {}).get("tight_trail_pct"),
                     )
                     c_trail_ok = loop.run_until_complete(exec_svc.tighten_trail_on_sell(

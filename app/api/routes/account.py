@@ -3,7 +3,11 @@ from typing import List
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.account import AccountSummary, Position, Quote
-from app.services.brokers.factory import _build_one, get_broker
+from app.services.brokers.factory import (
+    _build_one,
+    get_broker,
+    get_position_brokers,
+)
 
 router = APIRouter(prefix="/account", tags=["account"])
 
@@ -12,9 +16,23 @@ _KNOWN_BROKERS = {"paper", "schwab", "webull", "zerodha"}
 
 @router.get("/summary", response_model=List[AccountSummary])
 async def get_account_summary():
-    broker = get_broker()
-    await broker.authenticate()
-    return await broker.get_accounts()
+    """Accounts across EVERY broker that could hold a position.
+
+    The cockpit builds its per-broker tabs from whatever this returns, so it
+    must enumerate all position-holding brokers (global route + per-assignment
+    overrides — Webull, Zerodha) rather than only the global broker. Otherwise a
+    broker off the active route (e.g. Webull under trade_routing="auto") never
+    appears on the dashboard even though it holds positions and cash. Best-
+    effort per broker: a failed auth degrades to skipping that broker, not a 500.
+    """
+    out: List[AccountSummary] = []
+    for b in get_position_brokers():
+        try:
+            await b.authenticate()
+            out.extend(await b.get_accounts())
+        except Exception:
+            continue
+    return out
 
 
 def _held_only(positions: List[Position]) -> List[Position]:
@@ -30,19 +48,27 @@ def _held_only(positions: List[Position]) -> List[Position]:
 
 @router.get("/positions", response_model=List[Position])
 async def get_positions(account_id: str = ""):
-    broker = get_broker()
-    await broker.authenticate()
-    accounts = await broker.get_accounts()
-    if not accounts:
-        raise HTTPException(status_code=404, detail="No accounts found")
-    # If account_id is empty and we're on MultiBroker, get_positions("") fans
-    # out across every broker and returns positions tagged with their broker.
-    # On a single broker, we still need to pass the resolved account_id.
+    # A specific account_id targets one broker (the global one owns it).
     if account_id:
+        broker = get_broker()
+        await broker.authenticate()
         return _held_only(await broker.get_positions(account_id))
-    if getattr(broker, "name", "").startswith("multi:"):
-        return _held_only(await broker.get_positions(""))
-    return _held_only(await broker.get_positions(accounts[0].account_id))
+
+    # No account_id → the cockpit's "all positions" call. Fan out across EVERY
+    # position-holding broker (global route + per-assignment overrides — Webull,
+    # Zerodha) so the dashboard shows holdings on brokers off the active route.
+    # Each Position is tagged with its broker. Best-effort per broker.
+    out: List[Position] = []
+    for b in get_position_brokers():
+        try:
+            await b.authenticate()
+            accts = await b.get_accounts()
+            if not accts:
+                continue
+            out.extend(await b.get_positions(accts[0].account_id))
+        except Exception:
+            continue
+    return _held_only(out)
 
 
 @router.get("/{broker}/summary", response_model=List[AccountSummary])

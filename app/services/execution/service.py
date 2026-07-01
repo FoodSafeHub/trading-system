@@ -587,7 +587,7 @@ class ExecutionService:
         signal_price: float,
         *,
         signal_at=None,
-        trail_pct: float = 2.0,
+        trail_pct: float | None = None,
         floor_buffer_pct: float = 0.25,
         source: str = "scheduler",
         idempotency_suffix: str = "",
@@ -711,6 +711,21 @@ class ExecutionService:
                 "or place a floored stop. Investigate manually.", symbol,
             )
             return False
+
+        # ── TRAIL WIDTH: assignment overrides ATR ────────────────────────────
+        # When the caller passed an explicit per-assignment tight_trail_pct we use
+        # it verbatim (the user tuned it deliberately). Only when it's unset
+        # (None) do we derive a volatility-aware width from the SAME ATR engine the
+        # BUY-side chandelier stop uses (_volatility_trail_pct): calm names trail
+        # tighter (less give-back), volatile names get room so normal pullbacks
+        # don't shake them out. Falls back to settings.trail_stop_pct if ATR is
+        # unavailable. Resolved here (after the price guard) so ATR sees a real price.
+        if trail_pct is None:
+            trail_pct = self._volatility_trail_pct(symbol, current_price)
+            logger.info(
+                "[exec] tighten_trail %s: no explicit assignment trail — using "
+                "ATR-adaptive trail_pct=%.2f%%.", symbol, trail_pct,
+            )
 
         # Has this trail EVER armed? The arm gate (below) only governs the FIRST
         # arming — once price has cleared the floor at any point, the trail is

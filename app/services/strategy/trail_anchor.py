@@ -43,9 +43,17 @@ def assigned_strategy_map(db: Session, symbols: list[str]) -> dict[str, str]:
     return out
 
 
-def assigned_trail_pct_map(db: Session, symbols: list[str], default: float = 2.0) -> dict[str, float]:
-    """Return {SYMBOL: tight_trail_pct} (assignment value, else `default`)."""
-    out: dict[str, float] = {}
+def assigned_trail_pct_map(
+    db: Session, symbols: list[str], default: float | None = None
+) -> dict[str, float | None]:
+    """Return {SYMBOL: tight_trail_pct} — the explicit per-assignment trail %,
+    or `default` when the assignment left it unset.
+
+    `default=None` (the new default) preserves "unset" so the caller/
+    tighten_trail_on_sell can fall back to the ATR-adaptive _volatility_trail_pct
+    instead of a flat 2%. Pass a number to force a concrete fallback.
+    """
+    out: dict[str, float | None] = {}
     if not symbols:
         return out
     for a in (
@@ -56,7 +64,8 @@ def assigned_trail_pct_map(db: Session, symbols: list[str], default: float = 2.0
         )
         .all()
     ):
-        out[a.symbol.upper()] = float(a.tight_trail_pct or default)
+        tp = a.tight_trail_pct
+        out[a.symbol.upper()] = float(tp) if tp else default
     return out
 
 
