@@ -165,7 +165,11 @@ class OpenTrailOut(BaseModel):
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 _last_broker_sync_ts: float = 0.0
-_BROKER_SYNC_THROTTLE_SECONDS = 30.0
+# On-read reconcile throttle. Kept short so a close reflects on the PnL page
+# quickly (bot-driven trail-hit exits now also persist their fill inline, so
+# this mainly covers broker-native / manual closes). 10s balances freshness
+# against hammering the broker on rapid refreshes.
+_BROKER_SYNC_THROTTLE_SECONDS = 10.0
 
 
 def _maybe_sync_broker_orders() -> None:

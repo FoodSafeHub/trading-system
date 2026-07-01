@@ -34,6 +34,37 @@ class ExecutionService:
     def __init__(self, broker: BrokerBase) -> None:
         self.broker = broker
 
+    def _quantize_qty(self, shares: float) -> float:
+        """Round a share count DOWN to a quantity this broker will accept.
+
+        Live brokers (Schwab cash accounts especially) reject fractional equity
+        orders, so floor to whole shares; the paper broker accepts fractions.
+        Used by the max-position-size clamp so a fitted qty is actually tradable.
+        Floors (never rounds up) so the clamped order can't exceed the limit.
+        """
+        if getattr(self.broker, "name", "") == "paper":
+            return max(round(shares, 6), 0.0)
+        whole = int(shares)  # truncates toward zero
+        return float(whole) if whole >= 1 else 0.0
+
+    async def _held_quantity(self, symbol: str, account_id: str) -> float:
+        """Current long quantity held for `symbol` at this broker (0 if none).
+
+        Best-effort: any failure returns 0.0, so the max-position clamp treats
+        the symbol as flat rather than blocking a trade on a transient read
+        error (the broker still enforces its own buying power as a backstop).
+        """
+        try:
+            positions = await self.broker.get_positions(account_id)
+        except Exception as exc:
+            logger.debug("[exec] _held_quantity %s: position read failed: %s", symbol, exc)
+            return 0.0
+        sym = symbol.upper()
+        for p in positions or []:
+            if (getattr(p, "symbol", "") or "").upper() == sym:
+                return max(0.0, float(getattr(p, "quantity", 0.0) or 0.0))
+        return 0.0
+
     async def execute(
         self,
         order_req: OrderRequest,
@@ -55,8 +86,39 @@ class ExecutionService:
             f"x{order_req.quantity:.2f} (key={order_req.idempotency_key})"
         )
 
+        # ── Step 0b: Clamp a BUY so TOTAL held value fits the max, don't block ─
+        # max_position_size_usd is a ceiling on the TOTAL value that may be HELD
+        # for a symbol at any time — NOT a per-order or minimum-order size. So a
+        # BUY is clamped by the ROOM LEFT under the cap (cap − already-held
+        # value), and the largest whole-share qty that fits that room is what we
+        # send. Examples:
+        #   • HLT flat, cap $1,000, 4 sh × $332 = $1,332 → room $1,000 → 3 sh ($996).
+        #   • HLT already holding 2 sh ($664), cap $1,000 → room $336 → 1 sh top-up.
+        #   • HLT already at/over the cap → room ≤ 0 → 0 sh → blocked below.
+        # Only when even one broker-tradable share won't fit the remaining room
+        # does the order fall through to be blocked by the risk gate.
+        px_for_clamp = estimated_price or order_req.limit_price or 0.0
+        held_value_usd = 0.0
+        if order_req.side == "BUY" and px_for_clamp > 0:
+            max_usd = get_settings().max_position_size_usd
+            held_qty = await self._held_quantity(order_req.symbol, account_id)
+            held_value_usd = max(0.0, held_qty) * px_for_clamp
+            room_usd = max_usd - held_value_usd
+            if order_req.quantity * px_for_clamp > room_usd:
+                fitted = self._quantize_qty(room_usd / px_for_clamp) if room_usd > 0 else 0.0
+                if fitted < order_req.quantity:
+                    logger.info(
+                        "[exec] %s %s: clamped %.4f → %.4f sh so TOTAL held fits max "
+                        "$%.2f (held %.4f sh = $%.2f, room $%.2f, @ $%.2f).",
+                        order_req.side, order_req.symbol, order_req.quantity,
+                        fitted, max_usd, held_qty, held_value_usd, room_usd, px_for_clamp,
+                    )
+                    order_req.quantity = fitted
+
         # ── Step 1: Risk checks ─────────────────────────────────────────────
-        risk_result = _risk.check(order_req, estimated_price=estimated_price)
+        risk_result = _risk.check(
+            order_req, estimated_price=estimated_price, held_value_usd=held_value_usd,
+        )
         if not risk_result.passed:
             logger.warning("[exec] Risk BLOCKED: %s", risk_result.blocked_reason)
             _audit.log(
@@ -546,19 +608,26 @@ class ExecutionService:
           1. ARM GATE — don't place any trailing protection until price has
              crossed signal_price × (1 + floor_buffer_pct/100). Below that the
              SELL is "pending arm": we return True (the position keeps whatever
-             protective stop it already had) and re-check next cycle.
+             protective stop it already had) and re-check next cycle. This is a
+             small confirmation the move is running, not just the arm point.
 
-          2. HARD FLOOR — once armed, the protective stop is
-                 max(current_price × (1 − trail_pct/100), floor)
-             where floor = signal_price × (1 + floor_buffer_pct/100). The trail
-             follows price up, but the stop can NEVER drop below the floor, so a
-             reversal still exits at least floor_buffer_pct% ABOVE the signal.
+          2. SIGNAL FLOOR — once armed, the protective stop is
+                 max(peak × (1 − trail_pct/100), signal_price)
+             The trail follows the peak up, but the stop can NEVER drop below the
+             SIGNAL PRICE. Crucially it CAN sit below the arm gate: right after
+             arming, peak × (1 − trail%) is usually under the signal, so the stop
+             clamps to the signal (breakeven-vs-signal) — giving the move room to
+             RIDE instead of hair-triggering a +0.25% exit at the arm point. Once
+             the peak runs past ~(floor_buffer + trail)% the trail overtakes the
+             signal and the true trailing stop takes over. A reversal therefore
+             exits at worst at the signal price (never a loss vs the signal), and
+             better as the trail climbs.
 
         We place a STATIC STOP (not a broker-native TRAILING_STOP) on ALL
         brokers and re-compute/ratchet it every cycle, because a native % trail
         computes its trigger as high−trail% and would happily sit below the
-        floor — defeating part 2. This is the bot-computed management the user
-        asked for ("if it is not possible at the broker level, you as a bot
+        signal floor — defeating part 2. This is the bot-computed management the
+        user asked for ("if it is not possible at the broker level, you as a bot
         compute them and place the orders").
 
         Idempotency / ratchet: a resting stop is only cancel/replaced when the
@@ -569,7 +638,9 @@ class ExecutionService:
 
         trail_pct defaults to 2.0% — wide enough to absorb normal intraday noise
         before exiting while still capturing most of the post-signal upside.
-        floor_buffer_pct defaults to 0.25% — the arm threshold AND the floor.
+        floor_buffer_pct defaults to 0.25% — the ARM threshold only (NOT the stop
+        floor; the stop floor is the signal price, so an armed trade can ride
+        with room down to breakeven-vs-signal rather than exiting at +0.25%).
 
         signal_id: the Signal row id for this SELL signal. Linked to the stop
         order so PnL audit can show signal_price vs actual exit price.
@@ -615,10 +686,24 @@ class ExecutionService:
         if signal_price <= 0 and current_price > 0:
             signal_price = current_price
 
-        # floor = signal × (1 + floor_buffer_pct/100): the lowest the protective
-        # stop may ever sit (locks in floor_buffer_pct% over the signal). Also the
-        # ARM threshold — price must clear the floor before we place anything.
-        floor = round(signal_price * (1.0 + floor_buffer_pct / 100.0), 2) if signal_price > 0 else 0.0
+        # Two DISTINCT levels (previously conflated into one "floor", which made
+        # the stop a hair-trigger right at the arm point and booked +0.25% on any
+        # wiggle instead of riding the move):
+        #
+        #   arm_gate  = signal × (1 + floor_buffer_pct/100)
+        #       The ARM THRESHOLD only. Price must clear this before we place any
+        #       protective stop — a small confirmation that the move is running,
+        #       not reversing. Below it the SELL rides unprotected (pending arm).
+        #
+        #   stop_floor = signal_price
+        #       The lowest the ACTIVE stop may ever sit. Clamping to the signal
+        #       (not signal + buffer) lets the trail ride BELOW the arm gate while
+        #       still guaranteeing a reversal never exits below the signal price
+        #       ("ride the momentum, but never at a loss vs the signal"). Once the
+        #       peak runs far enough, peak × (1 − trail%) overtakes the signal and
+        #       the true trailing stop takes over.
+        arm_gate = round(signal_price * (1.0 + floor_buffer_pct / 100.0), 2) if signal_price > 0 else 0.0
+        floor = round(signal_price, 2) if signal_price > 0 else 0.0
 
         if current_price <= 0:
             logger.error(
@@ -639,7 +724,7 @@ class ExecutionService:
         already_armed = False
         try:
             stored_peak = self._stored_trail_peak(symbol, signal_id)
-            if floor > 0 and stored_peak >= floor:
+            if arm_gate > 0 and stored_peak >= arm_gate:
                 already_armed = True
         except Exception as exc:
             logger.debug("[exec] tighten_trail %s: stored-peak read failed: %s", symbol, exc)
@@ -652,19 +737,19 @@ class ExecutionService:
         # SKIPPED once the trail has already armed (stored peak cleared the floor):
         # from then on we always evaluate the trail-hit / ratchet logic below, so a
         # reversal exits instead of riding the position down.
-        if floor > 0 and current_price < floor and not already_armed:
+        if arm_gate > 0 and current_price < arm_gate and not already_armed:
             logger.info(
-                "[exec] tighten_trail %s: SELL pending arm — current $%.2f < floor "
+                "[exec] tighten_trail %s: SELL pending arm — current $%.2f < arm gate "
                 "$%.2f (signal $%.2f + %.2f%%). Riding momentum; re-check next cycle.",
-                symbol, current_price, floor, signal_price, floor_buffer_pct,
+                symbol, current_price, arm_gate, signal_price, floor_buffer_pct,
             )
             return True
-        if already_armed and current_price < floor:
+        if already_armed and current_price < arm_gate:
             logger.info(
-                "[exec] tighten_trail %s: trail already armed (stored peak ≥ floor "
-                "$%.2f) but price $%.2f fell back below floor — evaluating trail-hit "
-                "exit (do NOT re-enter pending-arm).",
-                symbol, floor, current_price,
+                "[exec] tighten_trail %s: trail already armed (stored peak ≥ arm gate "
+                "$%.2f) but price $%.2f fell back below it — evaluating trail-hit "
+                "exit against the signal-price floor (do NOT re-enter pending-arm).",
+                symbol, arm_gate, current_price,
             )
 
         suffix = idempotency_suffix or str(int((signal_price or current_price) * 100))
@@ -792,16 +877,16 @@ class ExecutionService:
         except Exception as exc:
             logger.debug("[exec] tighten_trail %s: peak lookup failed: %s", symbol, exc)
         # The resting stop only encodes a real prior peak when it was set by the
-        # TRAIL, i.e. it sits ABOVE the floor. When the floor binds (floor >
-        # trail level) the resting stop equals the floor, and back-computing a
-        # peak from it (floor / (1 − trail%)) fabricates a high-water mark price
-        # never traded — e.g. NVDA: floor $198.66 → phantom peak $202.71 vs a
-        # true intraday high of $199.47. That phantom then sticks forever via the
-        # monotonic stored peak. Only seed from the resting stop when it clears
-        # the floor (so it reflects an actual trail level, not the floor).
+        # TRAIL, i.e. it sits ABOVE the floor (signal). When the floor/clamp binds
+        # the resting stop equals the signal-floor, and back-computing a peak from
+        # it (level / (1 − trail%)) fabricates a high-water mark never traded —
+        # e.g. NVDA: floor $198.66 → phantom peak $202.71 vs a true intraday high
+        # of $199.47. That phantom then sticks forever via the monotonic stored
+        # peak. Only seed from the resting stop when its implied peak clears the
+        # arm gate (so it reflects an actual trail level, not the floor/clamp).
         if resting_level > floor and trail_pct < 100.0:
             implied_peak = resting_level / (1.0 - trail_pct / 100.0)
-            if implied_peak > peak:
+            if implied_peak > arm_gate and implied_peak > peak:
                 peak = implied_peak
 
         # Merge with (and write back) the durable stored peak. This both reads the
@@ -869,9 +954,19 @@ class ExecutionService:
                         f"${peak:.2f}, signal ${signal_price:.2f}, signal_id={signal_id})"
                     ),
                 )
+                # Confirm the fill NOW and persist it as filled, so the close
+                # reflects on the PnL page immediately instead of waiting for the
+                # throttled on-read reconcile / 15-min job. A MARKET SELL fills
+                # right away; without this the position lingered as "open".
+                confirmed = await self._confirm_broker_status(
+                    resp.broker_order_id, account_id, ex_order.id
+                )
+                if confirmed and confirmed.status in ("filled", "partial"):
+                    self._handle_fill(ex_order.id, confirmed)
                 logger.info(
                     "[exec] tighten_trail %s: market exit placed (trail hit) "
-                    "broker_id=%s", symbol, resp.broker_order_id,
+                    "broker_id=%s status=%s", symbol, resp.broker_order_id,
+                    (confirmed.status if confirmed else "submitted"),
                 )
                 return True
             except Exception as exc:

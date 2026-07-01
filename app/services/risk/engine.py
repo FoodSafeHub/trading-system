@@ -191,7 +191,12 @@ class RiskEngine:
 
     # ── Main check ───────────────────────────────────────────────────────────
 
-    def check(self, order: OrderRequest, estimated_price: Optional[float] = None) -> RiskCheckResult:
+    def check(
+        self,
+        order: OrderRequest,
+        estimated_price: Optional[float] = None,
+        held_value_usd: float = 0.0,
+    ) -> RiskCheckResult:
         s = self._settings
         warnings = []
 
@@ -252,18 +257,30 @@ class RiskEngine:
                 blocked_reason=f"Duplicate order detected (idempotency_key={order.idempotency_key})",
             )
 
-        # 7. Max position size
+        # 7. Max position size — a ceiling on TOTAL held value for the symbol,
+        #    NOT a per-order limit. A BUY is judged by what the position becomes
+        #    (already-held value + this order), so a legitimate top-up that stays
+        #    under the cap passes, and only an order that would push the TOTAL
+        #    past the cap is blocked. SELLs reduce exposure and are never gated
+        #    here. held_value_usd is supplied by the caller (execution service),
+        #    which knows the current broker holding; defaults to 0 for callers
+        #    that don't (treats the order as the whole position, as before).
         price = estimated_price or order.limit_price or 0
         order_value = price * order.quantity
-        if order_value > s.max_position_size_usd:
+        total_value = order_value + max(0.0, held_value_usd) if order.side == "BUY" else order_value
+        if order.side == "BUY" and total_value > s.max_position_size_usd:
             return RiskCheckResult(
                 passed=False,
                 blocked_reason=(
-                    f"Order value ${order_value:.2f} exceeds max position size ${s.max_position_size_usd:.2f}"
+                    f"Total position value ${total_value:.2f} (held ${held_value_usd:.2f} "
+                    f"+ order ${order_value:.2f}) exceeds max position size "
+                    f"${s.max_position_size_usd:.2f}"
                 ),
             )
-        elif order_value > s.max_position_size_usd * 0.8:
-            warnings.append(f"Order value ${order_value:.2f} is >80% of position size limit")
+        elif order.side == "BUY" and total_value > s.max_position_size_usd * 0.8:
+            warnings.append(
+                f"Total position value ${total_value:.2f} is >80% of position size limit"
+            )
 
         # 8. Daily loss
         daily_loss = self._daily_realized_loss()

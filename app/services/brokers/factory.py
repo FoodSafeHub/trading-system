@@ -52,10 +52,17 @@ def reset_broker_cache() -> None:
 
 
 def _resolve_routing(routing: str, active_broker: str) -> List[str]:
-    """Translate the trade_routing config into a concrete list of broker names."""
+    """Translate the trade_routing config into a concrete list of broker names.
+
+    Note: this governs the GLOBAL broker used for reads and for orders that
+    aren't per-BUY cash-routed. "cash_aware" resolves the same US broker set as
+    "both" here so reads (positions/quotes) see both Schwab and Webull; the
+    actual cash-based single-broker PICK for a default US BUY happens per-order
+    in the scheduler (see _pick_us_broker_by_cash), not here.
+    """
     if routing == "auto":
         return [active_broker]
-    if routing == "both":
+    if routing in ("both", "cash_aware"):
         return ["schwab", "webull"]
     return [routing]
 

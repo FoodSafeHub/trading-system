@@ -23,19 +23,20 @@ _ENV_PATH = Path(".env")
 
 
 class TradeRoutingResponse(BaseModel):
-    trade_routing: Literal["auto", "paper", "schwab", "webull", "zerodha", "both"]
+    trade_routing: Literal["auto", "paper", "schwab", "webull", "zerodha", "both", "cash_aware"]
     active_broker: Literal["paper", "schwab", "webull", "zerodha"]
     effective_brokers: list[str]
 
 
 class TradeRoutingUpdate(BaseModel):
-    trade_routing: Literal["auto", "paper", "schwab", "webull", "zerodha", "both"]
+    trade_routing: Literal["auto", "paper", "schwab", "webull", "zerodha", "both", "cash_aware"]
 
 
 def _effective_brokers(trade_routing: str, active_broker: str) -> list[str]:
     if trade_routing == "auto":
         return [active_broker]
-    if trade_routing == "both":
+    # cash_aware picks ONE US broker per BUY by cash, but both are eligible.
+    if trade_routing in ("both", "cash_aware"):
         return ["schwab", "webull"]
     return [trade_routing]
 
@@ -87,6 +88,12 @@ def set_trade_routing(payload: TradeRoutingUpdate) -> TradeRoutingResponse:
             "[settings] trade_routing -> zerodha: ALL orders now route to the India "
             "(Zerodha) broker. US symbols won't trade. Prefer per-assignment broker "
             "routing if you only want some symbols on Zerodha."
+        )
+    if new_value == "cash_aware":
+        logger.info(
+            "[settings] trade_routing -> cash_aware: each default-broker US BUY routes "
+            "to whichever US broker (Schwab/Webull) has the most fundable cash. SELLs "
+            "route to the broker holding the position; reads see both."
         )
 
     _upsert_env("TRADE_ROUTING", new_value)

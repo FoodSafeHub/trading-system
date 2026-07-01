@@ -70,6 +70,34 @@ class TestRiskEngine:
         assert not result.passed
         assert "exceeds max position size" in result.blocked_reason
 
+    def test_max_position_size_is_total_held_not_per_order(self):
+        # cap $1000. Already holding $800; a $150 top-up → total $950 ≤ cap → OK.
+        engine = self._engine(max_position_size_usd=1000)
+        with patch(_MARKET_HOURS_PATCH, return_value=True):
+            result = engine.check(
+                _order(qty=1, price=150), estimated_price=150.0, held_value_usd=800.0,
+            )
+        assert result.passed
+
+    def test_top_up_that_exceeds_cap_with_held_blocks(self):
+        # cap $1000. Holding $900; a $200 top-up → total $1100 > cap → block.
+        engine = self._engine(max_position_size_usd=1000)
+        with patch(_MARKET_HOURS_PATCH, return_value=True):
+            result = engine.check(
+                _order(qty=1, price=200), estimated_price=200.0, held_value_usd=900.0,
+            )
+        assert not result.passed
+        assert "exceeds max position size" in result.blocked_reason
+
+    def test_sell_never_gated_by_position_size(self):
+        # A SELL reduces exposure — the cap must never block it, even huge.
+        engine = self._engine(max_position_size_usd=100)
+        with patch(_MARKET_HOURS_PATCH, return_value=True):
+            result = engine.check(
+                _order(side="SELL", qty=50, price=200), estimated_price=200.0,
+            )
+        assert result.passed
+
     def test_daily_order_limit_blocks(self):
         engine = self._engine(max_orders_per_day=5)
         engine._orders_today = lambda: 5

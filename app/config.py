@@ -33,7 +33,11 @@ class Settings(BaseSettings):
     # Multi-broker trade routing. When "auto", falls back to active_broker
     # (backwards compatible). When "schwab"/"webull"/"zerodha", routes there only.
     # When "both", fans out every order to Schwab AND Webull.
-    trade_routing: Literal["auto", "paper", "schwab", "webull", "zerodha", "both"] = "auto"
+    # When "cash_aware", a default-broker US BUY routes to whichever US broker
+    # (Schwab or Webull) currently holds the most available cash that can fund
+    # the order; SELLs/exits still route to the broker that actually holds the
+    # position. Reads (positions, quotes) still see every broker.
+    trade_routing: Literal["auto", "paper", "schwab", "webull", "zerodha", "both", "cash_aware"] = "auto"
 
     # Schwab
     schwab_client_id: str = ""

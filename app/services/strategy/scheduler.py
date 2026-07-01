@@ -138,6 +138,54 @@ def _quantize_for_broker(shares: float) -> float:
     return float(whole) if whole >= 1 else 0.0
 
 
+# US brokers a "default"-broker symbol may route to under cash_aware routing.
+# Ordered so ties (equal cash) resolve to the first — Schwab, the historical
+# default — for stable, predictable routing.
+_US_BROKERS = ("schwab", "webull")
+
+
+def _us_held_qty(symbol: str, system: str, strategy_name: str) -> float:
+    """Aggregate this strategy's held qty for a symbol across US brokers.
+
+    Under cash_aware routing a symbol's lots can land on Schwab one cycle and
+    Webull the next. The per-strategy cap must see the COMBINED position or it
+    would re-buy the full cap on the broker that currently shows held=0 and
+    pyramid past max_capital_usd. Also includes the legacy "default" ledger key
+    so positions opened before cash_aware routing still count.
+    """
+    from app.services.strategy import strategy_ledger
+
+    total = 0.0
+    for bkey in (*_US_BROKERS, "default"):
+        try:
+            total += strategy_ledger.get_held(symbol, system, strategy_name, bkey)
+        except Exception:
+            pass
+    return total
+
+
+def _pick_us_broker_by_cash(cash_budget) -> str:
+    """Pick the US broker (schwab/webull) with the most available cash.
+
+    `cash_budget` is the scheduler's per-broker budget closure (already
+    decremented for this cycle's prior spends), so a broker that funded earlier
+    BUYs this cycle is correctly seen as having less left. Returns the broker
+    name with the largest budget; ties go to the first in _US_BROKERS (Schwab).
+    Falls back to "schwab" if no cash can be read.
+    """
+    best_name = _US_BROKERS[0]
+    best_cash = float("-inf")
+    for name in _US_BROKERS:
+        try:
+            cash = cash_budget(name)
+        except Exception:
+            continue
+        if cash > best_cash:
+            best_cash = cash
+            best_name = name
+    return best_name
+
+
 def _reconcile_trail_stops(
     loop, broker, account_id: str,
     current_positions: dict[str, float],
@@ -1057,6 +1105,26 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                             asgn_broker = "zerodha"
                     except Exception:
                         pass
+                # ── Cash-aware US broker pick (default-broker symbols only) ──
+                # Under trade_routing="cash_aware", a default US BUY routes to
+                # whichever US broker (Schwab/Webull) currently has the most
+                # fundable cash — resolved BEFORE the cash gate so the budget
+                # check, _spend_cash, and _svc_for all use the picked broker.
+                # SELLs are untouched here (they route to whoever holds the lot,
+                # below). India symbols already became "zerodha" above.
+                cash_aware_us = (
+                    direction == "BUY"
+                    and asgn_broker == "default"
+                    and settings.trade_routing == "cash_aware"
+                )
+                if cash_aware_us:
+                    asgn_broker = _pick_us_broker_by_cash(_cash_budget)
+                    logger.info(
+                        "[scheduler] BUY %s (%s:%s) cash-aware → routing to %r "
+                        "(most cash of %s).",
+                        symbol, sig_system, sig_strategy, asgn_broker,
+                        "/".join(_US_BROKERS),
+                    )
                 if direction == "BUY":
                     # Held-qty for the cap. Start from THIS strategy's ledger lot so
                     # several strategies on one symbol each size against their own
@@ -1065,9 +1133,16 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                     # to self-heal if the ledger lagged or an older fill was never
                     # attributed (otherwise a held=0 read re-buys the full cap every
                     # cycle and pyramids past max_capital_usd / max_shares).
-                    strat_held = strategy_ledger.get_held(
-                        symbol, sig_system, sig_strategy, asgn_broker
-                    )
+                    #
+                    # Under cash_aware routing a symbol's lots can span Schwab AND
+                    # Webull, so sum the held qty across US brokers for the cap —
+                    # otherwise it re-buys the full cap on the broker showing 0.
+                    if cash_aware_us:
+                        strat_held = _us_held_qty(symbol, sig_system, sig_strategy)
+                    else:
+                        strat_held = strategy_ledger.get_held(
+                            symbol, sig_system, sig_strategy, asgn_broker
+                        )
                     n_asgn_for_symbol = sum(
                         1 for a in assignments if a["symbol"] == symbol
                     )

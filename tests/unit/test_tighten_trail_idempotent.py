@@ -123,10 +123,12 @@ async def test_pending_arm_below_gate_places_nothing():
     assert broker.cancel_calls == []
 
 
-async def test_floored_stop_while_trail_below_floor():
-    # Just above the gate: current 100.30, trail 100.30×0.98=98.29 < floor 100.25
-    # → still bot-managed static STOP, and the floor governs (stop = 100.25),
-    # not the sub-floor trail level. No native handoff yet.
+async def test_floored_stop_while_trail_below_signal():
+    # Just above the arm gate: current 100.30, trail 100.30×0.98=98.29 < signal.
+    # The active stop clamps to the SIGNAL price (100.00), NOT signal×1.0025 —
+    # so the trade rides the momentum with room, and a reversal exits at
+    # breakeven-vs-signal rather than hair-triggering at +0.25%. Still a
+    # bot-managed static STOP; no native handoff yet (trail level < signal).
     broker = _FakeBroker(working_orders=[], price=100.30)
     svc = _svc(broker)
 
@@ -138,7 +140,28 @@ async def test_floored_stop_while_trail_below_floor():
     assert len(broker.place_calls) == 1
     placed = broker.place_calls[0]
     assert placed.order_type == "STOP"
-    assert placed.stop_price == pytest.approx(100.25, abs=0.01)  # floor wins
+    assert placed.stop_price == pytest.approx(100.0, abs=0.01)  # signal floor, not +0.25%
+
+
+async def test_small_pop_above_gate_does_not_book_quarter_percent():
+    # Regression for the reported bug: NVDA signal 198.16, price popped to ~199.47
+    # (+0.66%, above the +0.25% arm gate) but well under +2.25%, so the trail
+    # level (199.47×0.98=195.48) is below the signal. OLD behavior clamped the
+    # stop to signal×1.0025 (198.66) → a tiny pullback booked exactly +0.25%.
+    # NEW behavior clamps to the SIGNAL (198.16), giving the move room to ride
+    # while still never exiting below the signal.
+    broker = _FakeBroker(working_orders=[], price=199.47)
+    svc = _svc(broker)
+
+    ok = await svc.tighten_trail_on_sell(
+        symbol="NVDA", quantity=10, account_id="X", signal_price=198.16, trail_pct=2.0,
+    )
+
+    assert ok is True
+    placed = broker.place_calls[0]
+    assert placed.order_type == "STOP"
+    assert placed.stop_price == pytest.approx(198.16, abs=0.01)  # signal, not 198.66
+    assert placed.stop_price < 198.66  # would-have-been +0.25% floor
 
 
 async def test_hands_off_to_native_when_trail_clears_floor():

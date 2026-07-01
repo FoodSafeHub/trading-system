@@ -264,12 +264,51 @@ class SchwabBroker(BrokerBase):
                     account_id=sec.get("accountNumber", ""),
                     account_type=sec.get("type"),
                     buying_power=balances.get("buyingPower"),
-                    cash=balances.get("cashBalance"),
+                    cash=self._spendable_cash(sec),
                     equity=balances.get("liquidationValue"),
                     is_paper=False,
                 )
             )
         return results
+
+    @staticmethod
+    def _spendable_cash(sec: dict) -> float | None:
+        """The cash Schwab will actually let us SPEND on a new BUY right now.
+
+        The scheduler's cash gate uses this to avoid submitting orders Schwab
+        then rejects with "not enough available cash/buying power". `cashBalance`
+        OVER-reports for a CASH account: it includes UNSETTLED proceeds from
+        recent sells, which a cash account may not use to buy (good-faith
+        violation) — so Schwab rejects a BUY sized against cashBalance even
+        though the number "looks" available.
+
+        For CASH accounts, the truly-spendable figure is the SETTLED cash:
+        cashAvailableForTrading minus unsettledCash (equivalently, Schwab's own
+        cashAvailableForWithdrawal). For MARGIN accounts, buyingPower is the
+        right ceiling. Falls back through the available fields, finally to
+        cashBalance, so a schema change never blanks the budget entirely.
+        """
+        balances = sec.get("currentBalances", {}) or {}
+        acct_type = (sec.get("type") or "").upper()
+
+        if acct_type == "MARGIN":
+            for key in ("buyingPower", "cashAvailableForTrading", "cashBalance"):
+                v = balances.get(key)
+                if v is not None:
+                    return float(v)
+            return None
+
+        # CASH account (default): settled cash only.
+        avail = balances.get("cashAvailableForTrading")
+        unsettled = balances.get("unsettledCash")
+        if avail is not None:
+            settled = float(avail) - float(unsettled or 0.0)
+            return max(0.0, settled)
+        for key in ("cashAvailableForWithdrawal", "cashBalance"):
+            v = balances.get(key)
+            if v is not None:
+                return float(v)
+        return None
 
     async def get_positions(self, account_id: str) -> List[Position]:
         account_hash = await self._get_account_hash()
