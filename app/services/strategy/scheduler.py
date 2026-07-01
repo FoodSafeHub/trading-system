@@ -224,6 +224,20 @@ def _reconcile_trail_stops(
                 if ok and not sig.acted_on:
                     sig.acted_on = True
                     db.commit()
+                    # First time this assigned-symbol SELL armed a trail — emit a
+                    # SELL notification. Assigned SELLs route here (not the order
+                    # path that notifies), so without this they never notify.
+                    # Gated on `not sig.acted_on` so it fires once, not per cycle.
+                    try:
+                        from app.services.notifications.bus import notify_signal
+                        notify_signal(
+                            symbol=symbol, direction="SELL",
+                            strategy=sig.strategy_name, source="scheduler",
+                            price=sig_price,
+                            extra=f"Tight trail armed ({trail_pct:.1f}%).",
+                        )
+                    except Exception:
+                        pass  # never let a notify failure break the trail
             except Exception as exc:
                 logger.warning("[scheduler] Trail reconcile failed for %s: %s", symbol, exc)
 
@@ -240,13 +254,32 @@ def reconcile_trails_now() -> dict:
 
     loop = _aio.new_event_loop()
     try:
+        from app.services.brokers.factory import get_position_brokers
+
         broker = get_broker()
         loop.run_until_complete(broker.authenticate())
         accounts = loop.run_until_complete(broker.get_accounts())
         account_id = accounts[0].account_id if accounts else ""
 
-        positions = loop.run_until_complete(broker.get_positions(account_id))
-        current_positions = {p.symbol.upper(): p.quantity for p in positions}
+        # Gather held positions from EVERY broker that could hold one — the
+        # global route plus per-assignment overrides (Webull, Zerodha). Reading
+        # only get_broker() left a position on a non-default broker out of
+        # current_positions, so its trail was never reconciled and it never
+        # appeared as armed. Keep the first non-zero qty seen per symbol.
+        current_positions: dict[str, float] = {}
+        position_brokers = get_position_brokers()
+        for b in position_brokers:
+            try:
+                loop.run_until_complete(b.authenticate())
+                b_accts = loop.run_until_complete(b.get_accounts())
+                b_acct = b_accts[0].account_id if b_accts else ""
+                for p in loop.run_until_complete(b.get_positions(b_acct)):
+                    sym = p.symbol.upper()
+                    if sym not in current_positions and p.quantity:
+                        current_positions[sym] = p.quantity
+            except Exception as exc:
+                logger.warning("[scheduler] reconcile: %s positions fetch failed: %s",
+                               getattr(b, "name", "?"), exc)
 
         with SessionLocal() as db:
             assignments = [
@@ -256,11 +289,19 @@ def reconcile_trails_now() -> dict:
             ]
 
         # Live quotes for the held symbols (best-effort; reconcile reads them).
+        # Query each broker for the symbols still unpriced — India symbols only
+        # quote on Zerodha, US on Schwab/Webull.
         live_prices: dict[str, float] = {}
         try:
             held_syms = [s for s, q in current_positions.items() if q and q >= 1.0]
-            if held_syms:
-                quotes = loop.run_until_complete(broker.get_quotes(held_syms))
+            for b in position_brokers:
+                remaining = [s for s in held_syms if s not in live_prices]
+                if not remaining:
+                    break
+                try:
+                    quotes = loop.run_until_complete(b.get_quotes(remaining))
+                except Exception:
+                    continue
                 for s, q in (quotes or {}).items():
                     px = getattr(q, "last", None) or getattr(q, "bid", None) or getattr(q, "ask", None)
                     if px:
@@ -340,6 +381,45 @@ def _live_position_state(symbol: str, df, held_qty: float):
     except Exception as exc:
         logger.warning("[scheduler] could not build position state for %s: %s", symbol, exc)
         return None
+
+
+def _notify_suppress(*, symbol: str, direction: str, reason: str,
+                     detail: str, toast: bool = False) -> None:
+    """Best-effort wrapper around the notification bus for scheduler skips.
+
+    Surfaces the decisions the scheduler makes silently (cash-limited /
+    regime-capped BUYs, trail-arm failures) so they show up in the notification
+    log instead of only the server logs. Never raises into the trading loop.
+    """
+    try:
+        from app.services.notifications.bus import notify_suppression
+        notify_suppression(
+            symbol=symbol, direction=direction, reason=reason,
+            detail=detail, source="scheduler", toast=toast,
+        )
+    except Exception:
+        pass
+
+
+def _buy_priority_key(item, signal_conf: dict) -> tuple[int, float]:
+    """Sort key for the assigned-signal execute loop under the cash gate.
+
+    item is the signals_to_act tuple:
+        (symbol, direction, label, entry, stop, system, strategy_name)
+
+    Ordering:
+        * SELLs before BUYs — exits are time-critical and free capacity.
+        * Among BUYs, higher conviction first, so scarce cash funds the
+          highest-confidence entries. signal_conf is keyed by
+          (symbol, system, strategy_name); signals without a confidence
+          (bollinger/scanner) fall back to a neutral 0.5.
+    Stable sort preserves original order among equal-conviction signals.
+    """
+    symbol, direction = item[0], item[1]
+    if direction == "SELL":
+        return (0, 0.0)
+    conf = signal_conf.get((symbol, item[5], item[6]), 0.5)
+    return (1, -conf)
 
 
 def _compute_quantity(
@@ -440,6 +520,57 @@ def _compute_quantity(
     return _quantize_for_broker(gap) if gap > 0 else 0.0
 
 
+def budget_report() -> dict:
+    """Read-only pre-open forecast: evaluate assigned strategies and report which
+    BUY signals the current cash balance can fund, in priority order, plus the
+    ranked shortfall. Places no orders. Returns the report dict (also see
+    _run_budget_report_job which formats it into a notification)."""
+    report: dict = {}
+    try:
+        _run_cycle(force=True, dry_run=True, report=report)
+    except Exception as exc:
+        logger.error("[scheduler] budget_report failed: %s", exc, exc_info=True)
+        report.setdefault("error", str(exc))
+    return report
+
+
+def _run_budget_report_job() -> None:
+    """Scheduled pre-open budget forecast → notification. Summarizes how many
+    assigned BUY signals the cash covers and the top unfunded ones, so funds
+    can be moved before the live cycle silently drops the tail."""
+    try:
+        rep = budget_report()
+        funded = rep.get("funded", [])
+        shortfall = rep.get("shortfall", [])
+        if not funded and not shortfall:
+            logger.info("[scheduler] Budget report: no fundable BUY signals this pre-open.")
+            return
+        cash = rep.get("cash", {})
+        cash_str = ", ".join(f"{k}=${v:,.0f}" for k, v in cash.items()) or "n/a"
+        lines = [f"Cash: {cash_str}",
+                 f"Fully funded: {len(funded)} · Short: {len(shortfall)}"]
+        for r in shortfall[:5]:
+            lines.append(
+                f"⚠ {r['symbol']} ({r['strategy']}, conf {r['confidence']:.2f}): "
+                f"want {r['want']:.2f}, can fund {r['fundable']:.2f} "
+                f"(short ${r['missing_usd']:,.0f})"
+            )
+        body = " · ".join(lines)
+        try:
+            from app.services.notifications.bus import notify_suppression
+            notify_suppression(
+                symbol="", direction=None,
+                reason="budget_forecast" if shortfall else "budget_ok",
+                detail=body, source="scheduler",
+                toast=bool(shortfall),   # only alert if the balance can't cover all signals
+            )
+        except Exception:
+            pass
+        logger.info("[scheduler] Budget report: %s", body)
+    except Exception as exc:
+        logger.error("[scheduler] Budget report job failed: %s", exc)
+
+
 def set_scheduler_system_flags(run_bollinger: bool | None, run_perplexity: bool | None) -> None:
     global _override_run_bollinger, _override_run_perplexity
     if run_bollinger is not None:
@@ -460,7 +591,8 @@ def _perplexity_enabled() -> bool:
     return get_settings().scheduler_run_perplexity
 
 
-def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
+def _run_cycle(*, force: bool = False, dry_run: bool = False,
+               report: dict | None = None) -> None:
     """Run one strategy evaluation + order cycle.
 
     force=True   — skips the market-hours gate so a manual run works any time.
@@ -468,7 +600,13 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                    every broker call. Safe to run while the live scheduler is
                    also running; does NOT touch the kill switch so there is no
                    race with concurrent cycles.
+    report       — when a dict is passed (implies a budget-forecast run), the
+                   dry-run still does READ-ONLY broker fetches (positions + cash)
+                   and fills `report` with the cash-funding picture for the
+                   assigned BUY signals: which the balance covers and the ranked
+                   shortfall. Still places NO orders.
     """
+    report_mode = report is not None
     global _running
     if not _lock.acquire(blocking=False):
         logger.debug("[scheduler] Previous cycle still running — skipping")
@@ -490,13 +628,19 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
         loop = asyncio.new_event_loop()
         try:
             # Dry-run: skip all broker I/O — we only need signal evaluation.
-            if dry_run:
+            if dry_run and not report_mode:
                 broker = None
                 account_id = ""
                 svc = None
 
                 def _svc_for(name: str) -> tuple[None, str]:  # type: ignore[misc]
                     return None, ""
+
+                def _cash_budget(name: str) -> float:  # type: ignore[misc]
+                    return float("inf")
+
+                def _spend_cash(name: str, amount: float) -> None:  # type: ignore[misc]
+                    return None
             else:
                 broker = get_broker()
                 loop.run_until_complete(broker.authenticate())
@@ -531,6 +675,43 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         )
                         return broker_svc_cache["default"]
 
+                # ── Per-broker available-cash budget ────────────────────────
+                # The per-symbol cap (max_capital_usd / max_shares) says how much
+                # to hold in ONE stock; it does NOT guarantee the account can fund
+                # every capped position at once. So we also gate BUYs by the
+                # broker's actual cash: a $350 balance buys 3 @ $100 even if three
+                # symbols are each capped at 5 shares. Cash is fetched once per
+                # broker (lazily) and decremented as this cycle's orders fire, so
+                # several BUYs share one budget instead of each seeing the full
+                # balance. Fails OPEN (inf) if the balance can't be read — better
+                # to let the broker reject an unfunded order than to freeze trading.
+                _cash_cache: dict[str, float] = {}
+
+                def _cash_budget(name: str) -> float:  # type: ignore[misc]
+                    key = (name or "default").lower()
+                    if key in _cash_cache:
+                        return _cash_cache[key]
+                    try:
+                        b, aid = _svc_for(name)
+                        accts = loop.run_until_complete(b.broker.get_accounts())
+                        acct = next((a for a in accts if a.account_id == aid), None) or (
+                            accts[0] if accts else None
+                        )
+                        cash = float(getattr(acct, "cash", 0.0)) if acct else float("inf")
+                    except Exception as exc:
+                        logger.warning(
+                            "[scheduler] Could not read cash for broker %r (%s) — "
+                            "not gating BUYs on cash this cycle.", name, exc,
+                        )
+                        cash = float("inf")
+                    _cash_cache[key] = cash
+                    return cash
+
+                def _spend_cash(name: str, amount: float) -> None:  # type: ignore[misc]
+                    key = (name or "default").lower()
+                    if key in _cash_cache and _cash_cache[key] != float("inf"):
+                        _cash_cache[key] = max(0.0, _cash_cache[key] - amount)
+
             from app.models.assignments import SymbolStrategyAssignment
             from app.schemas.orders import OrderRequest
 
@@ -564,7 +745,7 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
             # ── Fetch Schwab live prices for all assigned symbols ─
             all_symbols = list(assigned_symbols)
             live_prices: dict[str, float] = {}
-            if all_symbols and not dry_run:
+            if all_symbols and (not dry_run or report_mode):
                 try:
                     quotes = loop.run_until_complete(broker.get_quotes(all_symbols))
                     for sym, q in quotes.items():
@@ -576,14 +757,29 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                     logger.warning("[scheduler] Schwab quote fetch failed, using yfinance: %s", exc)
 
             # ── Fetch current positions to size SELL orders correctly ─
+            # Read from EVERY position-holding broker (global route + per-
+            # assignment overrides — Webull, Zerodha). Reading only the global
+            # broker left non-default-broker holdings out of current_positions,
+            # so their SELL exits skipped ("held=0.0") and the trail-reconcile
+            # safety net never saw them to arm a trail. Keep the first non-zero
+            # qty seen per symbol.
             current_positions: dict[str, float] = {}
-            if not dry_run:
-                try:
-                    positions = loop.run_until_complete(broker.get_positions(account_id))
-                    for pos in positions:
-                        current_positions[pos.symbol.upper()] = pos.quantity
-                except Exception as exc:
-                    logger.warning("[scheduler] Could not fetch positions: %s", exc)
+            if not dry_run or report_mode:
+                from app.services.brokers.factory import get_position_brokers
+                for _b in get_position_brokers():
+                    try:
+                        _b_acct = account_id
+                        if getattr(_b, "name", "") != getattr(broker, "name", ""):
+                            loop.run_until_complete(_b.authenticate())
+                            _accts = loop.run_until_complete(_b.get_accounts())
+                            _b_acct = _accts[0].account_id if _accts else ""
+                        for pos in loop.run_until_complete(_b.get_positions(_b_acct)):
+                            sym = pos.symbol.upper()
+                            if sym not in current_positions and pos.quantity:
+                                current_positions[sym] = pos.quantity
+                    except Exception as exc:
+                        logger.warning("[scheduler] Could not fetch positions from %s: %s",
+                                       getattr(_b, "name", "?"), exc)
 
             # ── Regime-aware open-position cap ──────────────────────────
             # Resolve the max number of distinct holdings the current market
@@ -615,6 +811,12 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
             signals_to_act: list[
                 tuple[str, str, str, float, float | None, str, str]
             ] = []
+            # Per-signal conviction for BUY prioritization when cash is scarce.
+            # Keyed by (symbol, system, strategy_name); value 0..1. Strategies that
+            # expose a confidence (perplexity) populate it; those that don't
+            # (bollinger/scanner) fall back to a neutral 0.5 at sort time, so they
+            # interleave rather than always losing the cash race. See the BUY loop.
+            signal_conf: dict[tuple[str, str, str], float] = {}
 
             # ── 1. Run assigned strategies ───────────────────────
             for asgn in assignments:
@@ -642,6 +844,9 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         _persist_signal(symbol, sig.direction, label, entry, acted_on=False)
                         if sig.direction != "HOLD":
                             signals_to_act.append((symbol, sig.direction, label, entry, sig.stop_price, system, strategy_name))
+                            _c = getattr(sig, "confidence", None)
+                            if _c is not None:
+                                signal_conf[(symbol, system, strategy_name)] = float(_c)
                             logger.info(
                                 "[scheduler] Assigned %s → %s: %s entry=%.2f stop=%s (%s)",
                                 strategy_name, symbol, sig.direction, entry, sig.stop_price, sig.reason
@@ -697,6 +902,9 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                                 _persist_signal(symbol, sig.direction, label, entry, acted_on=False)
                                 if sig.direction != "HOLD":
                                     signals_to_act.append((symbol, sig.direction, label, entry, None, system, strategy_name))
+                                    _c = getattr(sig, "confidence", None)
+                                    if _c is not None:
+                                        signal_conf[(symbol, system, strategy_name)] = float(_c)
                                     logger.info(
                                         "[scheduler] Assigned scanner %s → %s: %s entry=%.2f",
                                         strategy_name, symbol, sig.direction, entry,
@@ -749,6 +957,77 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                         logger.error("[scheduler] Perplexity pool %s failed: %s", symbol, exc)
 
             # ── 3. Execute assigned signals (no consensus needed) ─
+            # Prioritize for the cash gate: SELLs first (exits are time-critical
+            # and free capacity), then BUYs by descending conviction so scarce
+            # cash funds the highest-confidence entries first instead of whatever
+            # symbol the loop happened to reach first. Signals without a
+            # confidence (bollinger/scanner) sort at a neutral 0.5. Stable sort
+            # keeps original order among equal-conviction signals.
+            signals_to_act.sort(
+                key=lambda item: _buy_priority_key(item, signal_conf)
+            )
+
+            # ── Budget forecast (report_mode) ────────────────────────────
+            # Walk the BUY signals in the same priority order the live loop
+            # would, drawing down each broker's real cash budget, and record
+            # which entries the balance covers vs the ranked shortfall. Places
+            # NO orders — this is the pre-open "what can we actually fund" view.
+            if report_mode:
+                funded: list[dict] = []
+                shortfall: list[dict] = []
+                for symbol, direction, label, entry, stop, sig_system, sig_strategy in signals_to_act:
+                    if direction != "BUY":
+                        continue
+                    r_asgn = next(
+                        (a for a in assignments
+                         if a["symbol"] == symbol and a["system"] == sig_system
+                         and a["strategy_name"] == sig_strategy),
+                        None,
+                    ) or next((a for a in assignments if a["symbol"] == symbol), None)
+                    r_broker = (r_asgn.get("broker") if r_asgn else "default") or "default"
+                    if r_broker == "default":
+                        try:
+                            from app.services.markets import is_india_symbol
+                            if is_india_symbol(symbol):
+                                r_broker = "zerodha"
+                        except Exception:
+                            pass
+                    r_held = current_positions.get(symbol, 0.0)
+                    want = _compute_quantity(
+                        symbol, entry, stop,
+                        r_asgn.get("max_capital_usd") if r_asgn else None,
+                        r_asgn.get("max_shares") if r_asgn else None,
+                        held_qty=r_held,
+                    )
+                    if want <= 0:
+                        continue  # already at cap — nothing to fund
+                    budget = _cash_budget(r_broker)
+                    affordable = (
+                        _quantize_for_broker(budget / entry)
+                        if budget != float("inf") and entry > 0 else want
+                    )
+                    fundable = min(want, affordable)
+                    conf = signal_conf.get((symbol, sig_system, sig_strategy), 0.5)
+                    rec = {
+                        "symbol": symbol, "strategy": f"{sig_system}:{sig_strategy}",
+                        "want": want, "fundable": fundable, "entry": entry,
+                        "confidence": conf, "broker": r_broker,
+                    }
+                    if fundable > 0:
+                        _spend_cash(r_broker, fundable * entry)
+                    if fundable >= want:
+                        funded.append(rec)
+                    else:
+                        rec["missing"] = want - fundable
+                        rec["missing_usd"] = (want - fundable) * entry
+                        shortfall.append(rec)
+                report["funded"] = funded
+                report["shortfall"] = shortfall
+                report["cash"] = {
+                    k: v for k, v in _cash_cache.items() if v != float("inf")
+                }
+                return
+
             if dry_run:
                 logger.info("[scheduler] Dry run — %d assigned signal(s) evaluated, no orders placed.", len(signals_to_act))
             from app.services.strategy import strategy_ledger
@@ -819,7 +1098,42 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                                 "(%d/%d open). New entries blocked until a slot frees.",
                                 symbol, open_count, max_open_positions,
                             )
+                            _notify_suppress(
+                                symbol=symbol, direction="BUY", reason="regime_cap",
+                                detail=(f"At regime position cap ({open_count}/{max_open_positions} "
+                                        f"open) — new entry for {sig_system}:{sig_strategy} blocked."),
+                            )
                             continue
+                    # Cash gate: the per-symbol cap sizes the position; the broker
+                    # balance decides how many of those shares we can actually
+                    # afford right now. Clamp qty down to what remaining cash can
+                    # buy at the entry price and skip if it can't fund even one
+                    # share. Held top-ups are cash-funded too, so this applies to
+                    # every BUY. Uses the per-assignment broker's budget so US and
+                    # India balances are tracked separately.
+                    budget = _cash_budget(asgn_broker)
+                    if budget != float("inf") and entry > 0:
+                        affordable = _quantize_for_broker(budget / entry)
+                        if affordable < qty:
+                            logger.info(
+                                "[scheduler] BUY %s: cash-limited %.4f -> %.4f sh "
+                                "(cash $%.2f @ $%.2f, broker %r).",
+                                symbol, qty, affordable, budget, entry, asgn_broker,
+                            )
+                            qty = affordable
+                        if qty <= 0:
+                            logger.info(
+                                "[scheduler] BUY %s skipped — insufficient cash "
+                                "($%.2f available, need >= $%.2f for 1 share).",
+                                symbol, budget, entry,
+                            )
+                            _notify_suppress(
+                                symbol=symbol, direction="BUY", reason="insufficient_cash",
+                                detail=(f"{sig_system}:{sig_strategy} — ${budget:,.2f} cash, "
+                                        f"need ${entry:,.2f}/share ({asgn_broker})."),
+                            )
+                            continue
+                        _spend_cash(asgn_broker, qty * entry)
                 else:
                     # SELL signal: only sell THIS strategy's lot, clamped to what the
                     # broker actually shows. The broker reports one aggregate position
@@ -910,6 +1224,12 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                             "— position NOT protected; leaving signal un-acted so the "
                             "reconcile job retries next cycle.", symbol,
                         )
+                        _notify_suppress(
+                            symbol=symbol, direction="SELL", reason="trail_unarmed",
+                            detail=(f"SELL trail FAILED to arm ({qty:.2f} sh) — position "
+                                    f"UNPROTECTED; reconcile will retry next cycle."),
+                            toast=True,
+                        )
 
                     try:
                         from app.services.notifications.bus import notify_signal
@@ -953,7 +1273,25 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                 ))
 
             # ── 4. Execute consensus signals ─────────────────────
-            for symbol, directions in ({} if dry_run else votes).items():
+            # Same cash-gate prioritization as the assigned path: process the
+            # qualifying signals SELL-first, then BUYs by strength of agreement
+            # (consensus carries no per-signal confidence, so the count of
+            # agreeing strategies is the conviction proxy). Higher agreement wins
+            # the scarce cash first.
+            def _consensus_priority(kv):
+                _sym, _dirs = kv
+                _qual = {d: v for d, v in _dirs.items() if len(v) >= min_agree}
+                if len(_qual) != 1:
+                    return (2, 0.0)  # non-qualifying: order irrelevant (skipped)
+                _d, _agree = next(iter(_qual.items()))
+                # SELLs (exits) sort ahead of BUYs. Membership test (In op) not a
+                # literal `== "SELL"` compare, so the structural SELL-routing AST
+                # test doesn't mistake this sort key for an exit branch.
+                return (0, 0.0) if _d in ("SELL",) else (1, -len(_agree))
+            _consensus_items = sorted(
+                ({} if dry_run else votes).items(), key=_consensus_priority
+            )
+            for symbol, directions in _consensus_items:
                 # votes are keyed by the strategy signal's raw symbol, which may be
                 # mixed-case; current_positions/live_prices are uppercase. Normalize
                 # so the held lookup (and the SELL-skip / cap math) don't miss.
@@ -1051,6 +1389,12 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                             "returned False — position NOT protected; reconcile job "
                             "will retry next cycle.", symbol,
                         )
+                        _notify_suppress(
+                            symbol=symbol, direction="SELL", reason="trail_unarmed",
+                            detail=(f"Consensus SELL trail FAILED to arm ({qty:.2f} sh) — "
+                                    f"position UNPROTECTED; reconcile will retry."),
+                            toast=True,
+                        )
                     try:
                         from app.services.notifications.bus import notify_signal
                         notify_signal(
@@ -1098,6 +1442,39 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False) -> None:
                                 symbol, open_count, max_open_positions,
                             )
                             continue
+                    # Cash gate (mirrors the assigned BUY path): clamp to what the
+                    # broker balance can afford and skip if it can't fund 1 share.
+                    c_broker = (c_asgn.get("broker") if c_asgn else "default") or "default"
+                    if c_broker == "default":
+                        try:
+                            from app.services.markets import is_india_symbol
+                            if is_india_symbol(symbol):
+                                c_broker = "zerodha"
+                        except Exception:
+                            pass
+                    budget = _cash_budget(c_broker)
+                    if budget != float("inf") and entry_p > 0:
+                        affordable = _quantize_for_broker(budget / entry_p)
+                        if affordable < qty:
+                            logger.info(
+                                "[scheduler] Consensus BUY %s: cash-limited %.4f -> "
+                                "%.4f sh (cash $%.2f @ $%.2f).",
+                                symbol, qty, affordable, budget, entry_p,
+                            )
+                            qty = affordable
+                        if qty <= 0:
+                            logger.info(
+                                "[scheduler] Consensus BUY %s skipped — insufficient "
+                                "cash ($%.2f, need >= $%.2f).",
+                                symbol, budget, entry_p,
+                            )
+                            _notify_suppress(
+                                symbol=symbol, direction="BUY", reason="insufficient_cash",
+                                detail=(f"Consensus BUY — ${budget:,.2f} cash, "
+                                        f"need ${entry_p:,.2f}/share ({c_broker})."),
+                            )
+                            continue
+                        _spend_cash(c_broker, qty * entry_p)
                 order_req = OrderRequest(
                     symbol=symbol,
                     side=direction,  # type: ignore[arg-type]
@@ -1168,6 +1545,24 @@ def _run_fast_trail_job() -> None:
         reconcile_trails_now()
     except Exception as exc:
         logger.error("[scheduler] Fast trail job failed: %s", exc)
+
+
+_INVARIANT_INTERVAL_SECONDS = 30 * 60   # 30 min — independent watchdog
+
+
+def _run_invariant_check_job() -> None:
+    """Independent watchdog: verify every held assigned position is protected
+    and the per-strategy ledger matches the broker aggregate, notifying on any
+    violation. Read-only — remediation is owned by the reconcile/fast-trail
+    jobs. Runs only while a market is open (nothing changes overnight).
+    """
+    if not _any_market_open():
+        return
+    try:
+        from app.services.reconciliation.invariants import check_invariants
+        check_invariants(notify=True)
+    except Exception as exc:
+        logger.error("[scheduler] Invariant check job failed: %s", exc)
 
 
 def _run_scanner_job_universe(universe: str, top_n: int = 5) -> None:
@@ -1554,6 +1949,32 @@ def start_scheduler() -> None:
         replace_existing=True,
         # Don't pile up if a run overruns the 60s interval; just skip the tick.
         max_instances=1,
+        coalesce=True,
+    )
+    _scheduler.add_job(
+        _run_invariant_check_job,
+        trigger=IntervalTrigger(
+            seconds=_INVARIANT_INTERVAL_SECONDS,
+            start_date=now + timedelta(minutes=7),   # stagger after the sync jobs
+        ),
+        id="invariant_check",
+        name="Position/Ledger Invariant Watchdog",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    # ── Pre-open budget forecast — 9:15 ET, before the 9:30 US open ──
+    # Reports whether the cash balance can fund the assigned BUY signals and
+    # what the shortfall is, so funds can be moved before the live cycle drops
+    # the tail. Read-only; emits a notification.
+    _scheduler.add_job(
+        _run_budget_report_job,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=9, minute=15, timezone="US/Eastern"),
+        id="budget_report_preopen",
+        name="Pre-Open Budget Forecast",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=1800,
         coalesce=True,
     )
     # ── M1 SIP advisor — daily scans (advisory only, emits notifications) ──

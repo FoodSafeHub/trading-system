@@ -73,3 +73,72 @@ def get_broker() -> BrokerBase:
         return _build_one(names[0])
     from app.services.brokers.multi import MultiBroker
     return MultiBroker([_build_one(n) for n in names])
+
+
+def get_position_brokers() -> List[BrokerBase]:
+    """Every distinct broker that could currently hold a position.
+
+    The global broker (get_broker() → active_broker / trade_routing) only covers
+    the default route. But per-assignment `broker` overrides route individual
+    symbols elsewhere — India symbols to Zerodha, some US symbols explicitly to
+    Webull — and those holdings live on a broker the global route never queries.
+    Read-paths that answer "what do we actually hold / what stops are resting"
+    (PnL page, trail reconcile) must enumerate ALL of them, or a position on a
+    non-default broker is silently invisible (no trail armed, absent from PnL).
+
+    Returns a de-duplicated list of concrete single-broker adapters. The global
+    broker is expanded into its underlying legs (so a MultiBroker becomes its
+    Schwab + Webull members) to keep list_orders/get_positions on real adapters
+    that fan out correctly. Best-effort: a broker that fails to build is skipped
+    with a warning rather than blanking the whole list.
+    """
+    out: List[BrokerBase] = []
+    seen: set[str] = set()
+
+    def _add(b: BrokerBase) -> None:
+        name = getattr(b, "name", "")
+        if name and name not in seen:
+            seen.add(name)
+            out.append(b)
+
+    settings = get_settings()
+    # Global route — expand MultiBroker into its legs so reads hit real adapters.
+    for name in _resolve_routing(settings.trade_routing, settings.active_broker):
+        try:
+            _add(_build_one(name))
+        except Exception as exc:
+            logger.warning("[factory] get_position_brokers: could not build %r: %s", name, exc)
+
+    # Per-assignment broker overrides (e.g. zerodha for India, explicit webull).
+    for name in _assignment_broker_names():
+        try:
+            _add(_build_one(name))
+        except Exception as exc:
+            logger.warning("[factory] get_position_brokers: could not build %r: %s", name, exc)
+
+    return out
+
+
+def _assignment_broker_names() -> set[str]:
+    """Distinct concrete broker names referenced by enabled assignments.
+
+    An assignment's broker is "default" (follow the global route — already
+    covered by get_broker) or a concrete name. India symbols left on "default"
+    still route to Zerodha, so resolve those too.
+    """
+    names: set[str] = set()
+    try:
+        from app.db import SessionLocal
+        from app.models.assignments import SymbolStrategyAssignment
+        from app.services.markets import is_india_symbol
+
+        with SessionLocal() as db:
+            for a in db.query(SymbolStrategyAssignment).filter_by(enabled=True).all():
+                broker = (a.broker or "default").lower()
+                if broker != "default":
+                    names.add(broker)
+                elif is_india_symbol(a.symbol):
+                    names.add("zerodha")
+    except Exception as exc:
+        logger.debug("[factory] _assignment_broker_names failed: %s", exc)
+    return names

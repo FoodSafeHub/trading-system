@@ -1,0 +1,199 @@
+Universe: 183 names | period 5y | costs: INDIA_DEFAULT
+  [1/183] ABBOTINDIA done
+  [2/183] ABCAPITAL done
+  [3/183] ABFRL done
+  [4/183] ACC done
+  [5/183] ADANIENSOL done
+  [6/183] ADANIENT done
+  [7/183] ADANIGREEN done
+  [8/183] ADANIPORTS done
+  [9/183] ADANIPOWER done
+  [10/183] ALKEM done
+  [11/183] AMBUJACEM done
+  [12/183] APLAPOLLO done
+  [13/183] APOLLOHOSP done
+  [14/183] ASHOKLEY done
+  [15/183] ASIANPAINT done
+  [16/183] ASTRAL done
+  [17/183] AUBANK done
+  [18/183] AUROPHARMA done
+  [19/183] AXISBANK done
+  [20/183] BAJAJ-AUTO done
+  [21/183] BAJAJFINSV done
+  [22/183] BAJAJHLDNG done
+  [23/183] BAJFINANCE done
+  [24/183] BALKRISIND done
+  [25/183] BANDHANBNK done
+  [26/183] BANKBARODA done
+  [27/183] BEL done
+  [28/183] BERGEPAINT done
+  [29/183] BHARATFORG done
+  [30/183] BHARTIARTL done
+  [31/183] BHARTIHEXA done
+  [32/183] BHEL done
+  [33/183] BIOCON done
+  [34/183] BOSCHLTD done
+  [35/183] BPCL done
+  [36/183] BRITANNIA done
+  [37/183] CAMS done
+  [38/183] CANBK done
+  [39/183] CDSL done
+  [40/183] CGPOWER done
+  [41/183] CHOLAFIN done
+  [42/183] CIPLA done
+  [43/183] COALINDIA done
+  [44/183] COFORGE done
+  [45/183] COLPAL done
+  [46/183] CONCOR done
+  [47/183] CUMMINSIND done
+  [48/183] DABUR done
+  [49/183] DALBHARAT done
+  [50/183] DEEPAKNTR done
+  [51/183] DIVISLAB done
+  [52/183] DIXON done
+  [53/183] DLF done
+  [54/183] DMART done
+  [55/183] DRREDDY done
+  [56/183] EICHERMOT done
+  [57/183] ESCORTS done
+  [58/183] EXIDEIND done
+  [59/183] FEDERALBNK done
+  [60/183] FORTIS done
+  [61/183] GAIL done
+  [62/183] GMRINFRA: data error — No India price data for 'GMRINFRA' (Upstox + yfinance.NS both empty)
+  [63/183] GODREJCP done
+  [64/183] GODREJPROP done
+  [65/183] GRASIM done
+  [66/183] GUJGASLTD done
+  [67/183] HAL done
+  [68/183] HAVELLS done
+  [69/183] HCLTECH done
+  [70/183] HDFCAMC done
+  [71/183] HDFCBANK done
+  [72/183] HDFCLIFE done
+  [73/183] HEROMOTOCO done
+  [74/183] HINDALCO done
+  [75/183] HINDPETRO done
+  [76/183] HINDUNILVR done
+  [77/183] ICICIBANK done
+  [78/183] ICICIGI done
+  [79/183] ICICIPRULI done
+  [80/183] IDEA done
+  [81/183] IDFCFIRSTB done
+  [82/183] INDHOTEL done
+  [83/183] INDIGO done
+  [84/183] INDUSINDBK done
+  [85/183] INDUSTOWER done
+  [86/183] INFY done
+  [87/183] IOC done
+  [88/183] IRCTC done
+  [89/183] IRFC done
+  [90/183] ITC done
+  [91/183] JINDALSTEL done
+  [92/183] JIOFIN done
+  [93/183] JSWSTEEL done
+  [94/183] JUBLFOOD done
+  [95/183] KALYANKJIL done
+  [96/183] KEI done
+  [97/183] KOTAKBANK done
+  [98/183] KPITTECH done
+  [99/183] LAURUSLABS done
+  [100/183] LICI done
+  [101/183] LT done
+  [102/183] LTF done
+  [103/183] LTIM: data error — No India price data for 'LTIM' (Upstox + yfinance.NS both empty)
+  [104/183] LTTS done
+  [105/183] LUPIN done
+  [106/183] M&M done
+  [107/183] MARICO done
+  [108/183] MARUTI done
+  [109/183] MAXHEALTH done
+  [110/183] MAZDOCK done
+  [111/183] MFSL done
+  [112/183] MOTHERSON done
+  [113/183] MPHASIS done
+  [114/183] MRF done
+  [115/183] MUTHOOTFIN done
+  [116/183] NAUKRI done
+  [117/183] NESTLEIND done
+  [118/183] NHPC done
+  [119/183] NMDC done
+  [120/183] NTPC done
+  [121/183] OBEROIRLTY done
+  [122/183] OFSS done
+  [123/183] ONGC done
+  [124/183] PAGEIND done
+  [125/183] PATANJALI done
+  [126/183] PAYTM done
+  [127/183] PERSISTENT done
+  [128/183] PETRONET done
+  [129/183] PFC done
+  [130/183] PHOENIXLTD done
+  [131/183] PIDILITIND done
+  [132/183] PIIND done
+  [133/183] PNB done
+  [134/183] POLYCAB done
+  [135/183] POONAWALLA done
+  [136/183] POWERGRID done
+  [137/183] PRESTIGE done
+  [138/183] RECLTD done
+  [139/183] RELIANCE done
+  [140/183] RVNL done
+  [141/183] SAIL done
+  [142/183] SBFC done
+  [143/183] SBICARD done
+  [144/183] SBILIFE done
+  [145/183] SBIN done
+  [146/183] SHREECEM done
+  [147/183] SHRIRAMFIN done
+  [148/183] SIEMENS done
+  [149/183] SOLARINDS done
+  [150/183] SONACOMS done
+  [151/183] SRF done
+  [152/183] SUNPHARMA done
+  [153/183] SUNTV done
+  [154/183] SUPREMEIND done
+  [155/183] SYNGENE done
+  [156/183] TATACHEM done
+  [157/183] TATACOMM done
+  [158/183] TATACONSUM done
+  [159/183] TATAELXSI done
+  [160/183] TATAMOTORS: data error — No India price data for 'TATAMOTORS' (Upstox + yfinance.NS both empty)
+  [161/183] TATAPOWER done
+  [162/183] TATASTEEL done
+  [163/183] TCS done
+  [164/183] TECHM done
+  [165/183] TIINDIA done
+  [166/183] TITAN done
+  [167/183] TORNTPHARM done
+  [168/183] TORNTPOWER done
+  [169/183] TRENT done
+  [170/183] TVSMOTOR done
+  [171/183] UBL done
+  [172/183] ULTRACEMCO done
+  [173/183] UNIONBANK done
+  [174/183] UNITDSPR done
+  [175/183] UPL done
+  [176/183] VBL done
+  [177/183] VEDL done
+  [178/183] VOLTAS done
+  [179/183] WIPRO done
+  [180/183] YESBANK done
+  [181/183] ZEEL done
+  [182/183] ZOMATO: data error — No India price data for 'ZOMATO' (Upstox + yfinance.NS both empty)
+  [183/183] ZYDUSLIFE done
+
+============================================================================================
+Strategy                   |      Net P&L | Trades |   WR% |    PF | Syms | Verdict
+--------------------------------------------------------------------------------------------
+India_Leader_Pullback      |       73,419 |   3219 |   53% |  1.06 |  179 | KEEP
+India_Momentum_Breakout    |       20,922 |    588 |   53% |  1.08 |  138 | KEEP
+Daily_Hammer_Star          |         -414 |    160 |   52% |  1.00 |  106 | RETIRE/RESEARCH
+India_VCP_Breakout         |         -845 |     10 |   40% |  0.81 |   10 | RETIRE/RESEARCH
+India_52wk_Breakout        |       -4,583 |   1380 |   51% |  0.99 |  175 | RETIRE/RESEARCH
+India_Trend_Following      |       -6,691 |    259 |   51% |  0.93 |  129 | RETIRE/RESEARCH
+India_SR_Bounce            |       -8,276 |    253 |   51% |  0.91 |  131 | RETIRE/RESEARCH
+India_Trend_Pullback       |      -20,242 |   1084 |   53% |  0.95 |  178 | RETIRE/RESEARCH
+India_Wyckoff_Spring       |      -23,227 |    207 |   43% |  0.70 |  105 | RETIRE/RESEARCH
+Daily_Three_Bar_Push       |      -57,864 |    845 |   47% |  0.86 |  175 | RETIRE/RESEARCH
+============================================================================================

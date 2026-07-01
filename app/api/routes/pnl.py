@@ -216,31 +216,37 @@ def _refresh(db: Session):
 
 
 def _resolve_last_prices(symbols: list[str]) -> dict[str, float]:
-    """Pull last/ask/bid from the active broker for the given symbols.
+    """Pull last/ask/bid for the given symbols across all position-holding brokers.
 
-    Returns {} on any failure — the unrealized columns will surface as None
-    rather than 0, so the UI can tell "we don't know" from "zero".
+    Returns {} on total failure — the unrealized columns will surface as None
+    rather than 0, so the UI can tell "we don't know" from "zero". India symbols
+    only quote on Zerodha, so we query every position broker and take the first
+    price found per symbol (stopping once all symbols are resolved).
     """
     if not symbols:
         return {}
     import asyncio
-    try:
-        broker = get_broker()
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(broker.authenticate())
-            quotes = loop.run_until_complete(broker.get_quotes(symbols))
-        finally:
-            loop.close()
-    except Exception as exc:
-        logger.warning("[pnl] quote fetch failed: %s", exc)
-        return {}
+    from app.services.brokers.factory import get_position_brokers
 
     out: dict[str, float] = {}
-    for sym, q in (quotes or {}).items():
-        price = getattr(q, "last", None) or getattr(q, "ask", None) or getattr(q, "bid", None)
-        if price and price > 0:
-            out[sym.upper()] = float(price)
+    for broker in get_position_brokers():
+        remaining = [s for s in symbols if s.upper() not in out]
+        if not remaining:
+            break
+        try:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(broker.authenticate())
+                quotes = loop.run_until_complete(broker.get_quotes(remaining))
+            finally:
+                loop.close()
+        except Exception as exc:
+            logger.warning("[pnl] %s quote fetch failed: %s", getattr(broker, "name", "?"), exc)
+            continue
+        for sym, q in (quotes or {}).items():
+            price = getattr(q, "last", None) or getattr(q, "ask", None) or getattr(q, "bid", None)
+            if price and price > 0:
+                out[sym.upper()] = float(price)
     return out
 
 
@@ -278,82 +284,92 @@ def _peak_since(symbol: str, since_dt) -> float:
 
 
 def _broker_resting_sell_stops() -> dict[str, dict]:
-    """Query the active broker for WORKING SELL STOP/TRAILING_STOP orders.
+    """Query EVERY position-holding broker for WORKING SELL STOP/TRAILING_STOP orders.
 
     The scheduler places these on the broker; they may not all be mirrored in
     the local DB (e.g. scanner-path SELLs). This is the source of truth for
-    "what trail is actually resting right now". Returns {symbol: {...}}.
+    "what trail is actually resting right now". Enumerates all brokers that could
+    hold a position (global route + per-assignment overrides — Webull, Zerodha)
+    so a trail resting on a non-default broker isn't reported as NOT ARMED.
+    Returns {symbol: {...}}.
     """
     import asyncio
-    result: dict[str, dict] = {}
-    try:
-        broker = get_broker()
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(broker.authenticate())
-            accts = loop.run_until_complete(broker.get_accounts())
-            acct_id = accts[0].account_id if accts else ""
-            orders = loop.run_until_complete(broker.list_orders(acct_id, status="working"))
-        finally:
-            loop.close()
-    except Exception as exc:
-        logger.warning("[pnl] broker working-orders fetch failed: %s", exc)
-        return {}
+    from app.services.brokers.factory import get_position_brokers
 
-    for o in orders or []:
-        side = (getattr(o, "side", "") or "").upper()
-        otype = (getattr(o, "order_type", "") or "").upper()
-        sym = (getattr(o, "symbol", "") or "").upper()
-        if side != "SELL" or otype not in ("STOP", "TRAILING_STOP") or not sym:
+    result: dict[str, dict] = {}
+    for broker in get_position_brokers():
+        try:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(broker.authenticate())
+                accts = loop.run_until_complete(broker.get_accounts())
+                acct_id = accts[0].account_id if accts else ""
+                orders = loop.run_until_complete(broker.list_orders(acct_id, status="working"))
+            finally:
+                loop.close()
+        except Exception as exc:
+            logger.warning("[pnl] %s working-orders fetch failed: %s", getattr(broker, "name", "?"), exc)
             continue
-        if sym in result:
-            continue  # keep first (broker returns newest-ish; good enough)
-        raw = getattr(o, "raw", {}) or {}
-        result[sym] = {
-            "order_type": otype,
-            "stop_price": getattr(o, "stop_price", None) or raw.get("stopPrice"),
-            "trail_value": getattr(o, "trail_value", None) or raw.get("stopPriceOffset"),
-            "broker_order_id": getattr(o, "broker_order_id", None),
-        }
+
+        for o in orders or []:
+            side = (getattr(o, "side", "") or "").upper()
+            otype = (getattr(o, "order_type", "") or "").upper()
+            sym = (getattr(o, "symbol", "") or "").upper()
+            if side != "SELL" or otype not in ("STOP", "TRAILING_STOP") or not sym:
+                continue
+            if sym in result:
+                continue  # keep first (broker returns newest-ish; good enough)
+            raw = getattr(o, "raw", {}) or {}
+            result[sym] = {
+                "order_type": otype,
+                "stop_price": getattr(o, "stop_price", None) or raw.get("stopPrice"),
+                "trail_value": getattr(o, "trail_value", None) or raw.get("stopPriceOffset"),
+                "broker_order_id": getattr(o, "broker_order_id", None),
+            }
     return result
 
 
 def _broker_positions() -> dict[str, dict]:
-    """Query the active broker for currently-held LONG positions.
+    """Query EVERY position-holding broker for currently-held LONG positions.
 
     The FIFO ledger only knows positions the BOT opened (local order history).
     Manual/external buys (placed directly in the broker app) never get a local
     BUY row, so they're invisible to the ledger — but they're real holdings the
     assigned strategy still trades. This is the source of truth for "what do we
-    actually hold". Returns {symbol: {quantity, avg_cost, broker}}.
+    actually hold". Enumerates all brokers that could hold a position (global
+    route + per-assignment overrides — Webull, Zerodha) so a symbol held on a
+    non-default broker isn't silently omitted. Returns {symbol: {quantity,
+    avg_cost, broker}}.
     """
     import asyncio
-    result: dict[str, dict] = {}
-    try:
-        broker = get_broker()
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(broker.authenticate())
-            accts = loop.run_until_complete(broker.get_accounts())
-            acct_id = accts[0].account_id if accts else ""
-            positions = loop.run_until_complete(broker.get_positions(acct_id))
-        finally:
-            loop.close()
-    except Exception as exc:
-        logger.warning("[pnl] broker positions fetch failed: %s", exc)
-        return {}
+    from app.services.brokers.factory import get_position_brokers
 
     excluded = get_settings().pnl_excluded
-    for p in positions or []:
-        sym = (getattr(p, "symbol", "") or "").upper()
-        qty = getattr(p, "quantity", 0) or 0
-        if not sym or qty <= 0 or sym in excluded:
+    result: dict[str, dict] = {}
+    for broker in get_position_brokers():
+        try:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(broker.authenticate())
+                accts = loop.run_until_complete(broker.get_accounts())
+                acct_id = accts[0].account_id if accts else ""
+                positions = loop.run_until_complete(broker.get_positions(acct_id))
+            finally:
+                loop.close()
+        except Exception as exc:
+            logger.warning("[pnl] %s positions fetch failed: %s", getattr(broker, "name", "?"), exc)
             continue
-        result[sym] = {
-            "quantity": float(qty),
-            "avg_cost": getattr(p, "average_cost", None),
-            "broker": getattr(p, "broker", None),
-        }
+
+        for p in positions or []:
+            sym = (getattr(p, "symbol", "") or "").upper()
+            qty = getattr(p, "quantity", 0) or 0
+            if not sym or qty <= 0 or sym in excluded or sym in result:
+                continue
+            result[sym] = {
+                "quantity": float(qty),
+                "avg_cost": getattr(p, "average_cost", None),
+                "broker": getattr(p, "broker", None),
+            }
     return result
 
 

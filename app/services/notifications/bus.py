@@ -105,6 +105,55 @@ def notify_signal(
     return new_id
 
 
+def notify_suppression(
+    *,
+    symbol: str,
+    reason: str,
+    detail: str,
+    source: str = "scheduler",
+    direction: Optional[str] = None,
+    toast: bool = False,
+) -> Optional[int]:
+    """Emit a notification when the automation correctly-but-silently declined
+    to act — the events that bite because nothing happened: a cash-limited or
+    regime-capped BUY skip, or a trailing-stop that failed to arm.
+
+    NOT gated on assignments (a suppression is by definition about an assigned
+    symbol) and toast defaults OFF (these are informational, not alarms) —
+    callers pass toast=True for the ones that need attention (e.g. an unarmed
+    protective stop). Best-effort: never raises into the caller.
+
+    reason  : short machine-ish tag, e.g. "cash_limited", "regime_cap",
+              "trail_unarmed", "insufficient_cash".
+    detail  : human-readable one-liner for the notification body.
+    """
+    symbol = (symbol or "").upper().strip()
+    title = f"Skipped {direction or ''} {symbol}: {reason}".strip()
+    try:
+        with SessionLocal() as db:
+            row = Notification(
+                kind="suppress",
+                symbol=symbol or None,
+                direction=(direction or "").upper() or None,
+                strategy=None,
+                source=source,
+                price=None,
+                title=title[:256],
+                body=detail,
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+            new_id = row.id
+    except Exception as exc:
+        logger.warning("notify_suppression db write failed: %s", exc)
+        return None
+
+    if toast:
+        _toast(title, detail)
+    return new_id
+
+
 def notify_m1(
     *,
     title: str,

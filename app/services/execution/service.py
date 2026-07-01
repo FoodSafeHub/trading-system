@@ -378,11 +378,34 @@ class ExecutionService:
                 except Exception:
                     is_recent = False
 
+            # Precise signal timestamp (tz-aware UTC) for slicing — the peak is
+            # measured from when the SELL fired, NOT from midnight of that day. A
+            # spike-and-fade BEFORE the signal must not inflate the high-water
+            # mark (the trail anchors to the signal, not the whole session).
+            sig_ts = None
+            if signal_at is not None:
+                try:
+                    sig_ts = signal_at
+                    if getattr(sig_ts, "tzinfo", None) is None:
+                        sig_ts = sig_ts.replace(tzinfo=_tz.utc)
+                except Exception:
+                    sig_ts = None
+
             if is_recent:
                 try:
                     intraday = get_ohlcv(symbol, period="5d", interval="5m")
                     if intraday is not None and not intraday.empty:
                         col = "High" if "High" in intraday.columns else "Close"
+                        # Slice from the exact signal time when the index is
+                        # tz-aware (intraday bars carry a tz); fall back to the
+                        # day slice, then the whole frame.
+                        if sig_ts is not None and intraday.index.tz is not None:
+                            try:
+                                sliced = intraday.loc[sig_ts:]
+                                if not sliced.empty:
+                                    return float(sliced[col].max())
+                            except Exception:
+                                pass
                         if sig_day is not None:
                             try:
                                 sliced = intraday.loc[sig_day:]
@@ -768,7 +791,15 @@ class ExecutionService:
                 peak = hist_peak
         except Exception as exc:
             logger.debug("[exec] tighten_trail %s: peak lookup failed: %s", symbol, exc)
-        if resting_level > 0 and trail_pct < 100.0:
+        # The resting stop only encodes a real prior peak when it was set by the
+        # TRAIL, i.e. it sits ABOVE the floor. When the floor binds (floor >
+        # trail level) the resting stop equals the floor, and back-computing a
+        # peak from it (floor / (1 − trail%)) fabricates a high-water mark price
+        # never traded — e.g. NVDA: floor $198.66 → phantom peak $202.71 vs a
+        # true intraday high of $199.47. That phantom then sticks forever via the
+        # monotonic stored peak. Only seed from the resting stop when it clears
+        # the floor (so it reflects an actual trail level, not the floor).
+        if resting_level > floor and trail_pct < 100.0:
             implied_peak = resting_level / (1.0 - trail_pct / 100.0)
             if implied_peak > peak:
                 peak = implied_peak
