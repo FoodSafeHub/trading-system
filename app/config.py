@@ -193,7 +193,11 @@ class Settings(BaseSettings):
     regime_risk_pct_bull: float = 0.01
     regime_risk_pct_bear: float = 0.003
     regime_risk_pct_deep_bear: float = 0.002
-    regime_max_positions_bull: int = 10
+    # Bull cap raised 10 → 20 (2026-07-02): positions here are small and the
+    # cash gate already bounds total exposure, so 10 slots blocked every new
+    # entry once manual holdings pushed the count to 12. Bear/deep-bear stay
+    # tight — shrinking the book in a downtape is the point of the regime gate.
+    regime_max_positions_bull: int = 20
     regime_max_positions_bear: int = 3
     regime_max_positions_deep_bear: int = 1
     regime_max_account_risk_bull: float = 0.20
