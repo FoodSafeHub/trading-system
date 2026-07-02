@@ -61,8 +61,14 @@ def notify_signal(
     source: str,
     price: Optional[float] = None,
     extra: Optional[str] = None,
+    gated: bool = True,
 ) -> Optional[int]:
     """Emit a signal notification IF the symbol is in an enabled assignment.
+
+    gated=False bypasses the assignment check — used by paths that EXECUTED a
+    real order (consensus can trade unassigned symbols; the day-trading
+    autotrader's symbols aren't assignments). A filled order must always
+    notify; only discovery-style signals stay assignment-gated.
 
     Returns the new notification id, or None if gated out.
     """
@@ -73,7 +79,7 @@ def notify_signal(
 
     try:
         with SessionLocal() as db:
-            if not _is_assigned(db, symbol):
+            if gated and not _is_assigned(db, symbol):
                 return None
             title = f"{direction} signal: {symbol}"
             body_parts = [f"Strategy: {strategy}", f"Source: {source}"]

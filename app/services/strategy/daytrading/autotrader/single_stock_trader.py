@@ -777,6 +777,11 @@ class SingleStockTrader:
             "info",
             checks=decision.checks if isinstance(decision.checks, dict) else None,
         )
+        self._notify_trade(
+            "BUY" if side == "LONG" else "SELL", filled_price,
+            f"ENTRY {side} {qty:.0f} sh — {decision.entry_reason} "
+            f"(stop {decision.stop_price:.2f}, target {decision.target_price:.2f})",
+        )
         self._notify_update()
 
     def manage_open_trade(self) -> None:
@@ -814,6 +819,11 @@ class SingleStockTrader:
                 if self.tsm.state in (State.LONG, State.SHORT):
                     self.tsm.transition(State.PARTIAL_EXIT_TAKEN, pm_update.reason)
                 self._log("PARTIAL_EXIT", pm_update.reason, "info")
+                self._notify_trade(
+                    "SELL" if self.tsm.side == "LONG" else "BUY", exit_filled,
+                    f"PARTIAL EXIT {pm_update.exit_qty:.0f} sh — {pm_update.reason} "
+                    f"(remaining {self.tsm.qty:.0f})",
+                )
                 self._notify_update()
                 _partial_exits_this_bar += 1
 
@@ -942,6 +952,11 @@ class SingleStockTrader:
             ),
             "info",
         )
+        self._notify_trade(
+            "SELL" if self.tsm.side == "LONG" else "BUY", fill_px,
+            f"PARTIAL EXIT tier {consumed_idx + 1}/{len(ep.scale_levels)}: "
+            f"{exit_qty:.0f} sh — {ex_decision.reason} (remaining {self.tsm.qty:.0f})",
+        )
         self._notify_update()
 
         # If all scale levels consumed and no runner planned, close the remainder now
@@ -979,6 +994,11 @@ class SingleStockTrader:
             f"{reason} | pnl={record.pnl:+.2f} ({record.pnl_pct:+.3f}%) "
             f"@ {actual_exit:.2f}",
             "info",
+        )
+        self._notify_trade(
+            "SELL" if side_before_close == "LONG" else "BUY", actual_exit,
+            f"FULL EXIT — {reason} | PnL {record.pnl:+.2f} ({record.pnl_pct:+.2f}%)",
+            strategy=record.strategy,
         )
         self._notify_update()
 
@@ -1024,6 +1044,10 @@ class SingleStockTrader:
             f"Sell signal at {floor:.2f} → armed tight trail (floor={floor:.2f}, "
             f"riding momentum). Will NOT exit below {floor:.2f}. Signals: {_sig}",
             "info",
+        )
+        self._notify_trade(
+            "SELL" if self.tsm.side == "LONG" else "BUY", floor,
+            f"Tight trail armed at {floor:.2f} (exit signal: {_sig}) — riding momentum.",
         )
         self._notify_update()
 
@@ -1349,6 +1373,27 @@ class SingleStockTrader:
                 self.on_trade_update(self.get_status())
             except Exception:
                 pass
+
+    def _notify_trade(self, direction: str, price: float, extra: str,
+                      strategy: str | None = None) -> None:
+        """Push a real fill to the notification bus (dashboard log + toast).
+
+        Live orders only — paper-sim fills would spam the log. Ungated because
+        day-trading symbols aren't scheduler assignments. Best-effort: a notify
+        failure must never touch the trading path.
+        """
+        if self._broker is None:
+            return
+        try:
+            from app.services.notifications.bus import notify_signal
+            notify_signal(
+                symbol=self.symbol, direction=direction,
+                strategy=f"daytrading:{strategy or self.tsm.strategy or 'autotrader'}",
+                source="autotrader", price=price or None,
+                extra=extra, gated=False,
+            )
+        except Exception:
+            pass
 
 
 def _sorted_hist(counts: dict[str, int]) -> list[dict[str, Any]]:
