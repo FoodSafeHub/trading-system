@@ -74,14 +74,16 @@ def set_trade_routing(payload: TradeRoutingUpdate) -> TradeRoutingResponse:
     new_value = payload.trade_routing
 
     if new_value == "webull":
-        logger.warning(
-            "[settings] trade_routing -> webull, but WebullBroker.place_order is "
-            "not implemented yet. Orders will fail until the adapter is wired up."
+        logger.info(
+            "[settings] trade_routing -> webull: ALL default-route orders now go to "
+            "Webull only. Ensure the Webull session is valid (Webull page) or orders "
+            "will be rejected at submit."
         )
     if new_value == "both":
         logger.warning(
-            "[settings] trade_routing -> both: orders will fan out to Schwab + Webull. "
-            "Webull execution is not implemented yet; expect Webull failures in logs."
+            "[settings] trade_routing -> both: every order fans out to Schwab AND "
+            "Webull (duplicate fills by design). Use cash_aware to pick ONE broker "
+            "per BUY instead."
         )
     if new_value == "zerodha":
         logger.warning(

@@ -1910,6 +1910,63 @@ def _run_m1_daily_scan_job(session_label: str) -> None:
         logger.exception("[scheduler] M1 %s scan failed: %s", session_label, exc)
 
 
+def _run_broker_token_health_job(market: str) -> None:
+    """Pre-open broker session probe → alert notification on failure.
+
+    Zerodha access tokens expire daily at 07:30 IST with NO refresh endpoint
+    (SEBI rule) — the broker adapter deliberately lets the next call 403. But
+    the consumer here is the unattended scheduler, so an expired session means
+    every India cycle fails quietly until someone reads the logs. Schwab/Webull
+    refresh can likewise fail overnight. This job authenticates and does one
+    cheap read per relevant broker shortly before the session opens, and emits
+    an alert-grade notification (toast + Telegram if configured) while there is
+    still time to re-login.
+
+    market: "india" → zerodha, only when India assignments exist.
+            "us"    → the resolved US route brokers (skips paper).
+    """
+    settings = get_settings()
+    if market == "india":
+        if not _has_india_assignments():
+            return
+        names = ["zerodha"]
+    else:
+        from app.services.brokers.factory import _resolve_routing
+        names = [
+            n for n in _resolve_routing(settings.trade_routing, settings.active_broker)
+            if n != "paper"
+        ]
+    if not names:
+        return
+
+    loop = asyncio.new_event_loop()
+    try:
+        for name in names:
+            try:
+                broker = _build_one(name)
+                loop.run_until_complete(broker.authenticate())
+                accts = loop.run_until_complete(broker.get_accounts())
+                if not accts:
+                    raise RuntimeError("no accounts returned")
+                logger.info("[scheduler] Token health OK: %s", name)
+            except Exception as exc:
+                logger.error("[scheduler] Token health FAILED for %s: %s", name, exc)
+                try:
+                    from app.services.notifications.bus import notify_suppression
+                    notify_suppression(
+                        symbol="", direction=None, reason="broker_auth",
+                        detail=(f"{name} session is not usable before the "
+                                f"{market.upper()} open: {exc}. Re-login now or "
+                                f"today's cycles and protective-stop management "
+                                f"for {name} positions will silently fail."),
+                        source="scheduler", toast=True,
+                    )
+                except Exception:
+                    pass
+    finally:
+        loop.close()
+
+
 def _run_gtc_fill_sync_job() -> None:
     """Reconcile broker fills into the DB so closes show up automatically.
 
@@ -2273,6 +2330,32 @@ def start_scheduler() -> None:
         trigger=CronTrigger(day_of_week="mon-fri", hour=9, minute=15, timezone="US/Eastern"),
         id="budget_report_preopen",
         name="Pre-Open Budget Forecast",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=1800,
+        coalesce=True,
+    )
+    # ── Broker token health — pre-open session probes ──
+    # Zerodha's token dies daily at 07:30 IST with no refresh; a dead session
+    # would otherwise fail silently all day. Probe ~35 min before each open so
+    # a re-login can happen in time. US probe covers Schwab/Webull refresh.
+    _scheduler.add_job(
+        _run_broker_token_health_job,
+        args=["india"],
+        trigger=CronTrigger(day_of_week="mon-fri", hour=8, minute=40, timezone="Asia/Kolkata"),
+        id="token_health_india",
+        name="Broker Token Health — India (pre-NSE-open)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=1800,
+        coalesce=True,
+    )
+    _scheduler.add_job(
+        _run_broker_token_health_job,
+        args=["us"],
+        trigger=CronTrigger(day_of_week="mon-fri", hour=8, minute=55, timezone="US/Eastern"),
+        id="token_health_us",
+        name="Broker Token Health — US (pre-open)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=1800,

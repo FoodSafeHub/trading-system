@@ -214,6 +214,13 @@ class Settings(BaseSettings):
     # ── Twelve Data ─────────────────────────────────────────
     twelve_data_api_key: str = ""
 
+    # ── Telegram notifications ───────────────────────────────
+    # When both are set, alert-grade notifications (anything that would
+    # toast) are also pushed to this Telegram chat, so alarms reach you
+    # when you're not at the machine. Empty = disabled (no-op).
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     # ── API ──────────────────────────────────────────────────
     api_host: str = "127.0.0.1"
     api_port: int = 8000

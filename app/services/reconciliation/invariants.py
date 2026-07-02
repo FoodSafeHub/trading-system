@@ -46,11 +46,24 @@ _DRIFT_TOL = 0.01
 
 
 def _brokers_in_use(assignments: list[dict]) -> set[str]:
-    """Distinct broker keys across enabled assignments ("default" always in)."""
+    """Distinct broker keys across enabled assignments ("default" always in).
+
+    An India symbol left on broker="default" actually trades on Zerodha (the
+    order path resolves it there — see factory._assignment_broker_names), so
+    the watchdog must scan Zerodha too or that position is invisible here and
+    the naked-position check silently skips it.
+    """
     brokers = {"default"}
     for a in assignments:
         b = (a.get("broker") or "default").lower()
         brokers.add(b)
+        if b == "default":
+            try:
+                from app.services.markets import is_india_symbol
+                if is_india_symbol(a.get("symbol") or ""):
+                    brokers.add("zerodha")
+            except Exception:
+                pass
     return brokers
 
 

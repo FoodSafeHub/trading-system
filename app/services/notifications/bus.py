@@ -53,6 +53,33 @@ def _toast(title: str, body: str) -> None:
         logger.debug("toast failed: %s", exc)
 
 
+def _telegram(title: str, body: str) -> None:
+    """Best-effort Telegram push. No-op unless telegram_bot_token AND
+    telegram_chat_id are configured. Never raises into the caller — a
+    Telegram outage must not break the trading path."""
+    try:
+        from app.config import get_settings
+        s = get_settings()
+        token = (s.telegram_bot_token or "").strip()
+        chat_id = (s.telegram_chat_id or "").strip()
+        if not token or not chat_id:
+            return
+        import httpx
+        httpx.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": f"{title}\n{body}"},
+            timeout=5.0,
+        )
+    except Exception as exc:
+        logger.debug("telegram push failed: %s", exc)
+
+
+def _alert(title: str, body: str) -> None:
+    """Fire every out-of-band channel for an alert-grade notification."""
+    _toast(title, body)
+    _telegram(title, body)
+
+
 def notify_signal(
     *,
     symbol: str,
@@ -107,7 +134,7 @@ def notify_signal(
         logger.warning("notify_signal db write failed: %s", exc)
         return None
 
-    _toast(title, body)
+    _alert(title, body)
     return new_id
 
 
@@ -156,7 +183,7 @@ def notify_suppression(
         return None
 
     if toast:
-        _toast(title, detail)
+        _alert(title, detail)
     return new_id
 
 
@@ -195,5 +222,5 @@ def notify_m1(
         return None
 
     if toast:
-        _toast(title, body)
+        _alert(title, body)
     return new_id
