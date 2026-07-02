@@ -531,17 +531,25 @@ def _time_stop_pass(loop, current_positions: dict, live_prices: dict,
         logger.warning("[scheduler] time-stop pass failed: %s", exc)
 
 
-def _tape_gate_blocks(symbol: str, strategy_name: str | None) -> str | None:
+def _tape_gate_blocks(symbol: str, strategy_name: str | None,
+                      verdict_out: dict | None = None) -> str | None:
     """Knife-entry veto: returns a human-readable reason when the symbol's own
     short-horizon tape is in freefall, else None (BUY may proceed).
 
     The strategies' trend filters are all slow (SMA200 / EMA50 slope / SPY
     regime) and let a 2-week 10-20% crash through — this gate measures the
     fast tape. Fail-open on any error (never block a trade on missing data).
+
+    verdict_out (optional dict) is filled with a one-line "verdict" string —
+    passed-with-metrics / disabled / skipped-on-error — so the BUY notification
+    can stamp WHY the fill was allowed (a fill alone can't distinguish
+    "checked and passed" from "gate failed open").
     """
     from app.config import get_settings
     s = get_settings()
     if not s.tape_gate_enabled:
+        if verdict_out is not None:
+            verdict_out["verdict"] = "Tape gate: disabled"
         return None
     try:
         from app.services.strategy.tape_health import check_tape_health
@@ -552,9 +560,21 @@ def _tape_gate_blocks(symbol: str, strategy_name: str | None) -> str | None:
             max_below_ema20_pct=s.tape_gate_max_below_ema20_pct,
             max_off_20d_high_pct=s.tape_gate_max_off_20d_high_pct,
         )
+        if verdict_out is not None:
+            m = th.metrics or {}
+            if "ret_5d_pct" in m:
+                verdict_out["verdict"] = (
+                    f"Tape gate: PASSED — 5d {m['ret_5d_pct']:+.1f}%, "
+                    f"{m['red_streak']} red, EMA20 {m['vs_ema20_pct']:+.1f}%, "
+                    f"20d-high {m['off_20d_high_pct']:+.1f}%"
+                ) if th.ok else f"Tape gate: BLOCKED — {th.summary}"
+            else:
+                verdict_out["verdict"] = "Tape gate: skipped (insufficient data, failed open)"
         return None if th.ok else th.summary
     except Exception as exc:
         logger.warning("[scheduler] tape gate failed for %s (fail-open): %s", symbol, exc)
+        if verdict_out is not None:
+            verdict_out["verdict"] = "Tape gate: SKIPPED on error (failed open) — verify manually"
         return None
 
 
@@ -1333,8 +1353,11 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                     # Tape-health gate: veto a BUY into the symbol's own freefall
                     # (fast 5d drop / red streak / far below EMA20 / deep off the
                     # 20d high). Runs BEFORE the cash gate so a vetoed BUY doesn't
-                    # consume budget another signal could use.
-                    _tape_reason = _tape_gate_blocks(symbol, sig_strategy)
+                    # consume budget another signal could use. _tape_verdict is
+                    # stamped onto the BUY notification so every fill records the
+                    # metrics it passed with (or that the gate failed open).
+                    _tape_verdict: dict = {}
+                    _tape_reason = _tape_gate_blocks(symbol, sig_strategy, _tape_verdict)
                     if _tape_reason:
                         logger.info(
                             "[scheduler] BUY %s (%s:%s) vetoed by tape gate — %s",
@@ -1518,7 +1541,8 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                 try:
                     from app.services.notifications.bus import notify_signal
                     notify_signal(symbol=symbol, direction=direction, strategy=label,
-                                  source="scheduler", price=entry)
+                                  source="scheduler", price=entry,
+                                  extra=_tape_verdict.get("verdict"))
                 except Exception:
                     pass  # never let a notify failure block an order
                 # Resolve the per-assignment broker. "default" reuses the global
@@ -1718,7 +1742,8 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                     # Tape-health gate + re-entry cooldown (mirrors the assigned
                     # BUY path; runs before the cash gate so a veto frees budget).
                     _c_label = "consensus:" + "+".join(agreeing) if agreeing else "consensus"
-                    _tape_reason = _tape_gate_blocks(symbol, _c_label)
+                    _c_tape_verdict: dict = {}
+                    _tape_reason = _tape_gate_blocks(symbol, _c_label, _c_tape_verdict)
                     if _tape_reason:
                         logger.info(
                             "[scheduler] Consensus BUY %s vetoed by tape gate — %s",
@@ -1787,6 +1812,8 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                     from app.services.notifications.bus import notify_signal
                     notify_signal(symbol=symbol, direction=direction, strategy=consensus_label,
                                   source="scheduler", price=entry_p or None,
+                                  extra=(_c_tape_verdict.get("verdict")
+                                         if direction == "BUY" else None),
                                   gated=False)  # consensus may trade unassigned symbols
                 except Exception:
                     pass
