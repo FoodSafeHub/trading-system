@@ -59,6 +59,10 @@ def _dashboard_snapshot():
         "orders":    (api.orders, []),
         "autot":     (api.autotrader_status, {"running": False, "traders": {}}),
         "notif":     (api.notifications_unread_count, {"unread": 0}),
+        # FIFO round-trips — the ONLY correct source for realized P&L. The old
+        # sells-minus-buys cash-flow calc showed a lone BUY day as a big fake
+        # "realized loss".
+        "closed":    (lambda: api.pnl_closed_trades(limit=300), []),
     }
     out = {}
     with _futures.ThreadPoolExecutor(max_workers=len(jobs)) as ex:
@@ -93,6 +97,7 @@ positions = _data["positions"]
 orders    = _data["orders"]
 autot     = _data["autot"]
 notif_cnt = _data["notif"].get("unread", 0)
+closed_trades = _data.get("closed") or []
 
 # ── Page header ──────────────────────────────────────────────────────────────
 now_et = datetime.now(tz=ET).strftime("%H:%M ET · %a %b %d")
@@ -132,6 +137,15 @@ today_str  = datetime.now(tz=ET).strftime("%Y-%m-%d")
 filled     = [o for o in orders if o.get("status") == "filled"]
 today_fills = [o for o in filled if (o.get("created_at") or "").startswith(today_str)]
 
+# Realized P&L today = FIFO round-trips that CLOSED today (sell_at is ET-ISO).
+today_closed = [t for t in closed_trades if (t.get("sell_at") or "").startswith(today_str)]
+
+def _realized_today(broker: str | None = None) -> float:
+    rows = today_closed if broker is None else [
+        t for t in today_closed if (t.get("broker") or "").lower() == broker
+    ]
+    return sum(t.get("realized_pnl") or 0 for t in rows)
+
 accounts_by_broker:  dict[str, list[dict]] = defaultdict(list)
 positions_by_broker: dict[str, list[dict]] = defaultdict(list)
 for a in accounts:
@@ -160,14 +174,18 @@ def _render_broker_block(broker: str) -> None:
     fills_here     = [o for o in today_fills if _broker_of_order(o) == broker]
     cur            = currency_symbol(broker)
 
-    spent    = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in fills_here if o.get("side") == "BUY")
-    received = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in fills_here if o.get("side") == "SELL")
-    realised = received - spent
+    realised = _realized_today(broker)
+
+    def _sum_or_none(key: str):
+        # None only when NO account reported the field — a real 0 stays 0
+        # (`or None` used to turn a fully-invested $0 cash into "—").
+        vals = [a.get(key) for a in accts_here if a.get(key) is not None]
+        return sum(vals) if vals else None
 
     if accts_here:
-        eq   = sum(a.get("equity")       or 0 for a in accts_here) or None
-        cash = sum(a.get("cash")         or 0 for a in accts_here) or None
-        bp   = sum(a.get("buying_power") or 0 for a in accts_here) or None
+        eq   = _sum_or_none("equity")
+        cash = _sum_or_none("cash")
+        bp   = _sum_or_none("buying_power")
         acct_ids = [str(a.get("account_id") or "") for a in accts_here if a.get("account_id")]
         kpi_row([
             ("Equity",       money(eq,       currency=cur)),
@@ -222,22 +240,36 @@ def _hero_metric(label: str, value: str, sub: str = "", *, tone: str = "") -> st
         f"</div>"
     )
 
-total_equity = sum((a.get("equity") or 0) for a in accounts) or None
-total_cash   = sum((a.get("cash") or 0) for a in accounts) or None
-total_upnl   = sum((p.get("unrealized_pnl") or 0) for p in positions)
+# USD-only aggregates: Zerodha reports in rupees, so summing it into a $ total
+# silently inflated equity/cash/unrealized. INR brokers show in their own tab.
+def _usd(rows: list[dict]) -> list[dict]:
+    return [r for r in rows if currency_symbol((r.get("broker") or "").lower()) == "$"]
+
+usd_accounts  = _usd(accounts)
+usd_positions = _usd(positions)
+has_inr       = len(usd_accounts) != len(accounts) or len(usd_positions) != len(positions)
+
+total_equity = sum((a.get("equity") or 0) for a in usd_accounts) or None
+total_cash_vals = [a.get("cash") for a in usd_accounts if a.get("cash") is not None]
+total_cash   = sum(total_cash_vals) if total_cash_vals else None
+total_upnl   = sum((p.get("unrealized_pnl") or 0) for p in usd_positions)
 open_pos     = len([p for p in positions if (p.get("quantity") or 0) != 0])
-day_buys     = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in today_fills if o.get("side") == "BUY")
-day_sells    = sum((o.get("fill_price") or 0) * (o.get("quantity") or 0) for o in today_fills if o.get("side") == "SELL")
-day_realised = day_sells - day_buys
+day_realised = sum(
+    t.get("realized_pnl") or 0
+    for t in today_closed
+    if currency_symbol((t.get("broker") or "").lower()) == "$"
+)
 upnl_tone    = "pos" if total_upnl > 0 else "neg" if total_upnl < 0 else "muted"
 real_tone    = "pos" if day_realised > 0 else "neg" if day_realised < 0 else "muted"
+_eq_sub      = f"{len(broker_keys)} broker(s)" + (" · USD only, ₹ in its tab" if has_inr else "")
 
 st.markdown(
     "<div class='tx-hero'>"
-    + _hero_metric("Total Equity", money(total_equity), f"{len(broker_keys)} broker(s)")
+    + _hero_metric("Total Equity", money(total_equity), _eq_sub)
     + _hero_metric("Cash", money(total_cash))
     + _hero_metric("Unrealised P&L", money(total_upnl), f"{open_pos} open position(s)", tone=upnl_tone)
-    + _hero_metric("Realised P&L Today", money(day_realised), f"{len(today_fills)} fill(s)", tone=real_tone)
+    + _hero_metric("Realised P&L Today", money(day_realised),
+                   f"{len(today_closed)} round-trip(s) closed", tone=real_tone)
     + "</div>",
     unsafe_allow_html=True,
 )
@@ -326,14 +358,15 @@ if filled:
     rows = []
     for o in recent:
         _side = o.get("side", "—")
+        _bk = (o.get("broker") or "").lower()
         rows.append({
             "Time":     (o.get("created_at") or "")[11:19],
             "Date":     (o.get("created_at") or "")[:10],
-            "Broker":   _broker_label((o.get("broker") or "").lower()),
+            "Broker":   _broker_label(_bk),
             "Symbol":   o.get("symbol", "—"),
             "Side":     _side,
             "Qty":      o.get("quantity", "—"),
-            "Fill $":   money(o.get("fill_price")),
+            "Fill":     money(o.get("fill_price"), currency=currency_symbol(_bk)),
             "Strategy": o.get("strategy_name") or "—",
         })
     df_fills = pd.DataFrame(rows)

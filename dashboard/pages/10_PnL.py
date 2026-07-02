@@ -557,9 +557,11 @@ else:
     n_trail_exit = int((df_tr["exit_type"] == "trail").sum()) if "exit_type" in df_tr else 0
     avg_captured = captured.mean() if len(captured) else 0.0
     beat_signal = int((captured > 0).sum())
+    # USD rows only — mixing rupee trades into a $ metric inflates it ~80×.
     extra_dollars = sum(
         ((r.get("sell_price") or 0) - (r.get("signal_price") or 0)) * (r.get("quantity") or 0)
         for r in _trail_rows
+        if currency_symbol(r.get("broker")) == "$"
     )
 
     ta1, ta2, ta3, ta4, ta5 = st.columns(5)
@@ -574,7 +576,8 @@ else:
     ta4.metric("Beat the signal", f"{beat_signal} / {n_total}",
                help="Trades that exited ABOVE the signal price.")
     ta5.metric("Extra captured ($)", f"${extra_dollars:+,.2f}",
-               help="Total dollars vs selling at the signal price: Σ (exit − signal) × qty.")
+               help="Total dollars vs selling at the signal price: Σ (exit − signal) × qty. "
+                    "USD trades only — rupee (Zerodha) trades are excluded from this total.")
     if len(eff):
         st.caption(f"Avg **capture efficiency** (where a peak was recorded): **{eff.mean():.0f}%** "
                    f"of the signal→peak run-up kept, across {len(eff)} trade(s).")
@@ -588,12 +591,13 @@ else:
         exit_p = row.get("sell_price")
         captured = row.get("trail_captured_pct")
         eff_val = row.get("capture_efficiency_pct")
+        cur = currency_symbol(row.get("broker"))
         return {
             "Symbol": row.get("symbol", ""),
             "Signal fired": (row.get("signal_at") or "")[:16].replace("T", " "),
-            "Signal $": f"${sig_p:.2f}" if sig_p else "—",
-            "Peak $": f"${peak_p:.2f}" if peak_p else "—",
-            "Exit $": f"${exit_p:.2f}" if exit_p else "—",
+            "Signal": f"{cur}{sig_p:.2f}" if sig_p else "—",
+            "Peak": f"{cur}{peak_p:.2f}" if peak_p else "—",
+            "Exit px": f"{cur}{exit_p:.2f}" if exit_p else "—",
             "Trail captured": f"{captured:+.2f}%" if captured is not None else "—",
             "Capture eff.": f"{eff_val:.0f}%" if eff_val is not None else "—",
             "Total P/L %": f"{row.get('realized_pct', 0):+.2f}%",

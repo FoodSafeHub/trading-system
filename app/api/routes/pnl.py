@@ -212,10 +212,16 @@ def _refresh(db: Session):
 
     # Drop user-excluded symbols from EVERY PnL view (closed list here; open lots
     # below). For holdings managed outside this system so they don't skew P/L.
-    excluded = get_settings().pnl_excluded
+    settings = get_settings()
+    excluded = settings.pnl_excluded
     if excluded:
         closed = [c for c in closed if (getattr(c, "symbol", "") or "").upper() not in excluded]
         fifo.open_lots = [l for l in fifo.open_lots if (l.symbol or "").upper() not in excluded]
+    # Paper fills (tests, manual dry-runs) are not real money — without this a
+    # paper BUY lingers forever as a phantom "open position" on the PnL page.
+    if settings.pnl_exclude_paper:
+        closed = [c for c in closed if not getattr(c, "is_paper", False)]
+        fifo.open_lots = [l for l in fifo.open_lots if not l.is_paper]
     return closed, fifo
 
 
@@ -348,9 +354,12 @@ def _broker_positions() -> dict[str, dict]:
     import asyncio
     from app.services.brokers.factory import get_position_brokers
 
-    excluded = get_settings().pnl_excluded
+    settings = get_settings()
+    excluded = settings.pnl_excluded
     result: dict[str, dict] = {}
     for broker in get_position_brokers():
+        if settings.pnl_exclude_paper and (getattr(broker, "name", "") or "").lower() == "paper":
+            continue
         try:
             loop = asyncio.new_event_loop()
             try:
