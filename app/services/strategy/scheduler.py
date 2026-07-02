@@ -284,7 +284,11 @@ def _reconcile_trail_stops(
                             symbol=symbol, direction="SELL",
                             strategy=sig.strategy_name, source="scheduler",
                             price=sig_price,
-                            extra=f"Tight trail armed ({trail_pct:.1f}%).",
+                            extra=(
+                                f"Tight trail armed ({trail_pct:.1f}%)."
+                                if trail_pct is not None
+                                else "Tight trail armed (ATR-adaptive)."
+                            ),
                         )
                     except Exception:
                         pass  # never let a notify failure break the trail
@@ -449,6 +453,151 @@ def _notify_suppress(*, symbol: str, direction: str, reason: str,
         )
     except Exception:
         pass
+
+
+def _time_stop_pass(loop, current_positions: dict, live_prices: dict,
+                    assignments: list, svc_for) -> None:
+    """Arm a tight exit trail on STALE LOSING bot positions.
+
+    A mean-reversion swing that hasn't worked after time_stop_days has no edge
+    left — but instead of dumping at market, arm the existing floored-trail
+    machinery ~1% under the current price (ATR-adaptive width above), so the
+    position exits on the next stall/bounce and can't keep bleeding for weeks
+    (ZM sat 23 days, GEN 44). Winners and young positions are untouched.
+    Best-effort: any error only logs.
+    """
+    from datetime import datetime, timedelta
+    from app.config import get_settings
+    days = float(get_settings().time_stop_days or 0)
+    if days <= 0:
+        return
+    try:
+        from app.db import SessionLocal
+        from app.services.pnl.fifo import compute_fifo
+        with SessionLocal() as db:
+            fifo = compute_fifo(db)
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        # Oldest lot age + weighted avg cost per symbol (real-money lots only).
+        by_sym: dict[str, dict] = {}
+        for lot in fifo.open_lots:
+            if lot.is_paper:
+                continue
+            rec = by_sym.setdefault(lot.symbol.upper(), {"cost": 0.0, "qty": 0.0, "oldest": lot.buy_at})
+            rec["cost"] += lot.buy_price * lot.quantity
+            rec["qty"] += lot.quantity
+            if lot.buy_at < rec["oldest"]:
+                rec["oldest"] = lot.buy_at
+
+        for sym, rec in by_sym.items():
+            held = current_positions.get(sym, 0.0)
+            if held < 1.0 or rec["qty"] <= 0:
+                continue
+            oldest = rec["oldest"]
+            oldest = oldest.replace(tzinfo=None) if getattr(oldest, "tzinfo", None) else oldest
+            if oldest > cutoff:
+                continue  # not stale yet
+            last = live_prices.get(sym) or 0.0
+            avg_cost = rec["cost"] / rec["qty"]
+            if last <= 0 or last >= avg_cost:
+                continue  # only losing positions get the time-stop
+            asgn = next((a for a in assignments if a["symbol"].upper() == sym), None)
+            exec_svc, exec_acct = svc_for((asgn or {}).get("broker", "default") or "default")
+            age_d = (datetime.utcnow() - oldest).days
+            logger.info(
+                "[scheduler] TIME-STOP %s: held %dd, %.1f%% under cost — arming tight exit trail.",
+                sym, age_d, (last / avg_cost - 1) * 100,
+            )
+            try:
+                ok = loop.run_until_complete(exec_svc.tighten_trail_on_sell(
+                    symbol=sym,
+                    quantity=min(held, rec["qty"]),
+                    account_id=exec_acct,
+                    # Floor just under the market so the trail arms immediately
+                    # and the worst case is ~1% below here — not weeks more drift.
+                    signal_price=round(last * 0.99, 4),
+                    trail_pct=None,   # ATR-adaptive width
+                    source="scheduler",
+                    idempotency_suffix=f"timestop-{sym}",
+                ))
+                if ok:
+                    _notify_suppress(
+                        symbol=sym, direction="SELL", reason="time_stop",
+                        detail=(f"Held {age_d}d and {abs(last / avg_cost - 1) * 100:.1f}% under cost "
+                                f"— time-stop armed a tight exit trail near ${last:,.2f}."),
+                    )
+            except Exception as exc:
+                logger.warning("[scheduler] time-stop trail failed for %s: %s", sym, exc)
+    except Exception as exc:
+        logger.warning("[scheduler] time-stop pass failed: %s", exc)
+
+
+def _tape_gate_blocks(symbol: str, strategy_name: str | None) -> str | None:
+    """Knife-entry veto: returns a human-readable reason when the symbol's own
+    short-horizon tape is in freefall, else None (BUY may proceed).
+
+    The strategies' trend filters are all slow (SMA200 / EMA50 slope / SPY
+    regime) and let a 2-week 10-20% crash through — this gate measures the
+    fast tape. Fail-open on any error (never block a trade on missing data).
+    """
+    from app.config import get_settings
+    s = get_settings()
+    if not s.tape_gate_enabled:
+        return None
+    try:
+        from app.services.strategy.tape_health import check_tape_health
+        th = check_tape_health(
+            symbol, strategy_name,
+            max_5d_drop_pct=s.tape_gate_max_5d_drop_pct,
+            max_red_streak=s.tape_gate_max_red_streak,
+            max_below_ema20_pct=s.tape_gate_max_below_ema20_pct,
+            max_off_20d_high_pct=s.tape_gate_max_off_20d_high_pct,
+        )
+        return None if th.ok else th.summary
+    except Exception as exc:
+        logger.warning("[scheduler] tape gate failed for %s (fail-open): %s", symbol, exc)
+        return None
+
+
+def _in_reentry_cooldown(symbol: str, label: str) -> str | None:
+    """Repeat-BUY guard: returns a reason string when this symbol+strategy
+    already bought within buy_reentry_cooldown_days, else None.
+
+    Stops a persistent entry condition (e.g. RSI2 pinned low for days) from
+    pyramiding the same signal several sessions in a row. Matches on the
+    scheduler's own BUY orders whose linked signal has the same strategy label
+    (orders with no signal link count as a symbol-level match, conservatively).
+    """
+    from datetime import datetime, timedelta
+    from app.config import get_settings
+    days = float(get_settings().buy_reentry_cooldown_days or 0)
+    if days <= 0:
+        return None
+    try:
+        from app.db import SessionLocal
+        from app.models.orders import Order
+        from app.models.signals import Signal
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        with SessionLocal() as db:
+            rows = (
+                db.query(Order, Signal.strategy_name)
+                .outerjoin(Signal, Order.signal_id == Signal.id)
+                .filter(
+                    Order.symbol == (symbol or "").upper(),
+                    Order.side == "BUY",
+                    Order.source == "scheduler",
+                    Order.status.in_(["filled", "submitted", "working", "pending"]),
+                    Order.created_at >= cutoff,
+                )
+                .all()
+            )
+        for o, sig_label in rows:
+            if sig_label is None or sig_label == label:
+                when = str(o.created_at)[:16]
+                return f"already bought {when} via {sig_label or 'scheduler'} (cooldown {days:.0f}d)"
+        return None
+    except Exception as exc:
+        logger.warning("[scheduler] cooldown check failed for %s (fail-open): %s", symbol, exc)
+        return None
 
 
 def _buy_priority_key(item, signal_conf: dict) -> tuple[int, float]:
@@ -1181,6 +1330,34 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                                         f"open) — new entry for {sig_system}:{sig_strategy} blocked."),
                             )
                             continue
+                    # Tape-health gate: veto a BUY into the symbol's own freefall
+                    # (fast 5d drop / red streak / far below EMA20 / deep off the
+                    # 20d high). Runs BEFORE the cash gate so a vetoed BUY doesn't
+                    # consume budget another signal could use.
+                    _tape_reason = _tape_gate_blocks(symbol, sig_strategy)
+                    if _tape_reason:
+                        logger.info(
+                            "[scheduler] BUY %s (%s:%s) vetoed by tape gate — %s",
+                            symbol, sig_system, sig_strategy, _tape_reason,
+                        )
+                        _notify_suppress(
+                            symbol=symbol, direction="BUY", reason="tape_health",
+                            detail=f"{sig_system}:{sig_strategy} — knife veto: {_tape_reason}",
+                        )
+                        continue
+                    # Re-entry cooldown: don't pyramid the same symbol+strategy
+                    # while its entry condition persists across sessions.
+                    _cd_reason = _in_reentry_cooldown(symbol, label)
+                    if _cd_reason:
+                        logger.info(
+                            "[scheduler] BUY %s (%s:%s) skipped — %s",
+                            symbol, sig_system, sig_strategy, _cd_reason,
+                        )
+                        _notify_suppress(
+                            symbol=symbol, direction="BUY", reason="reentry_cooldown",
+                            detail=f"{sig_system}:{sig_strategy} — {_cd_reason}",
+                        )
+                        continue
                     # Cash gate: the per-symbol cap sizes the position; the broker
                     # balance decides how many of those shares we can actually
                     # afford right now. Clamp qty down to what remaining cash can
@@ -1299,6 +1476,19 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                     ))
                     if trail_ok:
                         _mark_signal_acted_on(symbol, direction, label)
+                        try:
+                            from app.services.notifications.bus import notify_signal
+                            notify_signal(
+                                symbol=symbol, direction=direction, strategy=label,
+                                source="scheduler", price=entry,
+                                extra=(
+                                    f"Tight trail armed ({trail_pct:.1f}%)."
+                                    if trail_pct is not None
+                                    else "Tight trail armed (ATR-adaptive)."
+                                ),
+                            )
+                        except Exception:
+                            pass
                     else:
                         logger.error(
                             "[scheduler] SELL %s: tighten_trail_on_sell returned False "
@@ -1311,13 +1501,6 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                                     f"UNPROTECTED; reconcile will retry next cycle."),
                             toast=True,
                         )
-
-                    try:
-                        from app.services.notifications.bus import notify_signal
-                        notify_signal(symbol=symbol, direction=direction, strategy=label,
-                                      source="scheduler", price=entry)
-                    except Exception:
-                        pass
                     continue  # skip the generic order block below — trail already placed
 
                 # ── BUY order construction (SELL continues above) ────────────
@@ -1438,7 +1621,8 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                             from app.services.notifications.bus import notify_signal
                             notify_signal(symbol=symbol, direction=direction,
                                           strategy=consensus_label, source="scheduler",
-                                          price=entry_p)
+                                          price=entry_p, extra="Market exit (Approach C off).",
+                                          gated=False)
                         except Exception:
                             pass
                         continue
@@ -1477,15 +1661,22 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                                     f"position UNPROTECTED; reconcile will retry."),
                             toast=True,
                         )
-                    try:
-                        from app.services.notifications.bus import notify_signal
-                        notify_signal(
-                            symbol=symbol, direction=direction,
-                            strategy=consensus_label, source="scheduler",
-                            price=entry_p or None,
-                        )
-                    except Exception:
-                        pass
+                    else:
+                        try:
+                            from app.services.notifications.bus import notify_signal
+                            notify_signal(
+                                symbol=symbol, direction=direction,
+                                strategy=consensus_label, source="scheduler",
+                                price=entry_p or None,
+                                extra=(
+                                    f"Tight trail armed ({c_trail_pct:.1f}%)."
+                                    if c_trail_pct is not None
+                                    else "Tight trail armed (ATR-adaptive)."
+                                ),
+                                gated=False,  # consensus may trade unassigned symbols
+                            )
+                        except Exception:
+                            pass
                     continue  # SELL done via trail — skip the generic block below
                 else:
                     entry_p = live_prices.get(symbol) or 0.0
@@ -1524,6 +1715,30 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                                 symbol, open_count, max_open_positions,
                             )
                             continue
+                    # Tape-health gate + re-entry cooldown (mirrors the assigned
+                    # BUY path; runs before the cash gate so a veto frees budget).
+                    _c_label = "consensus:" + "+".join(agreeing) if agreeing else "consensus"
+                    _tape_reason = _tape_gate_blocks(symbol, _c_label)
+                    if _tape_reason:
+                        logger.info(
+                            "[scheduler] Consensus BUY %s vetoed by tape gate — %s",
+                            symbol, _tape_reason,
+                        )
+                        _notify_suppress(
+                            symbol=symbol, direction="BUY", reason="tape_health",
+                            detail=f"{_c_label} — knife veto: {_tape_reason}",
+                        )
+                        continue
+                    _cd_reason = _in_reentry_cooldown(symbol, _c_label)
+                    if _cd_reason:
+                        logger.info(
+                            "[scheduler] Consensus BUY %s skipped — %s", symbol, _cd_reason,
+                        )
+                        _notify_suppress(
+                            symbol=symbol, direction="BUY", reason="reentry_cooldown",
+                            detail=f"{_c_label} — {_cd_reason}",
+                        )
+                        continue
                     # Cash gate (mirrors the assigned BUY path): clamp to what the
                     # broker balance can afford and skip if it can't fund 1 share.
                     c_broker = (c_asgn.get("broker") if c_asgn else "default") or "default"
@@ -1571,7 +1786,8 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                 try:
                     from app.services.notifications.bus import notify_signal
                     notify_signal(symbol=symbol, direction=direction, strategy=consensus_label,
-                                  source="scheduler", price=entry_p or None)
+                                  source="scheduler", price=entry_p or None,
+                                  gated=False)  # consensus may trade unassigned symbols
                 except Exception:
                     pass
                 loop.run_until_complete(svc.execute(
@@ -1593,6 +1809,9 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                     )
                 except Exception as exc:
                     logger.warning("[scheduler] Trail reconcile pass failed: %s", exc)
+                # Time-stop: stale losing positions get a tight exit trail so
+                # dead money recycles instead of drifting for weeks.
+                _time_stop_pass(loop, current_positions, live_prices, assignments, _svc_for)
         finally:
             loop.close()
 

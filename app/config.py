@@ -89,6 +89,34 @@ class Settings(BaseSettings):
     # summary count/unrealized, realized/closed). For holdings the user manages
     # outside this system (e.g. a long-term ETF) so they don't skew strategy P/L.
     pnl_exclude_symbols: str = ""
+    # Hide paper-broker fills from ALL PnL views. Paper orders (tests, manual
+    # dry-runs) otherwise linger as phantom open lots on the PnL page. Set false
+    # only when actively paper trading and you WANT PnL to track the paper account.
+    pnl_exclude_paper: bool = True
+
+    # ── Tape-health BUY gate (knife-entry veto) ──────────────────────────────
+    # Blocks scheduler BUYs when the SYMBOL'S OWN short-horizon tape is in
+    # freefall (fast drop / red streak / far below EMA20 / deep off the 20d
+    # high) — the dimension none of the strategies' slow trend filters cover.
+    # Audited 2026-07-02: would have blocked all 10 losing knife entries and
+    # none of the 9 clean ones. Panic strategies (RSI2/VIX-spike) are exempt
+    # from the velocity checks inside the gate itself.
+    tape_gate_enabled: bool = True
+    tape_gate_max_5d_drop_pct: float = 6.0
+    tape_gate_max_red_streak: int = 4
+    tape_gate_max_below_ema20_pct: float = 5.0
+    tape_gate_max_off_20d_high_pct: float = 12.0
+
+    # Re-entry cooldown: no repeat BUY for the same symbol+strategy within this
+    # many days. Stops a persistent condition (RSI2 pinned low) from pyramiding
+    # the same entry several sessions in a row (NVDA bought 3x in 2 days).
+    buy_reentry_cooldown_days: float = 5.0
+
+    # Time-stop: a mean-reversion swing that hasn't worked after this many days
+    # statistically won't — arm a tight ATR trail on stale LOSING positions so
+    # they exit on any bounce instead of sitting for weeks (ZM 23d, GEN 44d).
+    # 0 disables.
+    time_stop_days: float = 15.0
 
     @property
     def pnl_excluded(self) -> set[str]:
