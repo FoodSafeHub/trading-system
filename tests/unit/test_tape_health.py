@@ -72,6 +72,37 @@ def test_garbage_input_fails_open():
     assert th.ok
 
 
+def test_annotate_backtest_trades_buckets_by_verdict():
+    from app.services.strategy.tape_health import annotate_backtest_trades
+    # 60 healthy bars, then a crash into bar 65 — a BUY there is a knife.
+    closes = _steady(60, 100) + [100, 95, 90, 86, 82, 84, 86, 88, 90, 92]
+    df = _ohlcv(closes)
+    dates = [str(i) for i in range(len(closes))]
+    df.index = pd.to_datetime("2026-01-01") + pd.to_timedelta(range(len(closes)), unit="D")
+    d = lambda i: str(df.index[i])[:10]
+
+    trades = [
+        {"date": d(30), "side": "BUY",  "value": 1000.0},   # healthy tape
+        {"date": d(40), "side": "SELL", "value": 1100.0},   # +10%
+        {"date": d(64), "side": "BUY",  "value": 1000.0},   # mid-crash knife
+        {"date": d(69), "side": "SELL", "value": 950.0},    # -5%
+    ]
+    summary = annotate_backtest_trades("TEST", trades, df, "TEST_Fib_Pullback")
+
+    assert trades[0]["tape_gate"] == "pass"
+    assert trades[2]["tape_gate"] == "block"
+    assert trades[2]["tape_gate_reason"]
+    assert summary["blocked_buys"] == 1
+    assert summary["pass"]["round_trips"] == 1
+    assert summary["block"]["round_trips"] == 1
+    assert summary["pass"]["avg_return_pct"] > 0 > summary["block"]["avg_return_pct"]
+
+
+def test_annotate_fails_open_on_garbage():
+    from app.services.strategy.tape_health import annotate_backtest_trades
+    assert annotate_backtest_trades("TEST", [{"bad": 1}], None) == {}
+
+
 def test_scheduler_wiring_present():
     """Structural: both scheduler BUY paths must consult the gate + cooldown
     BEFORE spending cash, and the module-level helpers must exist."""

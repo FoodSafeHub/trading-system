@@ -115,3 +115,93 @@ def check_tape_health(
     except Exception as exc:
         logger.warning("[tape_health] %s check failed (fail-open): %s", symbol, exc)
         return TapeHealth(ok=True, metrics={"error": str(exc)})
+
+
+def verdict_line(th: TapeHealth) -> str:
+    """One-line human verdict for notifications / scan reasons / trade rows."""
+    m = th.metrics or {}
+    if "ret_5d_pct" not in m:
+        return "Tape gate: skipped (insufficient data)"
+    if th.ok:
+        return (f"Tape gate: PASSED — 5d {m['ret_5d_pct']:+.1f}%, "
+                f"{m['red_streak']} red, EMA20 {m['vs_ema20_pct']:+.1f}%, "
+                f"20d-high {m['off_20d_high_pct']:+.1f}%")
+    return f"Tape gate: BLOCKED — {th.summary}"
+
+
+def annotate_backtest_trades(
+    symbol: str,
+    trades: list[dict],
+    ohlcv,
+    strategy_name: str | None = None,
+) -> dict:
+    """Stamp a point-in-time tape-gate verdict on every BUY in a backtest trade
+    list, and summarize how gated vs clean entries performed.
+
+    trades: list of dicts with at least {date, side, value} (the shape every
+    backtest endpoint already returns). Mutated in place — each BUY gains
+    `tape_gate` ("pass"|"block") and `tape_gate_reason`.
+
+    Returns a summary dict:
+        {"pass":  {"round_trips": n, "win_rate_pct": x, "avg_return_pct": y},
+         "block": {...same...},
+         "blocked_buys": n_blocked}
+    so the UI can show, per strategy, what the knife veto would have done to
+    the historical trade set. Best-effort: returns {} on any failure and never
+    raises into the endpoint.
+    """
+    try:
+        import pandas as pd
+        df = ohlcv.copy()
+        df.index = pd.to_datetime(df.index)
+        try:
+            df.index = df.index.tz_localize(None)
+        except TypeError:
+            pass  # already naive
+
+        buckets: dict[str, list[float]] = {"pass": [], "block": []}
+        n_blocked = 0
+        open_verdict: str | None = None
+
+        for t in trades:
+            side = (t.get("side") or "").upper()
+            if side == "BUY":
+                hist = df.loc[: str(t.get("date"))[:10]]
+                th = check_tape_health(symbol, strategy_name, ohlcv=hist)
+                verdict = "pass" if th.ok else "block"
+                t["tape_gate"] = verdict
+                t["tape_gate_reason"] = th.summary if not th.ok else ""
+                open_verdict = verdict
+                if verdict == "block":
+                    n_blocked += 1
+            elif "SELL" in side and open_verdict is not None:
+                # Pair with the most recent BUY (engines emit alternating
+                # BUY/SELL round-trips).
+                buy = next(
+                    (x for x in reversed(trades[: trades.index(t)])
+                     if (x.get("side") or "").upper() == "BUY"),
+                    None,
+                )
+                if buy and (buy.get("value") or 0) > 0:
+                    pct = ((t.get("value") or 0) - buy["value"]) / buy["value"] * 100
+                    buckets[open_verdict].append(pct)
+                open_verdict = None
+
+        def _stats(rets: list[float]) -> dict:
+            if not rets:
+                return {"round_trips": 0, "win_rate_pct": None, "avg_return_pct": None}
+            wins = sum(1 for r in rets if r > 0)
+            return {
+                "round_trips": len(rets),
+                "win_rate_pct": round(wins / len(rets) * 100, 1),
+                "avg_return_pct": round(sum(rets) / len(rets), 2),
+            }
+
+        return {
+            "pass": _stats(buckets["pass"]),
+            "block": _stats(buckets["block"]),
+            "blocked_buys": n_blocked,
+        }
+    except Exception as exc:
+        logger.warning("[tape_health] trade annotation failed for %s: %s", symbol, exc)
+        return {}

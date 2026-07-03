@@ -130,6 +130,7 @@ def backtest_consensus(
             "sharpe_ratio": result.sharpe_ratio,
             "equity_curve": result.equity_curve,
             "trades": result.trades,
+            "tape_gate_summary": _annotate_tape_gate(sym, result.trades, period, "consensus"),
         }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -329,12 +330,29 @@ def backtest_run_generic(
         "max_drawdown_pct": result.max_drawdown_pct,
         "sharpe_ratio": result.sharpe_ratio,
         "equity_curve": result.equity_curve,
-        "trades": [
+        "trades": (_trades := [
             {"date": t.date, "side": t.side, "price": t.price,
              "quantity": t.quantity, "value": round(t.value, 2)}
             for t in result.trades
-        ],
+        ]),
+        # Point-in-time knife-veto audit: stamps tape_gate pass/block on each
+        # BUY and summarizes how gated vs clean entries performed, so the user
+        # sees what the live gate would have done to this strategy's history.
+        "tape_gate_summary": _annotate_tape_gate(sym, _trades, period, cfg.type),
     }
+
+
+def _annotate_tape_gate(symbol: str, trades: list[dict], period: str,
+                        strategy_name: str | None) -> dict:
+    """Best-effort tape-gate annotation for backtest trade lists (shared by
+    run-generic / custom-consensus / compare-all). Never raises."""
+    try:
+        from app.services.market_data.provider import get_ohlcv
+        from app.services.strategy.tape_health import annotate_backtest_trades
+        df = get_ohlcv(symbol, period=period)
+        return annotate_backtest_trades(symbol, trades, df, strategy_name)
+    except Exception:
+        return {}
 
 
 @router.get("/walkforward/{symbol}/{strategy_type}")
@@ -446,6 +464,7 @@ def backtest_custom_consensus(
         "sharpe_ratio": result.sharpe_ratio,
         "equity_curve": result.equity_curve,
         "trades": result.trades,
+        "tape_gate_summary": _annotate_tape_gate(sym, result.trades, period, "consensus"),
     }
 
 
@@ -598,6 +617,19 @@ def backtest_custom_compare_all(
     except Exception:
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(configs))) as tex:
             results = list(tex.map(_run_cfg, configs))
+
+    # Knife-veto audit per strategy: stamp tape_gate pass/block on each BUY and
+    # attach a pass-vs-block performance split, so the Compare-All table can show
+    # how much of each strategy's edge came from entries the live gate now blocks.
+    try:
+        from app.services.strategy.tape_health import annotate_backtest_trades
+        for r in results:
+            if r.get("trades"):
+                r["tape_gate_summary"] = annotate_backtest_trades(
+                    sym, r["trades"], df_shared, r.get("strategy_type"),
+                )
+    except Exception:
+        pass
     return results
 
 

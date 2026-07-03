@@ -295,6 +295,7 @@ def run_scan(config: ScanConfig) -> ScanSummary:
                 "avg_vol": data["avg_vol"],
                 "reason": reason,
                 "indicators_json": None,
+                "_df": data["df"],  # for the tape-gate stamp below; dropped before persist
             })
 
     # Sort by score descending
@@ -308,6 +309,23 @@ def run_scan(config: ScanConfig) -> ScanSummary:
         candidates = [c for c in candidates if str(c.get("direction", "")).upper() == wanted_dir]
 
     top = candidates[: config.top_n]
+
+    # Stamp the tape-health verdict on each top BUY candidate's reason, so the
+    # scanner table shows up-front whether the scheduler's knife veto would
+    # allow or block this entry ("Tape gate: PASSED — …" / "BLOCKED — …").
+    # Uses the OHLCV already fetched for scoring — no extra data calls.
+    for c in top:
+        df_c = c.pop("_df", None)
+        if str(c.get("direction", "")).upper() != "BUY" or df_c is None:
+            continue
+        try:
+            from app.services.strategy.tape_health import check_tape_health, verdict_line
+            th = check_tape_health(c["symbol"], c.get("strategy_name"), ohlcv=df_c)
+            c["reason"] = f"{c['reason']} · {verdict_line(th)}"
+        except Exception:
+            pass
+    for c in candidates:
+        c.pop("_df", None)  # never persist/serialize the frame
 
     logger.info(
         "[scanner] %s symbols scanned, %s passed filters (%s float-rejected), "

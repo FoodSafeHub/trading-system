@@ -97,6 +97,17 @@ def _show_candidates(candidates: list, *, key_prefix: str = "cands") -> None:
 
         # Reason: strip verbose prefix, keep signal core
         raw_reason = c.get("reason") or "—"
+        # Tape-gate verdict (appended by the scanner) → its own column so the
+        # 60-char Signal truncation can't hide it.
+        tape_col = ""
+        if " · Tape gate: " in raw_reason:
+            raw_reason, _, _tape = raw_reason.partition(" · Tape gate: ")
+            if _tape.startswith("PASSED"):
+                tape_col = "🟢 clear"
+            elif _tape.startswith("BLOCKED"):
+                tape_col = "🔴 " + _tape.replace("BLOCKED — ", "")
+            else:
+                tape_col = _tape
         if raw_reason.startswith("N strategies agree:"):
             # "N strategies agree: A, B, C" → just the strategy names
             raw_reason = raw_reason.split(":", 1)[-1].strip()
@@ -113,6 +124,7 @@ def _show_candidates(candidates: list, *, key_prefix: str = "cands") -> None:
             "Price":      c.get("price") or None,
             "Avg Vol M":  (c.get("avg_volume") or 0) / 1_000_000,   # shown as xM
             "Best strategy": best_str,
+            "Tape":       tape_col,
             "Signal":     reason_short,
             "Scanned":    _fmt_et(c.get("scanned_at")),
         })

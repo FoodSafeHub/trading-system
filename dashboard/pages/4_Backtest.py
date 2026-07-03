@@ -551,6 +551,35 @@ def _render_backtest_metrics(r: dict) -> None:
     c6.metric("Sharpe Ratio",     r["sharpe_ratio"] if r["sharpe_ratio"] else "—")
 
 
+def _render_tape_gate_summary(summary: dict | None) -> None:
+    """Knife-veto audit panel: how entries the live tape gate would ALLOW vs
+    BLOCK performed in this backtest. Blocked entries doing worse = the gate
+    is protecting you; blocked entries doing better = thresholds too tight."""
+    if not summary or not summary.get("blocked_buys"):
+        if summary is not None and summary.get("pass", {}).get("round_trips"):
+            st.caption("🛡️ Tape gate: every historical entry would have PASSED the knife veto.")
+        return
+    p, b = summary.get("pass", {}), summary.get("block", {})
+    st.markdown("**🛡️ Tape gate (knife veto) — what the live gate would have done here**")
+    g1, g2, g3, g4 = st.columns(4)
+    g1.metric("Blocked entries", summary.get("blocked_buys", 0),
+              help="BUYs the live scheduler gate would have vetoed (falling-knife tape).")
+    g2.metric("Allowed: avg return",
+              f"{p['avg_return_pct']:+.2f}%" if p.get("avg_return_pct") is not None else "—",
+              delta=f"{p['win_rate_pct']:.0f}% win" if p.get("win_rate_pct") is not None else None)
+    g3.metric("Blocked: avg return",
+              f"{b['avg_return_pct']:+.2f}%" if b.get("avg_return_pct") is not None else "—",
+              delta=f"{b['win_rate_pct']:.0f}% win" if b.get("win_rate_pct") is not None else None,
+              delta_color="inverse")
+    _p_avg, _b_avg = p.get("avg_return_pct"), b.get("avg_return_pct")
+    verdict = ("gate is FILTERING LOSERS — blocked entries underperformed"
+               if _p_avg is not None and _b_avg is not None and _b_avg < _p_avg
+               else "blocked entries did NOT underperform here — consider loosening thresholds"
+               if _p_avg is not None and _b_avg is not None else "not enough round-trips to judge")
+    g4.metric("Gate verdict", "🟢 helping" if "FILTERING" in verdict else "🟡 review")
+    st.caption(f"{verdict}. 🔴 knife rows in the trade table below are the entries the gate would deny going forward.")
+
+
 def _single_trades_table(trades: list) -> None:
     st.divider()
 
@@ -585,7 +614,15 @@ def _single_trades_table(trades: list) -> None:
     df["price"] = df["price"].apply(lambda v: f"${v:,.2f}")
     df["pnl"]   = df["pnl"].apply(_pnl_tag)
     df = df.rename(columns={"pnl": "profit / loss"})
-    for col in ["signal_from", "regime"]:
+    if "tape_gate" in df.columns:
+        df["tape_gate"] = df.apply(
+            lambda r: ("🟢 clear" if r.get("tape_gate") == "pass"
+                       else f"🔴 knife — {r.get('tape_gate_reason') or ''}"
+                       if r.get("tape_gate") == "block" else ""),
+            axis=1,
+        )
+        df = df.rename(columns={"tape_gate": "entry tape"})
+    for col in ["signal_from", "regime", "tape_gate_reason"]:
         if col in df.columns:
             df = df.drop(columns=[col])
     st.dataframe(
@@ -632,6 +669,9 @@ def _consensus_trades_table(trades: list) -> None:
         "quantity":      t.get("quantity"),
         "value":         t["value"] if t.get("value") is not None else None,
         "agreed by":     ", ".join(t.get("agreeing", [])) or "—",
+        "entry tape":    ("🟢 clear" if t.get("tape_gate") == "pass"
+                          else f"🔴 knife — {t.get('tape_gate_reason') or ''}"
+                          if t.get("tape_gate") == "block" else ""),
         "profit / loss": _pnl_tag(t.get("pnl")),
     } for t in trades]
 
@@ -1100,6 +1140,7 @@ if mode == "Single Strategy":
     _render_filter_summary(chosen_sym)
     _equity_chart(r, symbol=chosen_sym, period=period)
     _price_action_chart(r, chosen_sym, period)
+    _render_tape_gate_summary(r.get("tape_gate_summary"))
     _single_trades_table(r["trades"])
 
     # Analyze winners/losers and auto-tune this symbol's entry params.
@@ -1311,6 +1352,7 @@ elif mode == "Consensus Mode":
     _render_filter_summary(chosen_sym)
     _equity_chart(r, symbol=chosen_sym, period=period)
     _price_action_chart(r, chosen_sym, period)
+    _render_tape_gate_summary(r.get("tape_gate_summary"))
     _consensus_trades_table(r["trades"])
 
 
@@ -1436,6 +1478,7 @@ elif mode == "Custom Symbol":
             rows.append({
                 "Strategy":      r["strategy_name"],
                 "Trades":        "—",
+                "Knife entries": "—",
                 "Win Rate":      "—",
                 "Profit Factor": "—",
                 "Avg Win":       "—",
@@ -1451,9 +1494,12 @@ elif mode == "Custom Symbol":
         is_best = best is not None and r["strategy_name"] == best["strategy_name"]
         pf = r.get("profit_factor")
         sh = r.get("sharpe_ratio")
+        _tg = r.get("tape_gate_summary") or {}
+        _n_knife = _tg.get("blocked_buys", 0)
         rows.append({
             "Strategy":      ("⭐ " if is_best else "") + r["strategy_name"],
             "Trades":        r.get("total_trades", 0),
+            "Knife entries": f"🔴 {_n_knife}" if _n_knife else "🟢 0",
             "Win Rate":      f"{(r.get('win_rate_pct') or 0):.1f}%",
             "Profit Factor": f"{pf:.2f}" if pf is not None else "—",
             "Avg Win":       f"{(r.get('avg_win_pct') or 0):+.2f}%",
@@ -1504,6 +1550,7 @@ elif mode == "Custom Symbol":
             else:
                 _equity_chart(row, symbol=cmp_symbol, period=cmp_period)
                 _price_action_chart(row, cmp_symbol, cmp_period, key_suffix=sname)
+                _render_tape_gate_summary(row.get("tape_gate_summary"))
                 _single_trades_table(row["trades"])
 
     # ── Bar chart of returns (gold = winner) ───────────────────────────
