@@ -547,7 +547,7 @@ def _tape_gate_blocks(symbol: str, strategy_name: str | None,
     """
     from app.config import get_settings
     s = get_settings()
-    if not s.tape_gate_enabled:
+    if not tape_gate_enabled():
         if verdict_out is not None:
             verdict_out["verdict"] = "Tape gate: disabled"
         return None
@@ -790,12 +790,25 @@ def _run_budget_report_job() -> None:
         logger.error("[scheduler] Budget report job failed: %s", exc)
 
 
-def set_scheduler_system_flags(run_bollinger: bool | None, run_perplexity: bool | None) -> None:
-    global _override_run_bollinger, _override_run_perplexity
+def set_scheduler_system_flags(run_bollinger: bool | None, run_perplexity: bool | None,
+                               tape_gate: bool | None = None) -> None:
+    global _override_run_bollinger, _override_run_perplexity, _override_tape_gate
     if run_bollinger is not None:
         _override_run_bollinger = run_bollinger
     if run_perplexity is not None:
         _override_run_perplexity = run_perplexity
+    if tape_gate is not None:
+        _override_tape_gate = tape_gate
+
+
+_override_tape_gate: bool | None = None
+
+
+def tape_gate_enabled() -> bool:
+    """Runtime tape-gate switch: dashboard override wins, else settings default."""
+    if _override_tape_gate is not None:
+        return _override_tape_gate
+    return get_settings().tape_gate_enabled
 
 
 def _bollinger_enabled() -> bool:
@@ -2456,4 +2469,5 @@ def get_scheduler_status() -> dict:
         "next_run": next_run,
         "run_bollinger": _bollinger_enabled(),
         "run_perplexity": _perplexity_enabled(),
+        "tape_gate": tape_gate_enabled(),
     }

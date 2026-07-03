@@ -221,8 +221,11 @@ def run_scheduler_now(dry_run: bool = True):
 def scheduler_status():
     return _get("/strategy/scheduler")
 
-def update_scheduler_config(run_bollinger: bool | None = None, run_perplexity: bool | None = None):
+def update_scheduler_config(run_bollinger: bool | None = None, run_perplexity: bool | None = None,
+                            tape_gate: bool | None = None):
     params = {}
+    if tape_gate is not None:
+        params["tape_gate"] = str(tape_gate).lower()
     if run_bollinger is not None:
         params["run_bollinger"] = str(run_bollinger).lower()
     if run_perplexity is not None:

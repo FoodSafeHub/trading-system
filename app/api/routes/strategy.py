@@ -207,12 +207,15 @@ def scheduler_status():
 
 
 @router.post("/scheduler/config")
-def update_scheduler_config(run_bollinger: bool | None = None, run_perplexity: bool | None = None):
+def update_scheduler_config(run_bollinger: bool | None = None,
+                            run_perplexity: bool | None = None,
+                            tape_gate: bool | None = None):
     """
-    Toggle which strategy systems participate in the auto-scheduler cycle.
+    Toggle which strategy systems participate in the auto-scheduler cycle,
+    and the tape-health (knife-veto) BUY gate.
     Changes take effect on the next scheduled cycle — no restart required.
     """
-    set_scheduler_system_flags(run_bollinger, run_perplexity)
+    set_scheduler_system_flags(run_bollinger, run_perplexity, tape_gate)
     return get_scheduler_status()
 
 

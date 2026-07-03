@@ -851,6 +851,24 @@ with tab_backtest:
                     "Try a few trail %s to find the best for this strategy/symbol."
                 )
 
+        # ── Tape-gate (knife veto) audit — same panel as the Backtest page ──
+        _tg = r.get("tape_gate_summary") or {}
+        if _tg.get("blocked_buys"):
+            st.divider()
+            _p, _b = _tg.get("pass", {}), _tg.get("block", {})
+            st.markdown("**🛡️ Tape gate (knife veto) — what the live gate would have done here**")
+            tg1, tg2, tg3 = st.columns(3)
+            tg1.metric("Blocked entries", _tg["blocked_buys"],
+                       help="BUYs the scheduler's knife veto would have denied.")
+            tg2.metric("Allowed: avg return",
+                       f"{_p['avg_return_pct']:+.2f}%" if _p.get("avg_return_pct") is not None else "—",
+                       delta=f"{_p['win_rate_pct']:.0f}% win" if _p.get("win_rate_pct") is not None else None)
+            tg3.metric("Blocked: avg return",
+                       f"{_b['avg_return_pct']:+.2f}%" if _b.get("avg_return_pct") is not None else "—",
+                       delta=f"{_b['win_rate_pct']:.0f}% win" if _b.get("win_rate_pct") is not None else None,
+                       delta_color="inverse")
+            st.caption("🔴 knife rows in the trade log below mark entries the live gate now denies.")
+
         # Trade log
         if r.get("trades"):
             st.divider()
@@ -864,6 +882,9 @@ with tab_backtest:
                 rows.append({
                     "date":           t["date"],
                     "side":           "🟢 BUY" if t["side"] == "BUY" else "🔴 " + t["side"],
+                    "tape":           ("🟢 clear" if t.get("tape_gate") == "pass"
+                                       else f"🔴 knife — {t.get('tape_gate_reason') or ''}"
+                                       if t.get("tape_gate") == "block" else ""),
                     "price":          f"${t['price']:,.2f}",
                     "qty":            round(t["quantity"], 4),
                     "value":          f"${t['value']:,.2f}",

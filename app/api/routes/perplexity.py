@@ -363,6 +363,17 @@ def backtest(
     strategy = _STRATEGY_MAP.get(strategy_name)
     if not strategy:
         raise HTTPException(404, f"Strategy '{strategy_name}' not found")
+
+    def _annotate_tape_gate_pplx(sym: str, trades, per: str, strat: str) -> dict:
+        """Knife-veto audit for swing backtests (India symbols route through the
+        market-aware provider). Best-effort — never fails the backtest."""
+        try:
+            from app.services.market_data.provider import get_ohlcv
+            from app.services.strategy.tape_health import annotate_backtest_trades
+            return annotate_backtest_trades(sym, trades, get_ohlcv(sym, period=per), strat)
+        except Exception:
+            return {}
+
     try:
         result = run_perplexity_backtest(strategy, symbol.upper(), period, initial_capital,
                                          position_pct=position_pct,
@@ -395,6 +406,9 @@ def backtest(
             "sharpe_ratio": result.sharpe_ratio,
             "equity_curve": result.equity_curve,
             "trades": result.trades,
+            "tape_gate_summary": _annotate_tape_gate_pplx(
+                symbol.upper(), result.trades, period, strategy_name,
+            ),
             **({
                 "breakdown": {
                     "by_regime": {k: asdict(v) for k, v in breakdown_by_regime(result.trade_pairs, result.strategy_name, result.symbol, result.period, result.initial_capital).items()},

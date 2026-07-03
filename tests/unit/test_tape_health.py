@@ -35,7 +35,28 @@ def test_fast_crash_blocked():
     th = check_tape_health("TEST", "TEST_Fib_Pullback", ohlcv=_ohlcv(closes))
     assert not th.ok
     assert any("5d return" in r for r in th.reasons)
-    assert any("consecutive red" in r for r in th.reasons)
+
+
+def test_red_streak_alone_no_longer_blocks():
+    # 4 mildly red closes on an otherwise healthy tape (the AAPL/KO drift) —
+    # the 2026-07-02 study showed streak-alone blocked winners (+1.8% avg).
+    closes = _steady(56, 100) + [100.0, 99.7, 99.4, 99.1, 98.9]
+    th = check_tape_health("TEST", "TEST_Pullback_EMA50", ohlcv=_ohlcv(closes))
+    assert th.ok
+    assert th.metrics["red_streak"] >= 4  # still reported, just not gating
+
+
+def test_structural_rules_must_trip_together():
+    # Deep off the 20d high but still near EMA20 (long slow slide that has
+    # already based out) — one structural rule alone must NOT block.
+    closes = _steady(30, 100) + list(pd.Series(
+        [100, 97, 94, 91, 88, 86, 85, 85.5, 85.2, 85.4, 85.1, 85.3,
+         85.0, 85.2, 85.4, 85.3, 85.5, 85.4, 85.6, 85.5]))
+    th = check_tape_health("TEST", "TEST_Pullback_EMA50", ohlcv=_ohlcv(closes))
+    # off 20d high is deep, but price sits ON its EMA20 → allowed.
+    assert th.metrics["off_20d_high_pct"] < -12
+    assert th.metrics["vs_ema20_pct"] > -5
+    assert th.ok
 
 
 def test_deep_drawdown_blocked_even_on_slow_decline():
@@ -49,8 +70,9 @@ def test_deep_drawdown_blocked_even_on_slow_decline():
 
 
 def test_panic_strategy_exempt_from_velocity_but_not_structure():
-    # Sharp 3-day dip, still near the 20d high and EMA20: RSI2 may buy it.
-    closes = _steady(55, 100) + [101, 100.5, 98.5, 96.5, 95.0]
+    # Sharp 4-day dip (~-8% in 5 sessions), still near the 20d high: RSI2 may
+    # buy the panic; a trend-following dip buyer may not.
+    closes = _steady(55, 100) + [101, 99.0, 97.0, 94.5, 92.0]
     named = check_tape_health("TEST", "TEST_RSI2_Mean_Reversion", ohlcv=_ohlcv(closes))
     plain = check_tape_health("TEST", "TEST_Pullback_EMA50", ohlcv=_ohlcv(closes))
     assert named.ok            # panic buyer allowed into the fast dip

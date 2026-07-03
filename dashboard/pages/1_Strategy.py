@@ -634,6 +634,39 @@ with st.expander("Add or update an assignment", expanded=not assignments):
 st.divider()
 
 # ════════════════════════════════════════════════════════════════
+# SECTION 2.5 — TAPE-HEALTH GATE (knife-entry veto)
+# ════════════════════════════════════════════════════════════════
+_gate_on = bool(sched.get("tape_gate", True))
+with st.expander(f"🛡 Tape-health gate (knife veto) — {'ON' if _gate_on else 'OFF'}",
+                 expanded=False):
+    st.caption(
+        "Vetoes scheduler BUYs when the stock's own tape is in freefall: "
+        "5-day drop worse than −6%, or a structural break (>5% below EMA20 "
+        "AND >12% off the 20-day high together). Panic strategies (RSI2 / "
+        "VIX-spike) are exempt from the velocity check by design. Vetoes show "
+        "as 'tape_health' notifications; allowed BUYs carry a 'Tape gate: "
+        "PASSED' stamp. Backtest pages show what this gate would have done "
+        "historically per strategy."
+    )
+    new_gate = st.toggle(
+        "Enable knife-entry veto on scheduler BUYs",
+        value=_gate_on, key="tog_tape_gate",
+        help="Takes effect next cycle, no restart. Persistent default lives in "
+             "settings (TAPE_GATE_ENABLED); this switch overrides at runtime.",
+    )
+    if new_gate != _gate_on:
+        try:
+            api.update_scheduler_config(tape_gate=new_gate)
+            st.success(f"Tape gate {'enabled' if new_gate else 'disabled'}.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to update: {e}")
+    if not _gate_on:
+        st.warning("Gate OFF — the scheduler will buy into falling knives again.")
+
+st.divider()
+
+# ════════════════════════════════════════════════════════════════
 # SECTION 3 — CONSENSUS POOL (collapsed — danger zone)
 # ════════════════════════════════════════════════════════════════
 with st.expander(

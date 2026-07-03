@@ -99,17 +99,27 @@ def check_tape_health(
 
         panic = _is_panic_strategy(strategy_name)
         reasons: list[str] = []
-        if not panic:
-            if ret_5d < -max_5d_drop_pct:
-                reasons.append(f"5d return {ret_5d:+.1f}% (limit -{max_5d_drop_pct:.0f}%)")
-            if streak >= max_red_streak:
-                reasons.append(f"{streak} consecutive red closes (limit {max_red_streak})")
-        if vs_ema20 < -max_below_ema20_pct:
-            reasons.append(f"{vs_ema20:+.1f}% below EMA20 (limit -{max_below_ema20_pct:.0f}%)")
-        if off_hi20 < -max_off_20d_high_pct:
+        # Rule 1 — VELOCITY (primary). Calibrated 2026-07-02 on 359 backtest
+        # round-trips across 15 symbols: 5d<-6% blocks avg +1.0%/54%wr vs
+        # allowed +2.6%/77%wr — the single best separator. Panic strategies
+        # (RSI2/VIX-spike) exempt: buying the fast dip is their edge.
+        if not panic and ret_5d < -max_5d_drop_pct:
+            reasons.append(f"5d return {ret_5d:+.1f}% (limit -{max_5d_drop_pct:.0f}%)")
+        # Rule 2 — STRUCTURAL BREAK: far below EMA20 AND deep off the 20d high
+        # TOGETHER. Each alone blocked too many winners (standalone off-20d-high
+        # blocks averaged +2.2%, and deep-drawdown entries actually bounced);
+        # combined they mark a broken trend, not a healthy dip.
+        if vs_ema20 < -max_below_ema20_pct and off_hi20 < -max_off_20d_high_pct:
             reasons.append(
-                f"{off_hi20:+.1f}% off 20d high (limit -{max_off_20d_high_pct:.0f}%)"
+                f"structural break: {vs_ema20:+.1f}% below EMA20 and "
+                f"{off_hi20:+.1f}% off 20d high"
             )
+        # NOTE: consecutive-red-closes was REMOVED as a standalone blocker
+        # (study: streak>=4 blocks averaged +1.8%/71%wr — low-volatility names
+        # like AAPL/KO drift down 4 sessions then bounce; it filtered winners).
+        # The streak stays in metrics for display. max_red_streak is kept in
+        # the signature for config compatibility but no longer gates alone.
+        _ = max_red_streak
 
         return TapeHealth(ok=not reasons, reasons=reasons, metrics=metrics)
     except Exception as exc:
@@ -165,6 +175,8 @@ def annotate_backtest_trades(
 
         for t in trades:
             side = (t.get("side") or "").upper()
+            if side in ("SELL_SIGNAL", "SHORT", "COVER"):
+                continue  # markers / short legs — the knife veto is a LONG-entry gate
             if side == "BUY":
                 hist = df.loc[: str(t.get("date"))[:10]]
                 th = check_tape_health(symbol, strategy_name, ohlcv=hist)
