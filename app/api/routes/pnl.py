@@ -165,11 +165,68 @@ class OpenTrailOut(BaseModel):
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 _last_broker_sync_ts: float = 0.0
-# On-read reconcile throttle. Kept short so a close reflects on the PnL page
-# quickly (bot-driven trail-hit exits now also persist their fill inline, so
-# this mainly covers broker-native / manual closes). 10s balances freshness
-# against hammering the broker on rapid refreshes.
-_BROKER_SYNC_THROTTLE_SECONDS = 10.0
+# On-read reconcile throttle. One PnL page load fires ~7 endpoints over
+# 10-60s, so a 10s throttle re-paid the full broker order-listing fan-out
+# several times per page view. 45s means at most one sync per page load
+# while a broker-side close still reflects within a minute.
+_BROKER_SYNC_THROTTLE_SECONDS = 45.0
+
+# ── Fan-out caches ───────────────────────────────────────────────────────────
+# Broker positions / working stops / quotes are each needed by several PnL
+# endpoints that the dashboard fires back-to-back on one page load. Without a
+# cache, EVERY endpoint re-authenticated and re-fetched from every broker
+# serially (summary 15s, open-trails 22s measured). A short TTL makes one page
+# load pay each fan-out once. A failing broker (expired Zerodha token, Webull
+# 429) is negative-cached for 5 min so it stops adding a doomed round-trip to
+# every call.
+import threading as _threading
+import time as _time_mod
+
+_FANOUT_TTL_SECONDS = 15.0
+_BROKER_DOWN_SECONDS = 300.0
+_fanout_cache: dict = {}
+_fanout_lock = _threading.Lock()
+_broker_down_until: dict[str, float] = {}
+
+
+def _cache_get(key):
+    with _fanout_lock:
+        hit = _fanout_cache.get(key)
+        if hit and hit[0] > _time_mod.monotonic():
+            return hit[1]
+    return None
+
+
+def _cache_put(key, value) -> None:
+    with _fanout_lock:
+        _fanout_cache[key] = (_time_mod.monotonic() + _FANOUT_TTL_SECONDS, value)
+
+
+def _broker_usable(broker) -> bool:
+    name = (getattr(broker, "name", "") or "?").lower()
+    return _broker_down_until.get(name, 0.0) <= _time_mod.monotonic()
+
+
+def _mark_broker_down(broker) -> None:
+    name = (getattr(broker, "name", "") or "?").lower()
+    _broker_down_until[name] = _time_mod.monotonic() + _BROKER_DOWN_SECONDS
+    logger.info("[pnl] broker %s marked down for %.0fs (skipping in fan-outs)",
+                name, _BROKER_DOWN_SECONDS)
+
+
+def _map_brokers_parallel(brokers: list, fn) -> list:
+    """Run fn(broker) for each usable broker concurrently; collect non-None
+    results in broker order. fn must swallow-and-return-None on failure."""
+    import concurrent.futures as _fut
+    usable = [b for b in brokers if _broker_usable(b)]
+    if not usable:
+        return []
+    if len(usable) == 1:
+        r = fn(usable[0])
+        return [r] if r is not None else []
+    with _fut.ThreadPoolExecutor(max_workers=len(usable)) as ex:
+        results = list(ex.map(fn, usable))
+    return [r for r in results if r is not None]
 
 
 def _maybe_sync_broker_orders() -> None:
@@ -235,28 +292,34 @@ def _resolve_last_prices(symbols: list[str]) -> dict[str, float]:
     """
     if not symbols:
         return {}
+    cache_key = ("last_prices", tuple(sorted(s.upper() for s in symbols)))
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     import asyncio
     from app.services.brokers.factory import get_position_brokers
 
-    out: dict[str, float] = {}
-    for broker in get_position_brokers():
-        remaining = [s for s in symbols if s.upper() not in out]
-        if not remaining:
-            break
+    def _one(broker):
         try:
             loop = asyncio.new_event_loop()
             try:
                 loop.run_until_complete(broker.authenticate())
-                quotes = loop.run_until_complete(broker.get_quotes(remaining))
+                return loop.run_until_complete(broker.get_quotes(list(symbols)))
             finally:
                 loop.close()
         except Exception as exc:
             logger.warning("[pnl] %s quote fetch failed: %s", getattr(broker, "name", "?"), exc)
-            continue
+            _mark_broker_down(broker)
+            return None
+
+    out: dict[str, float] = {}
+    for quotes in _map_brokers_parallel(get_position_brokers(), _one):
         for sym, q in (quotes or {}).items():
             price = getattr(q, "last", None) or getattr(q, "ask", None) or getattr(q, "bid", None)
             if price and price > 0:
-                out[sym.upper()] = float(price)
+                out.setdefault(sym.upper(), float(price))
+    _cache_put(cache_key, out)
     return out
 
 
@@ -303,24 +366,30 @@ def _broker_resting_sell_stops() -> dict[str, dict]:
     so a trail resting on a non-default broker isn't reported as NOT ARMED.
     Returns {symbol: {...}}.
     """
+    cached = _cache_get("resting_stops")
+    if cached is not None:
+        return cached
+
     import asyncio
     from app.services.brokers.factory import get_position_brokers
 
-    result: dict[str, dict] = {}
-    for broker in get_position_brokers():
+    def _one(broker):
         try:
             loop = asyncio.new_event_loop()
             try:
                 loop.run_until_complete(broker.authenticate())
                 accts = loop.run_until_complete(broker.get_accounts())
                 acct_id = accts[0].account_id if accts else ""
-                orders = loop.run_until_complete(broker.list_orders(acct_id, status="working"))
+                return loop.run_until_complete(broker.list_orders(acct_id, status="working")) or []
             finally:
                 loop.close()
         except Exception as exc:
             logger.warning("[pnl] %s working-orders fetch failed: %s", getattr(broker, "name", "?"), exc)
-            continue
+            _mark_broker_down(broker)
+            return None
 
+    result: dict[str, dict] = {}
+    for orders in _map_brokers_parallel(get_position_brokers(), _one):
         for o in orders or []:
             side = (getattr(o, "side", "") or "").upper()
             otype = (getattr(o, "order_type", "") or "").upper()
@@ -336,6 +405,7 @@ def _broker_resting_sell_stops() -> dict[str, dict]:
                 "trail_value": getattr(o, "trail_value", None) or raw.get("stopPriceOffset"),
                 "broker_order_id": getattr(o, "broker_order_id", None),
             }
+    _cache_put("resting_stops", result)
     return result
 
 
@@ -351,28 +421,37 @@ def _broker_positions() -> dict[str, dict]:
     non-default broker isn't silently omitted. Returns {symbol: {quantity,
     avg_cost, broker}}.
     """
+    cached = _cache_get("broker_positions")
+    if cached is not None:
+        return cached
+
     import asyncio
     from app.services.brokers.factory import get_position_brokers
 
     settings = get_settings()
     excluded = settings.pnl_excluded
-    result: dict[str, dict] = {}
-    for broker in get_position_brokers():
-        if settings.pnl_exclude_paper and (getattr(broker, "name", "") or "").lower() == "paper":
-            continue
+    brokers = [
+        b for b in get_position_brokers()
+        if not (settings.pnl_exclude_paper and (getattr(b, "name", "") or "").lower() == "paper")
+    ]
+
+    def _one(broker):
         try:
             loop = asyncio.new_event_loop()
             try:
                 loop.run_until_complete(broker.authenticate())
                 accts = loop.run_until_complete(broker.get_accounts())
                 acct_id = accts[0].account_id if accts else ""
-                positions = loop.run_until_complete(broker.get_positions(acct_id))
+                return loop.run_until_complete(broker.get_positions(acct_id)) or []
             finally:
                 loop.close()
         except Exception as exc:
             logger.warning("[pnl] %s positions fetch failed: %s", getattr(broker, "name", "?"), exc)
-            continue
+            _mark_broker_down(broker)
+            return None
 
+    result: dict[str, dict] = {}
+    for positions in _map_brokers_parallel(brokers, _one):
         for p in positions or []:
             sym = (getattr(p, "symbol", "") or "").upper()
             qty = getattr(p, "quantity", 0) or 0
@@ -383,6 +462,7 @@ def _broker_positions() -> dict[str, dict]:
                 "avg_cost": getattr(p, "average_cost", None),
                 "broker": getattr(p, "broker", None),
             }
+    _cache_put("broker_positions", result)
     return result
 
 

@@ -25,13 +25,21 @@ async def get_account_summary():
     appears on the dashboard even though it holds positions and cash. Best-
     effort per broker: a failed auth degrades to skipping that broker, not a 500.
     """
-    out: List[AccountSummary] = []
-    for b in get_position_brokers():
+    import asyncio
+
+    async def _one(b) -> List[AccountSummary]:
         try:
             await b.authenticate()
-            out.extend(await b.get_accounts())
+            return await b.get_accounts()
         except Exception:
-            continue
+            return []
+
+    # Concurrent fan-out: the slowest broker (Webull ~5s) bounds latency
+    # instead of the sum of all brokers.
+    results = await asyncio.gather(*(_one(b) for b in get_position_brokers()))
+    out: List[AccountSummary] = []
+    for r in results:
+        out.extend(r)
     return out
 
 
@@ -58,16 +66,22 @@ async def get_positions(account_id: str = ""):
     # position-holding broker (global route + per-assignment overrides — Webull,
     # Zerodha) so the dashboard shows holdings on brokers off the active route.
     # Each Position is tagged with its broker. Best-effort per broker.
-    out: List[Position] = []
-    for b in get_position_brokers():
+    import asyncio
+
+    async def _one(b) -> List[Position]:
         try:
             await b.authenticate()
             accts = await b.get_accounts()
             if not accts:
-                continue
-            out.extend(await b.get_positions(accts[0].account_id))
+                return []
+            return await b.get_positions(accts[0].account_id)
         except Exception:
-            continue
+            return []
+
+    results = await asyncio.gather(*(_one(b) for b in get_position_brokers()))
+    out: List[Position] = []
+    for r in results:
+        out.extend(r)
     return _held_only(out)
 
 
