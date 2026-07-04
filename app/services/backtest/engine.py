@@ -223,8 +223,11 @@ def run_backtest(
             prev_equity = equity
             continue
 
+        # _backtest_mode lets rules with a live-safety gate (e.g. ceei paper_only)
+        # know they are being simulated, so research is never blocked by the gate.
         signal = evaluate_strategy(
-            strategy_type, symbol, price_series, params, ohlcv=df_slice, position=pos_state
+            strategy_type, symbol, price_series, {**params, "_backtest_mode": True},
+            ohlcv=df_slice, position=pos_state
         )
 
         direction = signal.direction

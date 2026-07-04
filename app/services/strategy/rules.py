@@ -19,6 +19,8 @@ from app.services.indicators.ema import compute_ema, ema_crossover_signal
 from app.services.indicators.macd import compute_macd
 from app.services.indicators.rsi import compute_rsi
 from app.services.indicators.sma import compute_sma, sma_crossover_signal
+from app.services.indicators.amat import AMATParams, compute_amat
+from app.services.indicators.ceei import CEEIParams, compute_ceei
 from app.services.indicators.supertrend import compute_supertrend
 from app.services.strategy.exits import apply_exit_overlay, _legacy_chandelier
 from app.services.strategy.models import StrategySignal
@@ -1233,6 +1235,318 @@ def rule_trend_follow(
     )
 
 
+def rule_amat(
+    symbol: str, prices: pd.Series, params: dict, ohlcv: pd.DataFrame | None = None, **_
+) -> StrategySignal:
+    """Adaptive Momentum Acceleration Trend (custom composite indicator).
+    BUY  AMAT score crosses above buy threshold AND close > Trend Spine.
+    SELL AMAT score crosses below sell threshold AND close < Trend Spine.
+    Uses MFI momentum + volume conviction when OHLCV is available, RSI otherwise.
+    See app/services/indicators/amat.py for the full computation.
+    """
+    p = AMATParams(
+        atr_period=params.get("atr_period", 14),
+        multiplier=params.get("multiplier", 1.0),
+        momentum_period=params.get("momentum_period", 14),
+        accel_step=params.get("accel_step", 3),
+        accel_norm_window=params.get("accel_norm_window", 50),
+        rel_volume_period=params.get("rel_volume_period", 20),
+        divergence_lookback=params.get("divergence_lookback", 10),
+        divergence_penalty=params.get("divergence_penalty", 0.7),
+        score_window=params.get("score_window", 100),
+        buy_threshold=params.get("buy_threshold", 65.0),
+        sell_threshold=params.get("sell_threshold", 35.0),
+    )
+
+    min_bars = max(p.score_window + 2 * p.accel_step, p.atr_period + 10)
+    if len(prices) < min_bars:
+        return StrategySignal(symbol=symbol, direction="HOLD",
+                              price_at_signal=float(prices.iloc[-1]), indicators={},
+                              strategy_name="amat")
+
+    if ohlcv is not None and "High" in ohlcv.columns and "Low" in ohlcv.columns:
+        high = ohlcv["High"].reindex(prices.index).fillna(prices)
+        low = ohlcv["Low"].reindex(prices.index).fillna(prices)
+        volume = ohlcv["Volume"].reindex(prices.index) if "Volume" in ohlcv.columns else None
+    else:
+        # Close-only fallback: proxy the bar range from smoothed abs move
+        daily_move = prices.diff().abs()
+        atr_proxy = daily_move.ewm(span=p.atr_period, adjust=False).mean().fillna(daily_move.mean())
+        high = prices + atr_proxy / 2
+        low = prices - atr_proxy / 2
+        volume = None
+
+    result = compute_amat(high, low, prices, volume=volume, params=p, log_context=symbol)
+
+    c_now = float(prices.iloc[-1])
+    score_now = result.latest_score
+    spine_now = result.latest_spine
+    direction = str(result.signal.iloc[-1])
+    diverged = bool(result.divergence.iloc[-1])
+
+    conf = 1.0
+    if direction == "BUY" and score_now is not None:
+        # Deeper penetration above the threshold = stronger conviction
+        conf = round(min(0.95, 0.6 + (score_now - p.buy_threshold) / 100), 2)
+
+    return StrategySignal(
+        symbol=symbol,
+        direction=direction,
+        strength=round(abs((score_now or 50.0) - 50.0) / 50.0, 2),
+        price_at_signal=c_now,
+        confidence=conf,
+        indicators={
+            "amat_score": round(score_now, 1) if score_now is not None else None,
+            "trend_spine": round(spine_now, 2) if spine_now is not None else None,
+            "above_spine": c_now > spine_now if spine_now is not None else None,
+            "weighted_accel": round(float(result.weighted_acceleration.iloc[-1]), 2)
+                if not pd.isna(result.weighted_acceleration.iloc[-1]) else None,
+            "divergence_penalty": diverged,
+            "momentum_source": result.momentum_source,
+        },
+        strategy_name="amat",
+    )
+
+
+def rule_ceei(
+    symbol: str, prices: pd.Series, params: dict, ohlcv: pd.DataFrame | None = None, **_
+) -> StrategySignal:
+    """Compression Expansion Efficiency Indicator (swing ignition detector).
+    BUY  recent compression setup + expansion cross UP + efficiency confirms
+         + close above prior N-bar high + CEEI composite crosses buy threshold.
+    SELL mirror conditions to the downside.
+    See app/services/indicators/ceei.py for the full computation.
+    """
+    p = CEEIParams(
+        vol_lookback=params.get("vol_lookback", 30),
+        atr_period=params.get("atr_period", 14),
+        bb_period=params.get("bb_period", 20),
+        exp_atr_period=params.get("exp_atr_period", 20),
+        breakout_lookback=params.get("breakout_lookback", 15),
+        rel_volume_period=params.get("rel_volume_period", 20),
+        efficiency_period=params.get("efficiency_period", 6),
+        w_compression=params.get("w_compression", 0.35),
+        w_expansion=params.get("w_expansion", 0.40),
+        w_efficiency=params.get("w_efficiency", 0.25),
+        setup_threshold=params.get("setup_threshold", 70.0),
+        setup_window=params.get("setup_window", 10),
+        expansion_threshold=params.get("expansion_threshold", 45.0),
+        efficiency_min=params.get("efficiency_min", 55.0),
+        buy_threshold=params.get("buy_threshold", 48.0),
+        sell_threshold=params.get("sell_threshold", 48.0),
+    )
+    # Universe research (output/ceei_research) showed a simple SMA trend filter
+    # improves expectancy/win-rate while ADX and gap filters do not. 0 disables.
+    sma_filter = params.get("sma_filter", 50)
+
+    min_bars = max(p.vol_lookback + p.atr_period, p.breakout_lookback + p.exp_atr_period) + 10
+    if len(prices) < min_bars:
+        return StrategySignal(symbol=symbol, direction="HOLD",
+                              price_at_signal=float(prices.iloc[-1]), indicators={},
+                              strategy_name="ceei")
+
+    if ohlcv is not None and "High" in ohlcv.columns and "Low" in ohlcv.columns:
+        high = ohlcv["High"].reindex(prices.index).fillna(prices)
+        low = ohlcv["Low"].reindex(prices.index).fillna(prices)
+        volume = ohlcv["Volume"].reindex(prices.index) if "Volume" in ohlcv.columns else None
+    else:
+        # Close-only fallback: proxy the bar range from smoothed abs move
+        daily_move = prices.diff().abs()
+        atr_proxy = daily_move.ewm(span=p.atr_period, adjust=False).mean().fillna(daily_move.mean())
+        high = prices + atr_proxy / 2
+        low = prices - atr_proxy / 2
+        volume = None
+
+    result = compute_ceei(high, low, prices, volume=volume, params=p, log_context=symbol)
+
+    c_now = float(prices.iloc[-1])
+    ceei_now = result.latest_score
+    direction = str(result.signal.iloc[-1])
+
+    # ── Long-only: mirrored SELL exits are disabled by default in live paths ──
+    # Exit management belongs to the trade-management layer (managed_exits /
+    # exit overlay), not the mirrored short-side ignition signal. Backtests keep
+    # SELLs by default so existing harnesses/comparisons are unchanged; pass
+    # long_only explicitly to override either way.
+    long_only = params.get("long_only", not params.get("_backtest_mode", False))
+    if long_only and direction == "SELL":
+        logger.info("CEEI [%s] mirrored SELL suppressed (long_only) — "
+                    "exits are handled by the trade-management overlay", symbol)
+        direction = "HOLD"
+
+    above_sma = None
+    if sma_filter and len(prices) >= sma_filter:
+        above_sma = c_now > float(prices.rolling(sma_filter).mean().iloc[-1])
+        if direction == "BUY" and not above_sma:
+            logger.info("CEEI [%s] BUY vetoed by SMA%d trend filter (close %.2f below)",
+                        symbol, sma_filter, c_now)
+            direction = "HOLD"
+
+    # ── Live-trading safety: CEEI ships paper-only ────────────────────────────
+    # Live paths (scheduler / /strategy/run / scanner) get HOLD until the
+    # assignment params explicitly set paper_only=False. Backtests are exempt
+    # via the _backtest_mode flag injected by the backtest engine.
+    paper_only = params.get("paper_only", True) and not params.get("_backtest_mode", False)
+    suppressed = False
+    if paper_only and direction != "HOLD":
+        gate_str = " ".join(f"{k}={bool(v)}" for k, v in result.gates.iloc[-1].items())
+        logger.warning(
+            "CEEI [%s] is PAPER-ONLY — suppressing live %s at %.2f "
+            "(ceei=%.1f compression=%.1f expansion=%.1f efficiency=%.1f | %s). "
+            "Set paper_only=false in the assignment params to enable live trading.",
+            symbol, direction, c_now, ceei_now or 0.0,
+            float(result.compression_score.iloc[-1]),
+            float(result.expansion_score.iloc[-1]),
+            float(result.efficiency_score.iloc[-1]),
+            gate_str,
+        )
+        suppressed, direction = direction, "HOLD"
+
+    conf = 1.0
+    if direction != "HOLD" and ceei_now is not None:
+        # Stronger composite at the trigger = stronger conviction
+        thr = p.buy_threshold if direction == "BUY" else p.sell_threshold
+        conf = round(min(0.95, 0.6 + (ceei_now - thr) / 100), 2)
+
+    def _val(series: pd.Series, digits: int = 1):
+        v = series.iloc[-1]
+        return round(float(v), digits) if not pd.isna(v) else None
+
+    return StrategySignal(
+        symbol=symbol,
+        direction=direction,
+        strength=round((ceei_now or 0.0) / 100.0, 2),
+        price_at_signal=c_now,
+        confidence=conf,
+        indicators={
+            "ceei_score": _val(result.ceei_score),
+            "compression": _val(result.compression_score),
+            "expansion": _val(result.expansion_score),
+            "efficiency": _val(result.efficiency_score),
+            "setup_state": bool(result.setup_state.iloc[-1]),
+            "trigger_state": bool(result.trigger_state.iloc[-1]),
+            "breakout_level": _val(result.breakout_level, 2),
+            "breakdown_level": _val(result.breakdown_level, 2),
+            "gates": {k: bool(v) for k, v in result.gates.iloc[-1].items()},
+            **({"above_sma_filter": above_sma} if above_sma is not None else {}),
+            **({"paper_only_suppressed": suppressed} if suppressed else {}),
+        },
+        strategy_name="ceei",
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Assignment-level CEEI gate (opt-in per assignment, NOT a global default).
+# Evidence: output/ceei_meta/CEEI_META.md — CEEI entry filters add orthogonal
+# information to trend/breakout/crossover strategies and SUBTRACT value from
+# mean-reversion / pullback / reversal strategies. The gate therefore only
+# activates when the assignment params explicitly set ceei_gate, and warns when
+# pointed at a known-incompatible family.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Families the meta-study showed CEEI harms (dip-buying is anti-ignition).
+# Includes both members of the duplicate registrations (rsi2_*, vix/panic).
+CEEI_INCOMPATIBLE_STRATEGIES = frozenset({
+    "rsi2_mean_reversion", "rsi2_reversion",
+    "pullback_ema50", "trend_pullback", "fib_pullback",
+    "vix_spike_reversal", "panic_reversal",
+    "bollinger", "vwap_rsi",
+})
+
+_ceei_gate_family_warned: set = set()
+
+
+def _apply_ceei_gate(
+    signal: StrategySignal,
+    prices: pd.Series,
+    ohlcv: pd.DataFrame | None,
+    params: Dict[str, Any],
+) -> StrategySignal:
+    """Optional CEEI entry gate, driven purely by assignment params:
+
+      ceei_gate:           "none" (default) | "setup" | "trigger" | "score"
+      ceei_gate_enabled:   true (default when ceei_gate set) | false
+      ceei_gate_lookback:  bars a CEEI setup stays "recent" (setup mode, default 10)
+      ceei_gate_threshold: minimum CEEI score (score mode, default 48)
+
+    Behaviour is unchanged when ceei_gate is unset. Only BUY entries are gated
+    (exits are never blocked). The gate is evaluated on the same bar as the
+    signal — identical to the meta-study masks, no lookahead. If CEEI cannot
+    be computed (no OHLCV / too little history) the gate FAILS OPEN with a
+    warning so a data hiccup never silently halts a strategy.
+    """
+    gate = str(params.get("ceei_gate") or "none").lower()
+    if gate == "none":
+        return signal
+    if gate not in ("setup", "trigger", "score"):
+        logger.warning("CEEI gate [%s/%s]: unknown ceei_gate=%r — ignoring",
+                       signal.symbol, signal.strategy_name, gate)
+        return signal
+    if not params.get("ceei_gate_enabled", True):
+        return signal
+
+    # Family safety: warn loudly (once per strategy type) on incompatible pairings
+    if (signal.strategy_name in CEEI_INCOMPATIBLE_STRATEGIES
+            and signal.strategy_name not in _ceei_gate_family_warned):
+        _ceei_gate_family_warned.add(signal.strategy_name)
+        logger.warning(
+            "CEEI gate enabled on %r — the meta-study (output/ceei_meta/CEEI_META.md) "
+            "showed CEEI REDUCES expectancy for mean-reversion/pullback/reversal "
+            "strategies. Proceeding as configured, but review this assignment.",
+            signal.strategy_name,
+        )
+
+    if signal.direction != "BUY":
+        return signal
+
+    lookback = int(params.get("ceei_gate_lookback", 10))
+    threshold = float(params.get("ceei_gate_threshold", 48.0))
+
+    if ohlcv is not None and "High" in ohlcv.columns and "Low" in ohlcv.columns:
+        high = ohlcv["High"].reindex(prices.index).fillna(prices)
+        low = ohlcv["Low"].reindex(prices.index).fillna(prices)
+        volume = ohlcv["Volume"].reindex(prices.index) if "Volume" in ohlcv.columns else None
+    else:
+        daily_move = prices.diff().abs()
+        atr_proxy = daily_move.ewm(span=14, adjust=False).mean().fillna(daily_move.mean())
+        high, low, volume = prices + atr_proxy / 2, prices - atr_proxy / 2, None
+
+    ceei_params = CEEIParams()
+    min_bars = max(ceei_params.vol_lookback + ceei_params.atr_period,
+                   ceei_params.breakout_lookback + ceei_params.exp_atr_period) + 10
+    if len(prices) < min_bars:
+        logger.warning("CEEI gate [%s/%s]: only %d bars (<%d) — gate fails OPEN",
+                       signal.symbol, signal.strategy_name, len(prices), min_bars)
+        return signal
+
+    res = compute_ceei(high, low, prices, volume=volume, params=ceei_params)
+    score_now = res.latest_score
+
+    if gate == "setup":
+        recent = res.setup_state.rolling(lookback, min_periods=1).max()
+        passed = bool(recent.iloc[-1])
+        detail = f"setup within {lookback} bars"
+    elif gate == "trigger":
+        passed = bool(res.trigger_state.iloc[-1])
+        detail = "trigger active"
+    else:  # score
+        passed = score_now is not None and score_now >= threshold
+        detail = f"score {score_now if score_now is not None else 'n/a'} >= {threshold}"
+
+    signal.indicators["ceei_gate"] = gate
+    signal.indicators["ceei_gate_passed"] = passed
+    if score_now is not None:
+        signal.indicators["ceei_gate_score"] = round(score_now, 1)
+
+    if not passed:
+        logger.info("CEEI gate [%s/%s] vetoed BUY: %s not met (score=%s)",
+                    signal.symbol, signal.strategy_name, detail,
+                    round(score_now, 1) if score_now is not None else "n/a")
+        signal.direction = "HOLD"
+        signal.indicators["ceei_gate_veto"] = True
+    return signal
+
+
 _RULE_REGISTRY = {
     "sma_rsi": rule_sma_rsi,
     "ema_crossover": rule_ema_crossover,
@@ -1256,6 +1570,9 @@ _RULE_REGISTRY = {
     "momentum_breakout":    rule_momentum_breakout,
     "panic_reversal":       rule_panic_reversal,
     "trend_follow":         rule_trend_follow,
+    # ── Custom composite indicators ───────────────────────────────────────────
+    "amat":                 rule_amat,
+    "ceei":                 rule_ceei,
 }
 
 
@@ -1274,6 +1591,8 @@ def evaluate_strategy(
         signal = rule_fn(symbol, prices, params, ohlcv=ohlcv)
     else:
         signal = rule_fn(symbol, prices, params)
+    # Optional assignment-level CEEI entry gate (no-op unless params set ceei_gate).
+    signal = _apply_ceei_gate(signal, prices, ohlcv, params)
     # Exit-policy overlay (params['exit_policy'] wins; else legacy trail_enabled;
     # else no-op). See app/services/strategy/exits.py for the precedence contract.
     return apply_exit_overlay(signal, prices, ohlcv, params, position)
