@@ -14,6 +14,8 @@ from app.schemas._serializers import serialize_et
 router = APIRouter(prefix="/assignments", tags=["assignments"])
 
 VALID_SYSTEMS = {"bollinger", "perplexity", "scanner"}
+# Per-assignment CEEI entry-gate modes (None/"none" = gate off).
+VALID_CEEI_GATES = {"none", "setup", "trigger", "score"}
 # "default" means follow the global active_broker / trade_routing toggle.
 # Any other value routes this symbol's orders to a specific broker adapter.
 VALID_BROKERS = {"default", "paper", "schwab", "webull", "zerodha"}
@@ -34,6 +36,21 @@ class AssignmentIn(BaseModel):
     # Approach C master switch (optional). None/True = tight-trail on SELL
     # (historical default). False = Approach C OFF → SELL exits at market.
     approach_c_enabled: bool | None = None
+    # Per-assignment CEEI entry gate (optional; all None = exact no-op).
+    ceei_gate: str | None = None            # "none" | "setup" | "trigger" | "score"
+    ceei_gate_enabled: bool | None = None   # None = active whenever ceei_gate is set
+    ceei_gate_threshold: float | None = None  # score mode; CEEI score 0–100
+    ceei_gate_lookback: int | None = None     # setup mode; bars a setup stays recent
+
+
+def _validate_ceei_fields(body) -> None:
+    """Shared CEEI validation for upsert + patch. Raises 400 on bad values."""
+    if body.ceei_gate is not None and body.ceei_gate not in VALID_CEEI_GATES:
+        raise HTTPException(400, f"ceei_gate must be one of {sorted(VALID_CEEI_GATES)}")
+    if body.ceei_gate_threshold is not None and not (0.0 <= body.ceei_gate_threshold <= 100.0):
+        raise HTTPException(400, "ceei_gate_threshold must be between 0 and 100")
+    if body.ceei_gate_lookback is not None and not (1 <= body.ceei_gate_lookback <= 60):
+        raise HTTPException(400, "ceei_gate_lookback must be between 1 and 60")
 
 
 class AssignmentOut(BaseModel):
@@ -47,6 +64,10 @@ class AssignmentOut(BaseModel):
     notes: str | None
     tight_trail_pct: float | None = None
     approach_c_enabled: bool | None = None
+    ceei_gate: str | None = None
+    ceei_gate_enabled: bool | None = None
+    ceei_gate_threshold: float | None = None
+    ceei_gate_lookback: int | None = None
     assigned_at: datetime
 
     model_config = {"from_attributes": True}
@@ -105,6 +126,9 @@ def upsert_assignment(body: AssignmentIn, db: Session = Depends(get_db)):
         raise HTTPException(400, f"system must be one of {sorted(VALID_SYSTEMS)}")
     if body.broker not in VALID_BROKERS:
         raise HTTPException(400, f"broker must be one of {sorted(VALID_BROKERS)}")
+    _validate_ceei_fields(body)
+    # "none" normalizes to NULL so an off gate leaves the row exactly as before.
+    ceei_gate = body.ceei_gate if body.ceei_gate and body.ceei_gate != "none" else None
     symbol = body.symbol.upper().strip()
     row = (
         db.query(SymbolStrategyAssignment)
@@ -121,6 +145,10 @@ def upsert_assignment(body: AssignmentIn, db: Session = Depends(get_db)):
         row.notes = body.notes
         row.tight_trail_pct = body.tight_trail_pct
         row.approach_c_enabled = body.approach_c_enabled
+        row.ceei_gate = ceei_gate
+        row.ceei_gate_enabled = body.ceei_gate_enabled
+        row.ceei_gate_threshold = body.ceei_gate_threshold
+        row.ceei_gate_lookback = body.ceei_gate_lookback
         row.assigned_at = datetime.now(tz=timezone.utc)
     else:
         row = SymbolStrategyAssignment(
@@ -134,6 +162,10 @@ def upsert_assignment(body: AssignmentIn, db: Session = Depends(get_db)):
             notes=body.notes,
             tight_trail_pct=body.tight_trail_pct,
             approach_c_enabled=body.approach_c_enabled,
+            ceei_gate=ceei_gate,
+            ceei_gate_enabled=body.ceei_gate_enabled,
+            ceei_gate_threshold=body.ceei_gate_threshold,
+            ceei_gate_lookback=body.ceei_gate_lookback,
             assigned_at=datetime.now(tz=timezone.utc),
         )
         db.add(row)
@@ -280,6 +312,62 @@ def set_trail(
     db.commit()
     return {"symbol": row.symbol, "system": row.system,
             "strategy_name": row.strategy_name, "tight_trail_pct": row.tight_trail_pct}
+
+
+class CeeiGateIn(BaseModel):
+    ceei_gate: str | None = None            # "none"/None clears the gate
+    ceei_gate_enabled: bool | None = None
+    ceei_gate_threshold: float | None = None
+    ceei_gate_lookback: int | None = None
+
+
+@router.patch("/{symbol}/ceei")
+def set_ceei_gate(
+    symbol: str, body: CeeiGateIn,
+    system: str | None = None, strategy_name: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Update only the per-assignment CEEI entry gate.
+
+    ceei_gate "none" (or null) clears the gate entirely — all four columns go
+    NULL and the assignment behaves exactly as before the feature existed.
+    Enabling on a mean-reversion/pullback/reversal strategy is allowed but
+    returns a `warning` (the meta-study showed CEEI harms those families).
+    """
+    _validate_ceei_fields(body)
+    row = _get_assignment(db, symbol, system, strategy_name)
+    gate = body.ceei_gate if body.ceei_gate and body.ceei_gate != "none" else None
+    if gate is None:
+        row.ceei_gate = None
+        row.ceei_gate_enabled = None
+        row.ceei_gate_threshold = None
+        row.ceei_gate_lookback = None
+    else:
+        row.ceei_gate = gate
+        row.ceei_gate_enabled = body.ceei_gate_enabled
+        row.ceei_gate_threshold = body.ceei_gate_threshold
+        row.ceei_gate_lookback = body.ceei_gate_lookback
+    db.commit()
+
+    warning = None
+    if gate is not None:
+        from app.services.strategy.rules import CEEI_INCOMPATIBLE_STRATEGIES
+        name_l = (row.strategy_name or "").lower()
+        if any(bad in name_l for bad in CEEI_INCOMPATIBLE_STRATEGIES) or any(
+            frag in name_l for frag in ("pullback", "reversion", "reversal", "panic")
+        ):
+            warning = (
+                "The CEEI meta-study showed entry gating REDUCES expectancy for "
+                "mean-reversion/pullback/reversal strategies. Saved as requested — "
+                "review output/ceei_meta/CEEI_CONFIRMATION.md before going live."
+            )
+    return {"symbol": row.symbol, "system": row.system,
+            "strategy_name": row.strategy_name,
+            "ceei_gate": row.ceei_gate,
+            "ceei_gate_enabled": row.ceei_gate_enabled,
+            "ceei_gate_threshold": row.ceei_gate_threshold,
+            "ceei_gate_lookback": row.ceei_gate_lookback,
+            "warning": warning}
 
 
 @router.delete("/{symbol}")

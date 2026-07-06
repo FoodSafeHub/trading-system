@@ -263,7 +263,11 @@ def upsert_assignment(symbol: str, system: str, strategy_name: str, enabled: boo
                       max_shares: float | None = None,
                       broker: str = "default",
                       tight_trail_pct: float | None = None,
-                      approach_c_enabled: bool | None = None):
+                      approach_c_enabled: bool | None = None,
+                      ceei_gate: str | None = None,
+                      ceei_gate_enabled: bool | None = None,
+                      ceei_gate_threshold: float | None = None,
+                      ceei_gate_lookback: int | None = None):
     return _post("/assignments", json={"symbol": symbol, "system": system,
                                        "strategy_name": strategy_name, "enabled": enabled,
                                        "notes": notes,
@@ -271,7 +275,11 @@ def upsert_assignment(symbol: str, system: str, strategy_name: str, enabled: boo
                                        "max_shares": max_shares,
                                        "broker": broker,
                                        "tight_trail_pct": tight_trail_pct,
-                                       "approach_c_enabled": approach_c_enabled})
+                                       "approach_c_enabled": approach_c_enabled,
+                                       "ceei_gate": ceei_gate,
+                                       "ceei_gate_enabled": ceei_gate_enabled,
+                                       "ceei_gate_threshold": ceei_gate_threshold,
+                                       "ceei_gate_lookback": ceei_gate_lookback})
 
 
 def _ident(system: str | None, strategy_name: str | None) -> dict:
@@ -335,6 +343,24 @@ def set_assignment_trail(symbol: str, tight_trail_pct: float | None,
     params.update(_ident(system, strategy_name))
     r = _SESSION.patch(f"{BASE}/assignments/{symbol}/trail",
                        params=params,
+                       timeout=10, verify=False, headers=_headers())
+    r.raise_for_status()
+    return r.json()
+
+def set_assignment_ceei(symbol: str, ceei_gate: str | None,
+                        ceei_gate_enabled: bool | None = None,
+                        ceei_gate_threshold: float | None = None,
+                        ceei_gate_lookback: int | None = None,
+                        system: str | None = None, strategy_name: str | None = None):
+    """Update the per-assignment CEEI entry gate. ceei_gate=None or "none"
+    clears it entirely. Response may carry a `warning` for incompatible
+    strategy families — surface it, but the save still succeeds."""
+    r = _SESSION.patch(f"{BASE}/assignments/{symbol}/ceei",
+                       params=_ident(system, strategy_name),
+                       json={"ceei_gate": ceei_gate,
+                             "ceei_gate_enabled": ceei_gate_enabled,
+                             "ceei_gate_threshold": ceei_gate_threshold,
+                             "ceei_gate_lookback": ceei_gate_lookback},
                        timeout=10, verify=False, headers=_headers())
     r.raise_for_status()
     return r.json()
@@ -407,12 +433,20 @@ def perplexity_size(symbol: str, entry_price: float, stop_price: float,
 def perplexity_backtest(strategy_name: str, symbol: str, period: str = "5y",
                         initial_capital: float = 10000, position_pct: float = 0.0,
                         breakdown: bool = True, approach_c: bool = False,
-                        tight_trail_pct: float = 2.0, timeout: int = 180):
+                        tight_trail_pct: float = 2.0,
+                        ceei_gate: str = "none",
+                        ceei_gate_threshold: float = 48.0,
+                        ceei_gate_lookback: int = 10,
+                        timeout: int = 180):
     params = {"period": period, "initial_capital": initial_capital,
               "position_pct": position_pct, "breakdown": str(breakdown).lower()}
     if approach_c:
         params["approach_c"] = "true"
         params["tight_trail_pct"] = tight_trail_pct
+    if ceei_gate and ceei_gate != "none":
+        params["ceei_gate"] = ceei_gate
+        params["ceei_gate_threshold"] = ceei_gate_threshold
+        params["ceei_gate_lookback"] = ceei_gate_lookback
     return _get(f"/perplexity/backtest/{strategy_name}/{symbol}",
                 params=params, timeout=timeout)
 
@@ -722,6 +756,9 @@ def backtest_run_generic(symbol: str, strategy_type: str,
                          exit_rsi: float = 0.0,
                          approach_c: bool = False,
                          tight_trail_pct: float = 2.0,
+                         ceei_gate: str = "none",
+                         ceei_gate_threshold: float = 48.0,
+                         ceei_gate_lookback: int = 10,
                          timeout: int = 120):
     """Single-strategy backtest on an arbitrary symbol using factory defaults."""
     params = {"period": period, "initial_capital": initial_capital,
@@ -733,6 +770,10 @@ def backtest_run_generic(symbol: str, strategy_type: str,
     if approach_c:
         params["approach_c"] = "true"
         params["tight_trail_pct"] = tight_trail_pct
+    if ceei_gate and ceei_gate != "none":
+        params["ceei_gate"] = ceei_gate
+        params["ceei_gate_threshold"] = ceei_gate_threshold
+        params["ceei_gate_lookback"] = ceei_gate_lookback
     return _get(f"/backtest/run-generic/{symbol}/{strategy_type}", params=params, timeout=timeout)
 
 

@@ -4,7 +4,7 @@ import streamlit as st
 
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/dashboard")
 import api
-from _theme import apply_theme, section
+from _theme import apply_theme
 import _charts as charts
 import _lightweight_chart as lwc
 
@@ -84,18 +84,19 @@ with chart_tab:
             "Price overlays",
             options=["ema9", "ema21", "ema50", "ema200", "vwap",
                      "bb_upper", "bb_lower", "bb_middle", "supertrend",
-                     "sma50", "sma200"],
-            default=["ema21", "ema50", "vwap", "bb_upper", "bb_lower"],
+                     "alphatrend", "alphatrend_signal", "sma50", "sma200"],
+            default=["ema21", "ema50", "vwap", "alphatrend"],
             format_func=lambda k: {
                 "ema9": "EMA 9", "ema21": "EMA 21", "ema50": "EMA 50", "ema200": "EMA 200",
                 "vwap": "VWAP",
                 "bb_upper": "Bollinger ↑", "bb_lower": "Bollinger ↓", "bb_middle": "Bollinger mid",
                 "supertrend": "Supertrend",
+                "alphatrend": "AlphaTrend", "alphatrend_signal": "AlphaTrend lag-2",
                 "sma50": "SMA 50", "sma200": "SMA 200",
             }[k],
         )
 
-    oc1, oc2 = st.columns([5, 3])
+    oc1, oc2, oc3 = st.columns([3, 3.2, 1.8])
     with oc1:
         osc_keys = st.multiselect(
             "Sub-pane indicators (stacked below price)",
@@ -107,10 +108,26 @@ with chart_tab:
             }[k],
         )
     with oc2:
-        st.caption(
-            f"Backend `/strategy/chart` (**{_src}**), same lightweight-charts engine as the live "
-            "tab. ▲/▼ markers = recent strategy signals."
+        sig_kinds = st.multiselect(
+            "Signal layers (▲/▼ markers)",
+            options=["alphatrend", "supertrend", "ema_cross", "macd_cross", "rsi"],
+            default=["alphatrend", "supertrend"],
+            format_func=lambda k: {
+                "alphatrend": "AlphaTrend cross", "supertrend": "Supertrend flip",
+                "ema_cross": "EMA 9/21 cross", "macd_cross": "MACD cross",
+                "rsi": "RSI 30/70",
+            }[k],
+            help="Technical buy/sell signals computed by the backend from the same "
+                 "indicator series that are plotted — markers always match the lines.",
         )
+    with oc3:
+        show_fills = st.checkbox("Strategy fills", value=True,
+                                 help="Overlay recent platform strategy signals for this symbol.")
+        osc_share = st.slider(
+            "Sub-pane size %", min_value=10, max_value=50, value=22, step=2,
+            help="Total vertical share given to ALL sub-panes combined. "
+                 "You can also drag the divider between panes on the chart itself.",
+        ) / 100.0
 
     # More panes need more vertical room so price isn't squeezed.
     _chart_h = 720 + 130 * len(osc_keys)
@@ -123,38 +140,61 @@ with chart_tab:
             payload = None
 
     if payload and payload.get("dates"):
+        # Technical buy/sell markers — computed backend-side from the same
+        # indicator arrays that are plotted, filtered by the chosen layers.
+        chart_markers: list[dict] = []
+        for ts_sig in (payload.get("tech_signals") or []):
+            if ts_sig.get("kind") in sig_kinds:
+                chart_markers.append({
+                    "date":     ts_sig.get("date"),
+                    "side":     ts_sig.get("side"),
+                    "price":    ts_sig.get("price"),
+                    "strategy": ts_sig.get("label") or ts_sig.get("kind"),
+                    "reason":   ts_sig.get("reason") or "",
+                })
+
         # Pull recent strategy signals for this symbol so traders can read each
         # fill on the candle — falls back silently if none exist yet.
-        recent_signals: list[dict] = []
-        try:
-            sigs = api.signals() or []
-            for s in sigs:
-                if str(s.get("symbol", "")).upper() != symbol:
-                    continue
-                d = (s.get("ts") or s.get("timestamp") or s.get("created_at") or "")[:10]
-                if not d:
-                    continue
-                recent_signals.append({
-                    "date":  d,
-                    "side":  str(s.get("direction") or s.get("side") or "").upper(),
-                    "price": s.get("price") or s.get("entry_price") or s.get("close") or None,
-                })
-            # If we don't have a price, anchor to that day's close.
-            close_by_date = dict(zip(payload["dates"], payload["close"]))
-            for r in recent_signals:
-                if r["price"] is None:
-                    r["price"] = close_by_date.get(r["date"])
-        except Exception:
-            recent_signals = []
+        if show_fills:
+            try:
+                sigs = api.signals() or []
+                close_by_date = dict(zip(payload["dates"], payload["close"]))
+                for s in sigs:
+                    if str(s.get("symbol", "")).upper() != symbol:
+                        continue
+                    d = (s.get("ts") or s.get("timestamp") or s.get("created_at") or "")[:10]
+                    if not d:
+                        continue
+                    price = s.get("price") or s.get("entry_price") or s.get("close") \
+                        or close_by_date.get(d)
+                    chart_markers.append({
+                        "date":     d,
+                        "side":     str(s.get("direction") or s.get("side") or "").upper(),
+                        "price":    price,
+                        "strategy": s.get("strategy") or s.get("strategy_name") or "fill",
+                        "reason":   s.get("reason") or "platform strategy signal",
+                    })
+            except Exception:
+                pass
+
+        # Dedupe: repeated scheduler cycles re-emit the same signal — one
+        # marker per (date, side, source) is all a trader needs to see.
+        _seen: set[tuple] = set()
+        chart_markers = [
+            m for m in chart_markers
+            if (k := (m["date"], m["side"], m["strategy"])) not in _seen
+            and not _seen.add(k)
+        ]
 
         lwc.render_daily_chart(
             payload,
             overlays_enabled=overlay_keys,
             oscillators_enabled=osc_keys,
-            trades=recent_signals,
+            trades=chart_markers,
             data_source=_src,
             currency=_cur,
             height=_chart_h,
+            osc_share=osc_share,
         )
         st.markdown(
             f"<div style='text-align:right;margin-top:-8px'>"
@@ -338,72 +378,6 @@ with tv_tab:
     )
     charts.tradingview_embed(_tv_sym, interval="D", height=720)
 
-# ── Financials ────────────────────────────────────────────────────
-st.divider()
-
-with st.spinner(f"Loading {symbol} fundamentals…"):
-    try:
-        data_fin = api.chart_data(symbol, period="1mo")
-        fund = data_fin.get("fundamentals", {})
-    except Exception:
-        fund = {}
-
-if not fund:
-    st.caption(f"No fundamental data available for {symbol}.")
-    st.stop()
-
-_CUR = "₹" if is_india_symbol(symbol) else "$"
-
-def _fmt_large(v):
-    if v is None: return "—"
-    if v >= 1e12: return f"{_CUR}{v/1e12:.2f}T"
-    if v >= 1e9:  return f"{_CUR}{v/1e9:.2f}B"
-    if v >= 1e6:  return f"{_CUR}{v/1e6:.2f}M"
-    return f"{_CUR}{v:,.0f}"
-
-def _pct(v):
-    return f"{v*100:.2f}%" if v is not None else "—"
-
-def _val(v, fmt=None):
-    if v is None: return "—"
-    return fmt.format(v) if fmt else str(v)
-
-name     = fund.get("company_name") or symbol
-sector   = fund.get("sector")   or "—"
-industry = fund.get("industry") or "—"
-section(f"{name}  ({symbol})")
-st.caption(f"**Sector:** {sector}  ·  **Industry:** {industry}")
-
-st.markdown("#### Valuation")
-vc = st.columns(5)
-vc[0].metric("Market Cap",   _fmt_large(fund.get("market_cap")))
-vc[1].metric("P/E (TTM)",    _val(fund.get("pe_ratio"),   "{:.2f}"))
-vc[2].metric("Forward P/E",  _val(fund.get("forward_pe"), "{:.2f}"))
-vc[3].metric("PEG Ratio",    _val(fund.get("peg_ratio"),  "{:.2f}"))
-vc[4].metric("EPS (TTM)",    _val(fund.get("eps"),        _CUR + "{:.2f}"))
-
-st.markdown("#### Price Statistics")
-pc = st.columns(5)
-pc[0].metric("52W High",       _val(fund.get("52w_high"),    _CUR + "{:.2f}"))
-pc[1].metric("52W Low",        _val(fund.get("52w_low"),     _CUR + "{:.2f}"))
-pc[2].metric("Beta",           _val(fund.get("beta"),        "{:.2f}"))
-pc[3].metric("Dividend Yield", _pct(fund.get("dividend_yield")))
-pc[4].metric("Short Ratio",    _val(fund.get("short_ratio"), "{:.2f}x"))
-
-st.markdown("#### Fundamentals")
-fc = st.columns(5)
-fc[0].metric("Revenue",       _fmt_large(fund.get("revenue")))
-fc[1].metric("Profit Margin", _pct(fund.get("profit_margin")))
-fc[2].metric("Debt/Equity",   _val(fund.get("debt_to_equity"), "{:.2f}"))
-fc[3].metric("ROE",           _pct(fund.get("roe")))
-fc[4].metric("Avg Volume",    f"{fund.get('avg_volume'):,}" if fund.get("avg_volume") else "—")
-
-st.markdown("#### Analyst Consensus")
-ac = st.columns(3)
-rating     = (fund.get("analyst_rating") or "—").replace("_", " ").title()
-target     = fund.get("analyst_target")
-last_price = next((v for v in reversed(data_fin.get("close", [])) if v), None)
-upside     = round((target - last_price) / last_price * 100, 1) if target and last_price else None
-ac[0].metric("Rating",       rating)
-ac[1].metric("Price Target", f"{_CUR}{target:.2f}" if target else "—")
-ac[2].metric("Upside",       f"{upside:+.1f}%" if upside is not None else "—")
+# Fundamentals section removed — this page is technical-only. The backend
+# /strategy/chart fundamentals fetch is now opt-in (fundamentals=true) and
+# nothing in the dashboard requests it.

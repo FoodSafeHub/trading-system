@@ -1455,6 +1455,28 @@ CEEI_INCOMPATIBLE_STRATEGIES = frozenset({
 
 _ceei_gate_family_warned: set = set()
 
+# Valid values for the assignment-level ceei_gate parameter (shared by the
+# assignments API, the scheduler merge helper, and the backtest route).
+CEEI_GATE_MODES = ("none", "setup", "trigger", "score")
+
+
+def ceei_overrides_from_assignment(asgn: Dict[str, Any]) -> Dict[str, Any]:
+    """Params dict to merge ON TOP of a strategy config's params for one
+    assignment. Empty dict when the assignment has no CEEI gate configured,
+    so `{**cfg.params, **ceei_overrides_from_assignment(asgn)}` is an exact
+    no-op for every existing assignment (all columns NULL)."""
+    gate = asgn.get("ceei_gate")
+    if not gate or str(gate).lower() == "none":
+        return {}
+    ov: Dict[str, Any] = {"ceei_gate": str(gate).lower()}
+    if asgn.get("ceei_gate_enabled") is not None:
+        ov["ceei_gate_enabled"] = bool(asgn["ceei_gate_enabled"])
+    if asgn.get("ceei_gate_threshold") is not None:
+        ov["ceei_gate_threshold"] = float(asgn["ceei_gate_threshold"])
+    if asgn.get("ceei_gate_lookback") is not None:
+        ov["ceei_gate_lookback"] = int(asgn["ceei_gate_lookback"])
+    return ov
+
 
 def _apply_ceei_gate(
     signal: StrategySignal,
@@ -1545,6 +1567,13 @@ def _apply_ceei_gate(
         signal.direction = "HOLD"
         signal.indicators["ceei_gate_veto"] = True
     return signal
+
+
+# Public alias for callers outside evaluate_strategy (e.g. the scheduler's
+# perplexity path, whose bespoke strategies don't route through the registry).
+# Works on any signal-like object exposing symbol/strategy_name/direction/
+# indicators — PerplexitySignal qualifies.
+apply_ceei_gate = _apply_ceei_gate
 
 
 _RULE_REGISTRY = {

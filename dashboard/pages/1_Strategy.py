@@ -8,6 +8,7 @@ import api
 from _theme import apply_theme, market_status_bar, section, divider, empty_state
 from _components import page_header, stat_band, eligibility_chip, blocker_chip, blocker_label, filter_cols
 from _broker_routing import render_broker_routing_toggle
+from _ceei import CEEI_MODE_GUIDE
 
 apply_theme("Strategy & Signals")
 
@@ -227,6 +228,38 @@ for p in positions or []:
     if sym:
         pos_by_symbol[sym] = p
 
+CEEI_GATE_MODES = ["none", "setup", "trigger", "score"]
+# Name fragments of strategy families the CEEI meta-study showed the gate HARMS
+# (mean-reversion / pullback / reversal — dip-buying is anti-ignition). Used for
+# a warning badge only; saving is never blocked.
+_CEEI_BAD_FAMILY_FRAGMENTS = (
+    "rsi2", "pullback", "reversion", "reversal", "panic", "bollinger", "vwap",
+    "fib", "dip",
+)
+
+
+def _ceei_family_incompatible(strategy_name: str) -> bool:
+    name_l = (strategy_name or "").lower()
+    return any(frag in name_l for frag in _CEEI_BAD_FAMILY_FRAGMENTS)
+
+
+def _ceei_summary(a: dict) -> str:
+    """One-cell audit string for the assignments table, e.g. 'trigger' or
+    'score≥55' or 'setup/10 (off)'. '—' when the gate is not configured."""
+    gate = a.get("ceei_gate")
+    if not gate or gate == "none":
+        return "—"
+    if gate == "score":
+        s = f"score≥{a.get('ceei_gate_threshold') or 48:g}"
+    elif gate == "setup":
+        s = f"setup/{a.get('ceei_gate_lookback') or 10}"
+    else:
+        s = gate
+    if a.get("ceei_gate_enabled") is False:
+        s += " (off)"
+    return s
+
+
 if assignments:
     rows = []
     for a in assignments:
@@ -246,6 +279,7 @@ if assignments:
             "$ Cap":          f"${cap:,.0f}" if cap else "(global)",
             "Shares Cap":     f"{shares_cap:g}" if shares_cap else "—",
             "Trail %":        f"{a.get('tight_trail_pct'):.1f}%" if a.get("tight_trail_pct") else "2.0% (default)",
+            "CEEI":           _ceei_summary(a),
             "Held":           f"{qty:g}" if qty else "—",
             "Exposure":       f"${mkt_val:,.0f}" if mkt_val else "—",
             "Notes":          a.get("notes") or "",
@@ -264,6 +298,7 @@ if assignments:
             "$ Cap":      st.column_config.TextColumn("$ Cap",     width="small"),
             "Shares Cap": st.column_config.TextColumn("Shs Cap",   width="small"),
             "Trail %":    st.column_config.TextColumn("Trail %",   width="small"),
+            "CEEI":       st.column_config.TextColumn("CEEI",      width="small"),
             "Held":       st.column_config.TextColumn("Held",      width="small"),
             "Exposure":   st.column_config.TextColumn("Exposure",  width="small"),
             "Notes":      st.column_config.TextColumn("Notes",     width="medium"),
@@ -500,6 +535,89 @@ if assignments:
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Update failed: {exc}")
+
+        # ── CEEI entry gate (opt-in, per assignment) ─────────────────
+        st.markdown("**CEEI entry gate** — vetoes BUY entries unless the CEEI "
+                    "ignition condition holds. Exits are never blocked; "
+                    "missing data fails open. Default: off.")
+        if _ceei_family_incompatible(sel_strat):
+            st.warning(
+                "⚠️ This strategy looks like a mean-reversion / pullback / "
+                "reversal family — the CEEI meta-study showed the gate "
+                "**reduces** expectancy for these. You can still save, but "
+                "review `output/ceei_meta/CEEI_CONFIRMATION.md` first.",
+                icon="⚠️",
+            )
+        cur_gate = sel_asgn.get("ceei_gate") or "none"
+        cur_gate_enabled = sel_asgn.get("ceei_gate_enabled")
+        cur_thr = sel_asgn.get("ceei_gate_threshold")
+        cur_lb = sel_asgn.get("ceei_gate_lookback")
+        cg1, cg2, cg3, cg4 = st.columns([2, 2, 2, 1])
+        with cg1:
+            edit_gate = st.selectbox(
+                "Gate mode", CEEI_GATE_MODES,
+                index=CEEI_GATE_MODES.index(cur_gate) if cur_gate in CEEI_GATE_MODES else 0,
+                key=f"edit_ceei_gate_{sel_key}",
+                help="trigger = CEEI firing on the signal bar (strictest, confirmed "
+                     "best for sma_rsi / momentum_breakout). score = composite score "
+                     "above threshold (milder, keeps more trades). setup = a coil "
+                     "seen within the lookback window. none = gate off.",
+            )
+        with cg2:
+            edit_thr = st.number_input(
+                "Score threshold", min_value=0.0, max_value=100.0,
+                value=float(cur_thr) if cur_thr is not None else 48.0, step=1.0,
+                key=f"edit_ceei_thr_{sel_key}",
+                disabled=(edit_gate != "score"),
+                help="score mode only: minimum CEEI composite score (0-100). "
+                     "Research default: 48.",
+            )
+        with cg3:
+            edit_lb = st.number_input(
+                "Setup lookback (bars)", min_value=1, max_value=60,
+                value=int(cur_lb) if cur_lb else 10, step=1,
+                key=f"edit_ceei_lb_{sel_key}",
+                disabled=(edit_gate != "setup"),
+                help="setup mode only: how many bars back a CEEI setup still "
+                     "counts as 'recent'. Research default: 10.",
+            )
+        with cg4:
+            edit_gate_on = st.checkbox(
+                "Active", value=(cur_gate_enabled is not False),
+                key=f"edit_ceei_on_{sel_key}",
+                disabled=(edit_gate == "none"),
+                help="Uncheck to park the configuration without losing it.",
+            )
+        st.caption(CEEI_MODE_GUIDE[edit_gate])
+        ceei_changed = (
+            edit_gate != cur_gate
+            or (edit_gate == "score" and (cur_thr is None or abs(edit_thr - float(cur_thr)) > 1e-9))
+            or (edit_gate == "setup" and edit_lb != (int(cur_lb) if cur_lb else 10))
+            or (edit_gate != "none" and edit_gate_on != (cur_gate_enabled is not False))
+        )
+        if st.button("💾 Update CEEI gate", key=f"update_ceei_{sel_key}",
+                     disabled=not ceei_changed):
+            try:
+                res = api.set_assignment_ceei(
+                    sel_sym,
+                    ceei_gate=edit_gate,
+                    ceei_gate_enabled=(edit_gate_on if edit_gate != "none" else None),
+                    ceei_gate_threshold=(float(edit_thr) if edit_gate == "score" else None),
+                    ceei_gate_lookback=(int(edit_lb) if edit_gate == "setup" else None),
+                    system=sel_system, strategy_name=sel_strat,
+                )
+                st.success(
+                    f"{sel_sym} CEEI gate → "
+                    f"{'off' if edit_gate == 'none' else edit_gate}"
+                    f"{'' if edit_gate_on or edit_gate == 'none' else ' (parked)'}."
+                )
+                if res.get("warning"):
+                    # Leave the warning on screen — no rerun — so it's actually read.
+                    st.warning(res["warning"], icon="⚠️")
+                else:
+                    st.rerun()
+            except Exception as exc:
+                st.error(f"Update failed: {exc}")
 else:
     st.info(
         "No assignments yet. With the consensus pool **OFF**, the scheduler has "

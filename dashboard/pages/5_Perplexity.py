@@ -19,6 +19,7 @@ from app.config import get_settings
 
 from _theme import apply_theme, section, divider  # noqa: E402
 from _components import page_header, stat_band  # noqa: E402
+from _ceei import CEEI_MODE_GUIDE, ceei_note, ceei_promote_controls, ceei_upsert_kwargs  # noqa: E402
 
 apply_theme("India Swing Strategies")
 
@@ -256,6 +257,25 @@ with tab_signals:
         c2.metric("🔴 SELL signals", sell_count)
         c3.metric("⬜ HOLD",         hold_count)
         c4.metric("📈 Market Regime", regime_label)
+
+        # Tape-health (knife-entry) verdict — same gate the live scheduler
+        # applies to BUYs. Non-exempt strategies share one symbol verdict, so
+        # summarise from the first non-pass if any, else the first signal.
+        _tape_block = next((s for s in sigs if s.get("tape_gate") == "block"), None)
+        if _tape_block is not None:
+            st.error(
+                f"🔪 **Knife tape — live scheduler would VETO BUYs:** "
+                f"{_tape_block.get('tape_gate_reason') or '—'}  "
+                f"(panic strategies like RSI2 stay exempt)"
+            )
+        elif sigs and sigs[0].get("tape_gate") == "pass":
+            _m = sigs[0].get("tape_metrics") or {}
+            st.success(
+                "🟢 **Clear tape** — 5d "
+                f"{_m.get('ret_5d_pct', 0):+.1f}%, {_m.get('red_streak', 0)} red closes, "
+                f"EMA20 {_m.get('vs_ema20_pct', 0):+.1f}%, "
+                f"20d-high {_m.get('off_20d_high_pct', 0):+.1f}%"
+            )
         st.divider()
 
         for s in sigs:
@@ -265,12 +285,19 @@ with tab_signals:
             icon = "🚫" if blocked else ("🟢" if direction == "BUY" else ("🔴" if direction == "SELL" else "⬜"))
             conf_str = f"confidence: {s['confidence']:.0%}" if s["confidence"] else ""
             bucket_str = f" | Vol bucket: {s['volatility_bucket']}" if s.get("volatility_bucket") else ""
+            tape_str = ""
+            if direction == "BUY" and s.get("tape_gate"):
+                tape_str = ("  |  🟢 tape clear" if s["tape_gate"] == "pass"
+                            else "  |  🔪 KNIFE")
 
             with st.expander(
-                f"{icon} **{name}** — {direction}{bucket_str}  |  {conf_str}",
+                f"{icon} **{name}** — {direction}{bucket_str}  |  {conf_str}{tape_str}",
                 expanded=(direction == "BUY"),
             ):
                 st.caption(STRATEGY_DESCRIPTIONS.get(name, ""))
+                if direction == "BUY" and s.get("tape_gate") == "block":
+                    st.error(f"🔪 **Tape gate would VETO this BUY:** "
+                             f"{s.get('tape_gate_reason') or '—'}")
                 if s.get("suitability_blocked"):
                     st.warning(f"Blocked by suitability: {s.get('suitability_reason', 'Rule mismatch')}")
                 if s["reason"] and not s.get("suitability_blocked"):
@@ -743,6 +770,41 @@ with tab_backtest:
         else:
             st.info("Approach C **OFF** — SELL exits at market (default).")
 
+    # ── CEEI entry gate (opt-in) — same veto the live per-assignment gate applies ──
+    with st.expander("CEEI entry gate — veto BUYs without ignition", expanded=False):
+        st.caption(
+            "Applies the same per-assignment CEEI gate the scheduler uses: BUY entries "
+            "are vetoed unless the CEEI condition holds on the signal bar (exits are "
+            "never blocked). Best evidence is on trend/breakout/momentum entries; the "
+            "meta-study showed it **hurts** mean-reversion / pullback strategies. "
+            "Running with the gate ON also runs the ungated base for comparison."
+        )
+        cg1, cg2, cg3 = st.columns([2, 2, 2])
+        with cg1:
+            px_ceei_gate = st.selectbox(
+                "Gate mode", ["none", "setup", "trigger", "score"],
+                key="px_bt_ceei_gate",
+                help="trigger = CEEI firing on the signal bar (strictest). "
+                     "score = composite score above threshold (milder). "
+                     "setup = coil seen within the lookback. none = off.",
+            )
+        with cg2:
+            px_ceei_thr = st.number_input(
+                "Score threshold", min_value=0.0, max_value=100.0,
+                value=48.0, step=1.0, key="px_bt_ceei_thr",
+                disabled=(px_ceei_gate != "score"),
+            )
+        with cg3:
+            px_ceei_lb = st.number_input(
+                "Setup lookback (bars)", min_value=1, max_value=60,
+                value=10, step=1, key="px_bt_ceei_lb",
+                disabled=(px_ceei_gate != "setup"),
+            )
+        st.caption(CEEI_MODE_GUIDE[px_ceei_gate])
+        if px_ceei_gate != "none":
+            st.info(f"CEEI gate **ON** ({px_ceei_gate}) — the run will include an "
+                    f"ungated baseline for side-by-side comparison.")
+
     run_bt = st.button("▶ Run Backtest", type="primary", key="px_run_bt")
 
     if run_bt:
@@ -752,7 +814,10 @@ with tab_backtest:
                                             initial_capital=bt_capital, position_pct=bt_pos_pct,
                                             breakdown=True,
                                             approach_c=bt_approach_c,
-                                            tight_trail_pct=float(bt_c_trail))
+                                            tight_trail_pct=float(bt_c_trail),
+                                            ceei_gate=px_ceei_gate,
+                                            ceei_gate_threshold=float(px_ceei_thr),
+                                            ceei_gate_lookback=int(px_ceei_lb))
                 st.session_state["px_bt_result"] = r
                 # When Approach C is ON, also run the default so the user sees
                 # the side-by-side improvement (or regression).
@@ -761,12 +826,30 @@ with tab_backtest:
                         r_def = api.perplexity_backtest(
                             chosen_strat, bt_symbol, period=bt_period,
                             initial_capital=bt_capital, position_pct=bt_pos_pct,
-                            breakdown=False, approach_c=False)
+                            breakdown=False, approach_c=False,
+                            ceei_gate=px_ceei_gate,
+                            ceei_gate_threshold=float(px_ceei_thr),
+                            ceei_gate_lookback=int(px_ceei_lb))
                         st.session_state["px_bt_default"] = r_def
                     except Exception:
                         st.session_state.pop("px_bt_default", None)
                 else:
                     st.session_state.pop("px_bt_default", None)
+                # When the CEEI gate is ON, also run the ungated base so the
+                # gate's own effect is visible in isolation.
+                if px_ceei_gate != "none":
+                    try:
+                        r_ungated = api.perplexity_backtest(
+                            chosen_strat, bt_symbol, period=bt_period,
+                            initial_capital=bt_capital, position_pct=bt_pos_pct,
+                            breakdown=False, approach_c=bt_approach_c,
+                            tight_trail_pct=float(bt_c_trail), ceei_gate="none")
+                        st.session_state["px_bt_ceei_base"] = {
+                            "base": r_ungated, "mode": px_ceei_gate}
+                    except Exception:
+                        st.session_state.pop("px_bt_ceei_base", None)
+                else:
+                    st.session_state.pop("px_bt_ceei_base", None)
             except Exception as e:
                 st.error(f"Backtest failed: {e}")
 
@@ -850,6 +933,34 @@ with tab_backtest:
                     f"net P&L moved **${_delta:+,.0f}** vs market-exit. "
                     "Try a few trail %s to find the best for this strategy/symbol."
                 )
+
+        # ── CEEI gate — gated vs ungated comparison ─────────────────────────
+        _ceei_base = st.session_state.get("px_bt_ceei_base")
+        if _ceei_base and _ceei_base.get("base") and not _ceei_base["base"].get("error"):
+            st.divider()
+            st.markdown(f"#### CEEI Gate ({_ceei_base['mode']}) — Gated vs Base")
+            _rb, _rg = _ceei_base["base"], r
+            _cmp_rows = []
+            for _label, _res in (("Base (no gate)", _rb),
+                                 (f"CEEI {_ceei_base['mode']} gate", _rg)):
+                _cmp_rows.append({
+                    "Mode": _label,
+                    "Trades": _res.get("total_trades", 0),
+                    "Win %": f"{_res.get('win_rate_pct', 0):.1f}",
+                    "Return %": f"{_res.get('total_return_pct', 0):+.2f}",
+                    "P&L": f"${_res.get('total_pnl', 0):,.0f}",
+                    "Expectancy %": f"{_res.get('expectancy_pct') or 0:+.2f}",
+                    "Max DD %": f"{_res.get('max_drawdown_pct', 0):.1f}",
+                    "Sharpe": f"{_res.get('sharpe_ratio') or 0:.2f}",
+                })
+            st.dataframe(pd.DataFrame(_cmp_rows), use_container_width=True, hide_index=True)
+            _dret = (_rg.get("total_return_pct") or 0) - (_rb.get("total_return_pct") or 0)
+            _dtr = (_rg.get("total_trades") or 0) - (_rb.get("total_trades") or 0)
+            st.caption(
+                f"Gate effect: **{_dret:+.2f} pts** total return, **{_dtr:+d}** trades. "
+                "A good gate cuts trades while holding or improving return — judge on "
+                "return/expectancy/drawdown, not win rate alone."
+            )
 
         # ── Tape-gate (knife veto) audit — same panel as the Backtest page ──
         _tg = r.get("tape_gate_summary") or {}
@@ -945,26 +1056,38 @@ with tab_backtest:
             st.info(f"SELL signal → **{bt_trail:.1f}% tight trailing stop** from signal price.")
         else:
             st.info("Approach C OFF → **SELL signal exits at market** (no trailing stop).")
+        # CEEI entry gate — pre-filled from the backtest CEEI run, if one was done.
+        bt_pceei_gate, bt_pceei_thr, bt_pceei_lb = ceei_promote_controls(
+            f"bt_promote_{r['symbol']}_{r['strategy_name']}",
+            strategy_name=r["strategy_name"],
+            default_gate=str(st.session_state.get("px_bt_ceei_gate", "none")),
+            default_threshold=float(st.session_state.get("px_bt_ceei_thr", 48.0)),
+            default_lookback=int(st.session_state.get("px_bt_ceei_lb", 10)),
+        )
         if st.button("Promote", type="primary",
                      key=f"bt_promote_btn_{r['symbol']}_{r['strategy_name']}"):
             try:
                 _cap = float(bt_promote_cap.strip()) if bt_promote_cap.strip() else None
                 _note_c = (f"trail={bt_trail:.1f}%" if bt_use_c else "Approach C off")
+                _note_g = ceei_note(bt_pceei_gate, bt_pceei_thr, bt_pceei_lb)
                 api.upsert_assignment(
                     symbol=r["symbol"],
                     system="perplexity",
                     strategy_name=r["strategy_name"],
                     enabled=bt_promote_enabled,
-                    notes=f"Promoted from Backtest ({r['period']}), {_note_c}",
+                    notes=f"Promoted from Backtest ({r['period']}), {_note_c}, {_note_g}",
                     max_capital_usd=_cap,
                     tight_trail_pct=(bt_trail if bt_use_c else None),
                     approach_c_enabled=bt_use_c,
+                    **ceei_upsert_kwargs(bt_pceei_gate, bt_pceei_thr, bt_pceei_lb),
                 )
                 st.success(
                     f"Assigned **{r['strategy_name']}** → **{r['symbol']}** "
                     f"(enabled={bt_promote_enabled}). "
-                    + (f"SELL → **{bt_trail:.1f}% tight trail**." if bt_use_c
-                       else "Approach C **off** — SELL exits at market.")
+                    + (f"SELL → **{bt_trail:.1f}% tight trail**. " if bt_use_c
+                       else "Approach C **off** — SELL exits at market. ")
+                    + (f"Entries gated by **{_note_g}**." if bt_pceei_gate != "none"
+                       else "CEEI gate off.")
                 )
             except Exception as exc:
                 st.error(f"Promote failed: {exc}")
@@ -1191,6 +1314,10 @@ with tab_compare:
                 else:
                     st.info("Approach C OFF → **SELL signal exits at market** (no trailing stop).")
 
+            px_pceei_gate, px_pceei_thr, px_pceei_lb = ceei_promote_controls(
+                f"px_promote_{cmp_symbol}", strategy_name=pick,
+            )
+
             pg_col, _ = st.columns([1, 3])
             with pg_col:
                 go_btn = st.button("Promote", type="primary",
@@ -1202,21 +1329,25 @@ with tab_compare:
                     if cap_str.strip():
                         cap_val = float(cap_str.strip())
                     _note_c = (f"trail={px_tight_trail:.1f}%" if px_use_c else "Approach C off")
+                    _note_g = ceei_note(px_pceei_gate, px_pceei_thr, px_pceei_lb)
                     api.upsert_assignment(
                         symbol=cmp_symbol,
                         system="perplexity",
                         strategy_name=pick,
                         enabled=enabled,
-                        notes=f"Promoted from Compare All ({cmp_period}), {_note_c}",
+                        notes=f"Promoted from Compare All ({cmp_period}), {_note_c}, {_note_g}",
                         max_capital_usd=cap_val,
                         tight_trail_pct=(px_tight_trail if px_use_c else None),
                         approach_c_enabled=px_use_c,
+                        **ceei_upsert_kwargs(px_pceei_gate, px_pceei_thr, px_pceei_lb),
                     )
                     st.success(
                         f"Assigned **{pick}** to **{cmp_symbol}** (perplexity, enabled={enabled}). "
-                        + (f"SELL signals will place a **{px_tight_trail:.1f}% tight trailing stop**."
+                        + (f"SELL signals will place a **{px_tight_trail:.1f}% tight trailing stop**. "
                            if px_use_c else
-                           "Approach C is **off** — SELL signals exit at market.")
+                           "Approach C is **off** — SELL signals exit at market. ")
+                        + (f"Entries gated by **{_note_g}**." if px_pceei_gate != "none"
+                           else "CEEI gate off.")
                     )
                 except Exception as exc:
                     st.error(f"Promote failed: {exc}")

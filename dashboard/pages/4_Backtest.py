@@ -17,6 +17,7 @@ from app.services.recommendations.winner import score_strategies
 apply_theme("Backtest")
 
 from _sidebar import render_sidebar
+from _ceei import CEEI_MODE_GUIDE, ceei_note, ceei_promote_controls, ceei_upsert_kwargs
 render_sidebar()
 page_header(
     "Strategy Backtester",
@@ -735,6 +736,16 @@ with st.expander("📡 Live Signals — what would fire right now", expanded=Fal
         c3.metric("⬜ HOLD",         hold_n)
         c4.metric("Last close", f"${live.get('last_close'):,.2f}" if live.get("last_close") else "—")
         st.caption(f"As of: **{live.get('as_of', '—')}** for **{live.get('symbol', '—')}**")
+
+        # Tape-health (knife-entry) verdict — same gate the live scheduler
+        # applies to BUYs. Symbol-level banner + per-strategy badge below.
+        tape = live.get("tape") or {}
+        if tape:
+            if tape.get("ok"):
+                st.success(f"🟢 **Clear tape** — {tape.get('verdict', '')}")
+            else:
+                st.error(f"🔪 **Knife tape — live scheduler would VETO BUYs.** "
+                         f"{tape.get('verdict', '')}")
         st.divider()
 
         for s in sigs:
@@ -747,10 +758,20 @@ with st.expander("📡 Live Signals — what would fire right now", expanded=Fal
             icon = "🟢" if direction == "BUY" else ("🔴" if direction == "SELL" else "⬜")
             strength = s.get("strength") or 0
             strength_str = f"  ·  strength {strength:.0%}" if strength else ""
+            # Knife badge only matters on BUYs (the gate never blocks SELLs).
+            # Per-strategy verdicts can differ: panic strategies (RSI2 etc.)
+            # are exempt from the velocity rule.
+            tape_str = ""
+            if direction == "BUY" and s.get("tape_gate"):
+                tape_str = ("  ·  🟢 tape clear" if s["tape_gate"] == "pass"
+                            else "  ·  🔪 KNIFE — would be vetoed")
             with st.expander(
-                f"{icon} **{name}** — {direction}{strength_str}",
+                f"{icon} **{name}** — {direction}{strength_str}{tape_str}",
                 expanded=(direction in ("BUY", "SELL")),
             ):
+                if direction == "BUY" and s.get("tape_gate") == "block":
+                    st.error(f"🔪 **Tape gate would VETO this BUY:** "
+                             f"{s.get('tape_gate_reason') or '—'}")
                 if s.get("reason"):
                     st.info(f"**Reason:** {s['reason']}")
 
@@ -970,6 +991,42 @@ if mode == "Single Strategy":
                 f"Trail % set to **{bt_tight_trail:.1f}%** — enable Approach C and run to test it."
             )
 
+    with st.expander("CEEI entry gate — veto BUYs without ignition", expanded=False):
+        st.caption(
+            "Applies the same per-assignment CEEI gate the scheduler uses: BUY "
+            "entries are vetoed unless the CEEI condition holds on the signal bar "
+            "(exits are never blocked). Confirmed pairings (49 symbols / 5y): "
+            "**sma_rsi + trigger** (+51.7% expectancy), **momentum_breakout + "
+            "trigger** (+25.1%) or **+ score** (milder). Avoid on mean-reversion / "
+            "pullback / reversal strategies — the study showed it hurts them. "
+            "Running with the gate ON also runs the ungated base so you can compare."
+        )
+        _cg1, _cg2, _cg3 = st.columns([2, 2, 2])
+        with _cg1:
+            bt_ceei_gate = st.selectbox(
+                "Gate mode", ["none", "setup", "trigger", "score"],
+                key="bt_ceei_gate",
+                help="trigger = CEEI firing on the signal bar (strictest). "
+                     "score = composite score above threshold (milder). "
+                     "setup = coil seen within the lookback. none = off.",
+            )
+        with _cg2:
+            bt_ceei_thr = st.number_input(
+                "Score threshold", min_value=0.0, max_value=100.0,
+                value=48.0, step=1.0, key="bt_ceei_thr",
+                disabled=(bt_ceei_gate != "score"),
+            )
+        with _cg3:
+            bt_ceei_lb = st.number_input(
+                "Setup lookback (bars)", min_value=1, max_value=60,
+                value=10, step=1, key="bt_ceei_lb",
+                disabled=(bt_ceei_gate != "setup"),
+            )
+        st.caption(CEEI_MODE_GUIDE[bt_ceei_gate])
+        if bt_ceei_gate != "none":
+            st.info(f"CEEI gate **ON** ({bt_ceei_gate}) — the run will include an "
+                    f"ungated baseline for side-by-side comparison.")
+
     if not run and "bt_result" not in st.session_state:
         st.info("Type a symbol, pick a strategy, then click Run Backtest.")
         st.stop()
@@ -989,10 +1046,37 @@ if mode == "Single Strategy":
                     exit_rsi=float(bt_exit_rsi),
                     approach_c=bt_approach_c,
                     tight_trail_pct=float(bt_tight_trail),
+                    ceei_gate=bt_ceei_gate,
+                    ceei_gate_threshold=float(bt_ceei_thr),
+                    ceei_gate_lookback=int(bt_ceei_lb),
                     timeout=120,
                 )
                 st.session_state["bt_result"] = result
                 st.session_state.pop("bt_consensus", None)
+
+                # When the CEEI gate is ON, also run the ungated base so the
+                # comparison table renders immediately.
+                if bt_ceei_gate != "none":
+                    try:
+                        r_base = api.backtest_run_generic(
+                            chosen_sym, chosen_type,
+                            period=period, initial_capital=capital,
+                            disable_trail=disable_trail,
+                            disable_exit_policy=disable_exit_policy,
+                            stop_loss_pct=float(bt_stop_loss_pct),
+                            exit_rsi=float(bt_exit_rsi),
+                            approach_c=bt_approach_c,
+                            tight_trail_pct=float(bt_tight_trail),
+                            ceei_gate="none",
+                            timeout=120,
+                        )
+                        st.session_state["bt_ceei_compare"] = {
+                            "base": r_base, "gated": result, "mode": bt_ceei_gate,
+                        }
+                    except Exception:
+                        st.session_state.pop("bt_ceei_compare", None)
+                else:
+                    st.session_state.pop("bt_ceei_compare", None)
 
                 # When Approach C is ON, also run default and all trail % variants
                 # in one shot so the comparison table is available immediately.
@@ -1046,6 +1130,33 @@ if mode == "Single Strategy":
     section(f"Results — {r['strategy_name']} ({r['start_date']} → {r['end_date']})")
 
     _render_backtest_metrics(r)
+
+    # ── CEEI gate — gated vs ungated comparison ──────────────────────────────
+    _ceei_cmp = st.session_state.get("bt_ceei_compare")
+    if _ceei_cmp:
+        st.divider()
+        st.markdown(f"#### CEEI Gate ({_ceei_cmp['mode']}) — Gated vs Base")
+        _rows = []
+        for _label, _res in (("Base (no gate)", _ceei_cmp["base"]),
+                             (f"CEEI {_ceei_cmp['mode']} gate", _ceei_cmp["gated"])):
+            _rows.append({
+                "Mode": _label,
+                "Trades": _res.get("total_trades", 0),
+                "Win %": f"{_res.get('win_rate_pct', 0):.1f}",
+                "Return %": f"{_res.get('total_return_pct', 0):.2f}",
+                "P&L $": f"{_res.get('total_pnl', 0):,.0f}",
+                "Max DD %": f"{_res.get('max_drawdown_pct', 0):.1f}",
+                "Sharpe": f"{_res.get('sharpe_ratio') or 0:.2f}",
+            })
+        st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+        _b, _g = _ceei_cmp["base"], _ceei_cmp["gated"]
+        _dr = (_g.get("total_return_pct") or 0) - (_b.get("total_return_pct") or 0)
+        _dt = (_g.get("total_trades") or 0) - (_b.get("total_trades") or 0)
+        st.caption(
+            f"Gate effect: **{_dr:+.2f} pts** total return, **{_dt:+d}** trades. "
+            "A good gate cuts trades while holding or improving return — judge on "
+            "return/drawdown/Sharpe, not win rate alone."
+        )
 
     # ── Approach C comparison table ───────────────────────────────────────────
     _trail_variants = st.session_state.get("bt_trail_variants")
@@ -1129,6 +1240,11 @@ if mode == "Single Strategy":
         if ov.get("disable_exit_policy"): override_notes.append("exit policy disabled")
         if ov.get("exit_rsi"): override_notes.append(f"RSI sell threshold = {ov['exit_rsi']}")
         if ov.get("approach_c"): override_notes.append(f"Approach C — {ov.get('tight_trail_pct',2)}% tight trail on SELL signal")
+        if ov.get("ceei_gate"):
+            _cg_note = f"CEEI {ov['ceei_gate']} gate"
+            if ov.get("ceei_gate_threshold") is not None: _cg_note += f" (score ≥ {ov['ceei_gate_threshold']:g})"
+            if ov.get("ceei_gate_lookback") is not None: _cg_note += f" (lookback {ov['ceei_gate_lookback']})"
+            override_notes.append(_cg_note)
         if override_notes:
             st.caption("Overrides for this run: " + " · ".join(override_notes))
         exit_policy.render(_eff_stype, _eff_params)
@@ -1171,10 +1287,18 @@ if mode == "Single Strategy":
             help="Shares cap. Used only when the dollar cap is empty.",
         )
 
-    # Tight trail % — pre-filled from the backtest Approach C slider if it was run
+    # Approach C — same explicit ON/OFF the India Swing promote uses. Pre-filled
+    # from the backtest Approach C run so a validated result promotes as tested.
     _bt_trail_default = float(st.session_state.get("bt_tight_trail", 2.0))
     _approach_c_was_run = bool(st.session_state.get("bt_approach_c", False))
-    p_trail1, p_trail2 = st.columns([2, 3])
+    p_c1, p_trail1, p_trail2 = st.columns([2, 2, 3])
+    with p_c1:
+        single_use_c = st.checkbox(
+            "Enable Approach C (tight trail on SELL)", value=_approach_c_was_run,
+            key=f"single_promote_usec_{chosen_sym}_{chosen}",
+            help="OFF: SELL exits at market. ON: SELL arms a tight trailing stop. "
+                 "Pre-filled from your Approach C backtest run if you did one.",
+        )
     with p_trail1:
         single_tight_trail = st.slider(
             "Approach C tight trail %",
@@ -1182,21 +1306,32 @@ if mode == "Single Strategy":
             value=_bt_trail_default,
             step=0.5,
             key=f"single_promote_trail_{chosen_sym}_{chosen}",
+            disabled=not single_use_c,
             help="Tight trailing stop % placed when the assigned strategy fires a SELL signal. "
                  "Pre-filled from your backtest Approach C slider. "
                  "Low-vol stocks (KO, SO): 2–3%. High-vol (NVDA, TSLA): 3–5%.",
         )
     with p_trail2:
-        if _approach_c_was_run:
+        if single_use_c:
             st.info(
-                f"Pre-filled from your backtest Approach C run ({_bt_trail_default:.1f}%). "
-                f"Adjust if you tested multiple trail values."
+                f"Approach C **ON** — SELL signal → **{single_tight_trail:.1f}% tight trailing stop** "
+                f"from signal price."
+                + (" Pre-filled from your backtest run." if _approach_c_was_run else "")
             )
         else:
             st.info(
-                "Run the backtest with **Approach C enabled** first to find the best trail % "
-                "for this symbol, then promote with that value."
+                "Approach C **OFF** → SELL signal exits at market. Run the backtest with "
+                "**Approach C enabled** first to find the best trail %, then promote with it."
             )
+
+    # CEEI entry gate — pre-filled from the backtest CEEI run, if one was done.
+    single_ceei_gate, single_ceei_thr, single_ceei_lb = ceei_promote_controls(
+        f"single_promote_{chosen_sym}_{chosen}",
+        strategy_name=r["strategy_name"],
+        default_gate=str(st.session_state.get("bt_ceei_gate", "none")),
+        default_threshold=float(st.session_state.get("bt_ceei_thr", 48.0)),
+        default_lookback=int(st.session_state.get("bt_ceei_lb", 10)),
+    )
 
     p3, p4, p5 = st.columns([3, 1, 2])
     with p3:
@@ -1229,22 +1364,28 @@ if mode == "Single Strategy":
             single_shares_val: float | None = None
             if single_shares_str.strip():
                 single_shares_val = float(single_shares_str.strip())
+            _note_c = (f"trail={single_tight_trail:.1f}%" if single_use_c else "Approach C off")
+            _note_g = ceei_note(single_ceei_gate, single_ceei_thr, single_ceei_lb)
             api.upsert_assignment(
                 symbol=chosen_sym,
                 system="scanner",
                 strategy_name=r["strategy_name"],
                 enabled=single_enabled,
-                notes=f"Promoted from Single Strategy backtest ({period}), trail={single_tight_trail:.1f}%",
+                notes=f"Promoted from Single Strategy backtest ({period}), {_note_c}, {_note_g}",
                 max_capital_usd=single_cap_val,
                 max_shares=single_shares_val,
                 broker=single_broker,
-                tight_trail_pct=single_tight_trail,
+                tight_trail_pct=(single_tight_trail if single_use_c else None),
+                approach_c_enabled=single_use_c,
+                **ceei_upsert_kwargs(single_ceei_gate, single_ceei_thr, single_ceei_lb),
             )
             st.success(
                 f"Assigned **{r['strategy_name']}** to **{chosen_sym}** "
-                f"with **{single_tight_trail:.1f}% tight trail** "
                 f"(enabled={single_enabled}). "
-                "SELL signals will place a tight trailing stop at this distance."
+                + (f"SELL → **{single_tight_trail:.1f}% tight trail**. " if single_use_c
+                   else "Approach C **off** — SELL exits at market. ")
+                + (f"Entries gated by **{_note_g}**." if single_ceei_gate != "none"
+                   else "CEEI gate off.")
             )
         except Exception as exc:
             st.error(f"Promote failed: {exc}")
@@ -1608,20 +1749,34 @@ elif mode == "Custom Symbol":
                 key=f"custom_promote_shares_{cmp_symbol}",
                 help="Shares cap. Used only when the dollar cap is empty.",
             )
-        ctrail1, ctrail2 = st.columns([2, 3])
+        cuse1, ctrail1, ctrail2 = st.columns([2, 2, 3])
+        with cuse1:
+            custom_use_c = st.checkbox(
+                "Enable Approach C (tight trail on SELL)", value=True,
+                key=f"custom_promote_usec_{cmp_symbol}",
+                help="OFF: SELL exits at market. ON (historical default here): "
+                     "SELL arms a tight trailing stop.",
+            )
         with ctrail1:
             custom_tight_trail = st.slider(
                 "Approach C tight trail %",
                 min_value=1.0, max_value=10.0, value=2.0, step=0.5,
                 key=f"custom_promote_trail_{cmp_symbol}",
+                disabled=not custom_use_c,
                 help="Tight trailing stop % when SELL signal fires. "
                      "Run Approach C in the compare table to find the best value for this symbol.",
             )
         with ctrail2:
-            st.info(
-                f"SELL signal → **{custom_tight_trail:.1f}% tight trailing stop** placed from signal price. "
-                "Enable Approach C in the backtest expanders above to test different values first."
-            )
+            if custom_use_c:
+                st.info(
+                    f"SELL signal → **{custom_tight_trail:.1f}% tight trailing stop** placed from signal price. "
+                    "Enable Approach C in the backtest expanders above to test different values first."
+                )
+            else:
+                st.info("Approach C **OFF** → SELL signal exits at market (no trailing stop).")
+        custom_ceei_gate, custom_ceei_thr, custom_ceei_lb = ceei_promote_controls(
+            f"custom_promote_{cmp_symbol}", strategy_name=pick,
+        )
         p4, p5, p6 = st.columns([3, 1, 2])
         with p4:
             custom_broker = st.selectbox(
@@ -1649,22 +1804,27 @@ elif mode == "Custom Symbol":
                 shares_val: float | None = None
                 if shares_str.strip():
                     shares_val = float(shares_str.strip())
+                _note_c = (f"trail={custom_tight_trail:.1f}%" if custom_use_c else "Approach C off")
+                _note_g = ceei_note(custom_ceei_gate, custom_ceei_thr, custom_ceei_lb)
                 api.upsert_assignment(
                     symbol=cmp_symbol,
                     system="scanner",
                     strategy_name=pick,
                     enabled=enabled,
-                    notes=f"Promoted from Custom Symbol compare ({cmp_period}), trail={custom_tight_trail:.1f}%",
+                    notes=f"Promoted from Custom Symbol compare ({cmp_period}), {_note_c}, {_note_g}",
                     max_capital_usd=cap_val,
                     max_shares=shares_val,
                     broker=custom_broker,
-                    tight_trail_pct=custom_tight_trail,
+                    tight_trail_pct=(custom_tight_trail if custom_use_c else None),
+                    approach_c_enabled=custom_use_c,
+                    **ceei_upsert_kwargs(custom_ceei_gate, custom_ceei_thr, custom_ceei_lb),
                 )
                 st.success(
-                    f"Assigned **{pick}** to **{cmp_symbol}** "
-                    f"with **{custom_tight_trail:.1f}% tight trail** "
-                    f"(enabled={enabled}). "
-                    "SELL signals will place a tight trailing stop at this distance."
+                    f"Assigned **{pick}** to **{cmp_symbol}** (enabled={enabled}). "
+                    + (f"SELL → **{custom_tight_trail:.1f}% tight trail**. " if custom_use_c
+                       else "Approach C **off** — SELL exits at market. ")
+                    + (f"Entries gated by **{_note_g}**." if custom_ceei_gate != "none"
+                       else "CEEI gate off.")
                 )
             except Exception as exc:
                 st.error(f"Promote failed: {exc}")

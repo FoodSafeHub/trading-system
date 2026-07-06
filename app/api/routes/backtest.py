@@ -169,6 +169,7 @@ def backtest_live_signals(symbol: str, period: str = "1y"):
     from app.services.scanner.scanner_service import _make_generic_configs_full
     from app.services.strategy.rules import evaluate_strategy
     from app.services.market_data.provider import get_ohlcv
+    from app.services.strategy.tape_health import check_tape_health, verdict_line
 
     sym = symbol.upper().strip()
     if not sym:
@@ -185,13 +186,21 @@ def backtest_live_signals(symbol: str, period: str = "1y"):
     prices = df["Close"].dropna()
     last_close = float(prices.iloc[-1]) if len(prices) else None
 
+    # Symbol-level tape-health verdict (knife-entry gate) — the same check the
+    # live scheduler applies to BUYs. Per-strategy verdicts can differ because
+    # panic strategies (RSI2 / VIX-spike) are exempt from the velocity rule.
+    tape_symbol = check_tape_health(sym, None, ohlcv=df)
+
     out: list[dict] = []
     for cfg in _make_generic_configs_full(sym):
+        th = check_tape_health(sym, cfg.name, ohlcv=df)
         try:
             sig = evaluate_strategy(cfg.type, sym, prices, cfg.params, ohlcv=df)
             indicators = sig.indicators or {}
             entry = sig.price_at_signal if sig.direction in ("BUY", "SELL") else None
             out.append({
+                "tape_gate": "pass" if th.ok else "block",
+                "tape_gate_reason": "" if th.ok else th.summary,
                 "strategy_name": cfg.name,
                 "strategy_type": cfg.type,
                 "direction": sig.direction,
@@ -215,6 +224,12 @@ def backtest_live_signals(symbol: str, period: str = "1y"):
             })
     return {"symbol": sym, "last_close": last_close,
             "as_of": str(df.index[-1])[:19] if len(df.index) else None,
+            "tape": {
+                "ok": tape_symbol.ok,
+                "verdict": verdict_line(tape_symbol),
+                "reasons": tape_symbol.reasons,
+                "metrics": tape_symbol.metrics,
+            },
             "signals": out}
 
 
@@ -246,6 +261,9 @@ def backtest_run_generic(
     exit_rsi: float = 0.0,
     approach_c: bool = False,          # simulate Approach C: SELL signal → 2% tight trail
     tight_trail_pct: float = 2.0,      # trail % for Approach C (default 2%)
+    ceei_gate: str = "none",           # CEEI entry gate: none|setup|trigger|score
+    ceei_gate_threshold: float = 48.0, # score mode: min CEEI score 0-100
+    ceei_gate_lookback: int = 10,      # setup mode: bars a setup stays "recent"
 ):
     """Run a single strategy on an arbitrary symbol using factory defaults.
 
@@ -291,6 +309,23 @@ def backtest_run_generic(
         effective_params = {**effective_params,
                             "approach_c": True,
                             "tight_trail_pct": tight_trail_pct}
+    # Optional CEEI entry gate — same params the live per-assignment gate uses,
+    # so a gated backtest here previews exactly what the scheduler would do.
+    ceei_gate = (ceei_gate or "none").strip().lower()
+    if ceei_gate not in ("none", "setup", "trigger", "score"):
+        raise HTTPException(
+            status_code=400,
+            detail="ceei_gate must be one of ['none', 'setup', 'trigger', 'score']",
+        )
+    if ceei_gate != "none":
+        if not (0.0 <= ceei_gate_threshold <= 100.0):
+            raise HTTPException(status_code=400, detail="ceei_gate_threshold must be 0-100")
+        if not (1 <= ceei_gate_lookback <= 60):
+            raise HTTPException(status_code=400, detail="ceei_gate_lookback must be 1-60")
+        effective_params = {**effective_params,
+                            "ceei_gate": ceei_gate,
+                            "ceei_gate_threshold": ceei_gate_threshold,
+                            "ceei_gate_lookback": ceei_gate_lookback}
     try:
         result = run_backtest(
             strategy_name=cfg.name,
@@ -315,6 +350,9 @@ def backtest_run_generic(
             "exit_rsi": exit_rsi if exit_rsi > 0 else None,
             "approach_c": approach_c,
             "tight_trail_pct": tight_trail_pct if approach_c else None,
+            "ceei_gate": ceei_gate if ceei_gate != "none" else None,
+            "ceei_gate_threshold": ceei_gate_threshold if ceei_gate == "score" else None,
+            "ceei_gate_lookback": ceei_gate_lookback if ceei_gate == "setup" else None,
         },
         "period": result.period,
         "start_date": result.start_date,

@@ -66,3 +66,33 @@ class PerplexityStrategy:
             suitability_reason=suitability_reason,
             volatility_bucket=volatility_bucket,
         )
+
+
+class CeeiGatedStrategy:
+    """Transparent wrapper adding the CEEI entry gate to any PerplexityStrategy.
+
+    Used by the backtest route so a gated backtest exercises the exact same
+    veto the live scheduler applies (post-signal, BUY-only, fail-open). Every
+    attribute other than run() delegates to the wrapped strategy, so the
+    backtest engine sees name/config/enabled etc. unchanged.
+
+    gate_params is the same dict the assignment-level gate consumes:
+      {"ceei_gate": "setup"|"trigger"|"score",
+       "ceei_gate_threshold": ..., "ceei_gate_lookback": ...}
+    """
+
+    def __init__(self, inner: "PerplexityStrategy", gate_params: dict):
+        self._inner = inner
+        self._gate_params = dict(gate_params)
+
+    def __getattr__(self, item):
+        return getattr(self._inner, item)
+
+    def run(self, symbol: str, df: pd.DataFrame, *args, **kwargs) -> PerplexitySignal:
+        sig = self._inner.run(symbol, df, *args, **kwargs)
+        if sig.direction == "BUY" and df is not None and not df.empty:
+            # Imported here to avoid a circular import (rules imports this module
+            # via the adapter chain).
+            from app.services.strategy.rules import apply_ceei_gate
+            sig = apply_ceei_gate(sig, df["Close"].dropna(), df, self._gate_params)
+        return sig

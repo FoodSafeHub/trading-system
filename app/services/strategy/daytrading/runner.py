@@ -492,11 +492,25 @@ def run_signals(
 
     diag.finalise()
 
+    # Symbol-level tape-health (knife-entry) verdict on the DAILY tape — the
+    # same gate the swing scheduler applies to BUYs. Intraday longs into a
+    # daily freefall are the classic knife entry, so surface it here too.
+    # Fail-open: never let the verdict break the signal run.
+    tape_dict: dict = {}
+    try:
+        from app.services.strategy.tape_health import check_tape_health, verdict_line
+        th = check_tape_health(symbol)
+        tape_dict = {"ok": th.ok, "verdict": verdict_line(th),
+                     "reasons": th.reasons, "metrics": th.metrics}
+    except Exception:
+        pass
+
     return {
         "symbol": symbol,
         "regime": regime,
         "spy_vs_vwap_pct": spy_vs_vwap,
         "market_status": status,
+        "tape_health": tape_dict,
         "signal_count": len(accepted_signals),
         "signals": accepted_signals,
         "rejected_signals": rejected_signals,

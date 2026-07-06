@@ -10,6 +10,7 @@ import asyncio
 import logging
 import threading
 from collections import defaultdict
+from dataclasses import replace
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -24,6 +25,7 @@ from app.services.market_data.provider import get_ohlcv, get_price_series
 from app.services.risk.engine import RiskEngine
 from app.services.risk.position_sizer import calculate_position_size
 from app.services.strategy.engine import StrategyEngine, load_strategies_from_config
+from app.services.strategy.rules import apply_ceei_gate, ceei_overrides_from_assignment
 from app.services.strategy.perplexity.runner import PERPLEXITY_STRATEGIES, run_perplexity_signal
 from app.utils.time_utils import is_market_hours
 
@@ -968,7 +970,12 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                      "tight_trail_pct": a.tight_trail_pct,
                      # Approach C master switch. None/True = on (historical default);
                      # False = OFF → SELL exits at market instead of tight-trailing.
-                     "approach_c_enabled": a.approach_c_enabled}
+                     "approach_c_enabled": a.approach_c_enabled,
+                     # Optional per-assignment CEEI entry gate (all None = inert).
+                     "ceei_gate": getattr(a, "ceei_gate", None),
+                     "ceei_gate_enabled": getattr(a, "ceei_gate_enabled", None),
+                     "ceei_gate_threshold": getattr(a, "ceei_gate_threshold", None),
+                     "ceei_gate_lookback": getattr(a, "ceei_gate_lookback", None)}
                     for a in active_assignments
                 ]
 
@@ -1071,6 +1078,13 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                             df = df.copy()
                             df.iloc[-1, df.columns.get_loc("Close")] = live
                         sig = strat.run(symbol, df)
+                        # Per-assignment CEEI entry gate. Bespoke perplexity
+                        # strategies don't route through evaluate_strategy, so
+                        # the gate is applied to the resulting signal here
+                        # (PerplexitySignal duck-types the fields it needs).
+                        _ceei_ov = ceei_overrides_from_assignment(asgn)
+                        if _ceei_ov and sig.direction == "BUY":
+                            sig = apply_ceei_gate(sig, df["Close"].dropna(), df, _ceei_ov)
                         entry = live or sig.entry_price or float(df["Close"].iloc[-1])
                         label = f"perplexity:{strategy_name}"
                         _persist_signal(symbol, sig.direction, label, entry, acted_on=False)
@@ -1089,6 +1103,12 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                         matching = [c for c in bollinger_configs if c.name == strategy_name and c.enabled]
                         for config in matching:
                             prices = get_price_series(symbol, period="1y")
+                            # Merge the assignment's CEEI gate on top of the
+                            # config params (no-op when unset). Copy so the
+                            # shared config object is never mutated.
+                            _ceei_ov = ceei_overrides_from_assignment(asgn)
+                            if _ceei_ov:
+                                config = replace(config, params={**config.params, **_ceei_ov})
                             sigs = _engine.run(config, prices)
                             for s in sigs:
                                 entry = live_prices.get(symbol) or s.price_at_signal or float(prices.iloc[-1])
@@ -1126,7 +1146,10 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                                     symbol, df, current_positions.get(symbol.upper(), 0.0)
                                 )
                                 sig = evaluate_strategy(
-                                    match.type, symbol, prices, match.params,
+                                    match.type, symbol, prices,
+                                    # Assignment-level CEEI gate overrides merge
+                                    # on top of the config params (no-op when unset).
+                                    {**match.params, **ceei_overrides_from_assignment(asgn)},
                                     ohlcv=df, position=pos_state,
                                 )
                                 entry = live or sig.price_at_signal or float(prices.iloc[-1])

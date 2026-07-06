@@ -220,8 +220,12 @@ def update_scheduler_config(run_bollinger: bool | None = None,
 
 
 @router.get("/chart/{symbol}")
-def chart_data(symbol: str, period: str = "3mo", interval: str = "1d"):
-    """Return OHLCV + indicators + fundamentals for charting.
+def chart_data(symbol: str, period: str = "3mo", interval: str = "1d",
+               fundamentals: bool = False):
+    """Return OHLCV + indicators (+ fundamentals when requested) for charting.
+
+    `fundamentals=false` (the default) skips the slow yfinance `.info` call —
+    the Charts page is technical-only now, so nothing requests it.
 
     `interval` accepts 1d / 1wk / 1mo / 1h. yfinance handles all four natively;
     Upstox (India) supports 1d/1wk/1h but not 1mo, so monthly India data is
@@ -364,11 +368,67 @@ def chart_data(symbol: str, period: str = "3mo", interval: str = "1d"):
             st_line = [None] * n
             trend   = [None] * n
 
-        # ── Fundamentals via yfinance ────────────────────────────
-        fundamentals = {}
+        # ── AlphaTrend (Kivanc Ozbilgic, AP=14, coeff=1) ─────────
+        # ATR(14, SMA) band ratcheted by a momentum filter: MFI(14) when the
+        # symbol has volume, RSI(14) otherwise (indices/FX). The classic
+        # buy/sell read is the AlphaTrend line crossing its own 2-bar lag.
         try:
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
+            _ap, _coeff = 14, 1.0
+            prev_c_at = closes.shift(1)
+            tr_at = pd.concat([highs - lows, (highs - prev_c_at).abs(),
+                               (lows - prev_c_at).abs()], axis=1).max(axis=1)
+            atr_at = tr_at.rolling(_ap).mean()
+            vols = df["Volume"].fillna(0)
+            if float(vols.sum()) > 0:
+                tp_at = (highs + lows + closes) / 3
+                mf = tp_at * vols
+                pos_mf = mf.where(tp_at > tp_at.shift(1), 0.0).rolling(_ap).sum()
+                neg_mf = mf.where(tp_at < tp_at.shift(1), 0.0).rolling(_ap).sum()
+                mom = 100 - 100 / (1 + pos_mf / neg_mf.replace(0, math.nan))
+            else:
+                mom = compute_rsi(closes, _ap)
+            up_t = lows - atr_at * _coeff
+            dn_t = highs + atr_at * _coeff
+            at_vals: list[float] = [math.nan] * n
+            for i in range(n):
+                prev_at = at_vals[i - 1] if i > 0 else math.nan
+                a, m_ = float(atr_at.iloc[i]), float(mom.iloc[i]) if mom.iloc[i] == mom.iloc[i] else math.nan
+                if math.isnan(a) or math.isnan(m_):
+                    at_vals[i] = prev_at
+                    continue
+                if m_ >= 50:
+                    cand = float(up_t.iloc[i])
+                    at_vals[i] = cand if math.isnan(prev_at) else max(cand, prev_at)
+                else:
+                    cand = float(dn_t.iloc[i])
+                    at_vals[i] = cand if math.isnan(prev_at) else min(cand, prev_at)
+            alphatrend = [_r(v) for v in at_vals]
+            # 2-bar lag of the same line — the classic AlphaTrend signal line.
+            alphatrend_sig = [None, None] + alphatrend[:-2] if n > 2 else [None] * n
+            # 1 = bullish, -1 = bearish; a flat ratchet (line == lag) keeps the
+            # previous direction so the coloured line doesn't blink to neutral.
+            at_trend: list[int | None] = [None] * n
+            for i in range(n):
+                if alphatrend[i] is None or alphatrend_sig[i] is None:
+                    continue
+                if alphatrend[i] > alphatrend_sig[i]:
+                    at_trend[i] = 1
+                elif alphatrend[i] < alphatrend_sig[i]:
+                    at_trend[i] = -1
+                else:
+                    at_trend[i] = at_trend[i - 1] if i > 0 else None
+        except Exception:
+            alphatrend = alphatrend_sig = [None] * n
+            at_trend = [None] * n
+
+        # ── Fundamentals via yfinance (opt-in) ───────────────────
+        fundamentals_out = {}
+        if fundamentals:
+            try:
+                ticker = yf.Ticker(symbol)
+                info = ticker.info
+            except Exception:
+                info = {}
             def _fi(key):
                 v = info.get(key)
                 try:
@@ -378,7 +438,7 @@ def chart_data(symbol: str, period: str = "3mo", interval: str = "1d"):
             def _fs(key):
                 return info.get(key) or None
 
-            fundamentals = {
+            fundamentals_out = {
                 "company_name":      _fs("longName") or _fs("shortName"),
                 "sector":            _fs("sector"),
                 "industry":          _fs("industry"),
@@ -401,10 +461,54 @@ def chart_data(symbol: str, period: str = "3mo", interval: str = "1d"):
                 "analyst_target":    _fi("targetMeanPrice"),
                 "analyst_rating":    _fs("recommendationKey"),
             }
-        except Exception:
-            pass
 
         dates = [str(d)[:10] for d in df.index]
+
+        # ── Technical buy/sell signal engine ─────────────────────
+        # Derived purely from the indicator arrays above, so chart markers
+        # always agree with the plotted lines. `kind` keys let the UI toggle
+        # each layer independently.
+        closes_l = [_r(v) for v in df["Close"].tolist()]
+        tech_signals: list[dict] = []
+
+        def _sig(i, side, kind, code, why):
+            tech_signals.append({
+                "date": dates[i], "side": side, "kind": kind,
+                "label": code, "price": closes_l[i], "reason": why,
+            })
+
+        def _cross(a, b, i):
+            """1 = a crossed above b at bar i, -1 = crossed below, 0 = none."""
+            if None in (a[i], b[i], a[i-1], b[i-1]):
+                return 0
+            if a[i] > b[i] and a[i-1] <= b[i-1]:
+                return 1
+            if a[i] < b[i] and a[i-1] >= b[i-1]:
+                return -1
+            return 0
+
+        for i in range(1, n):
+            c = _cross(alphatrend, alphatrend_sig, i)
+            if c:
+                _sig(i, "BUY" if c > 0 else "SELL", "alphatrend", "AT",
+                     "AlphaTrend crossed " + ("above" if c > 0 else "below") + " its 2-bar lag")
+            if trend[i] is not None and trend[i-1] is not None and trend[i] != trend[i-1]:
+                _sig(i, "BUY" if trend[i] == 1 else "SELL", "supertrend", "ST",
+                     f"Supertrend flipped {'bullish' if trend[i] == 1 else 'bearish'}")
+            c = _cross(ema9, ema21, i)
+            if c:
+                _sig(i, "BUY" if c > 0 else "SELL", "ema_cross", "EMA",
+                     f"EMA 9 crossed {'above' if c > 0 else 'below'} EMA 21")
+            c = _cross(macd_line, macd_sig, i)
+            if c:
+                _sig(i, "BUY" if c > 0 else "SELL", "macd_cross", "MACD",
+                     f"MACD crossed {'above' if c > 0 else 'below'} signal line")
+            if None not in (rsi14[i], rsi14[i-1]):
+                if rsi14[i-1] < 30 <= rsi14[i]:
+                    _sig(i, "BUY", "rsi", "RSI", f"RSI reclaimed 30 ({rsi14[i]:.0f})")
+                elif rsi14[i-1] > 70 >= rsi14[i]:
+                    _sig(i, "SELL", "rsi", "RSI", f"RSI lost 70 ({rsi14[i]:.0f})")
+
         return {
             "symbol": symbol,
             "dates":  dates,
@@ -427,8 +531,12 @@ def chart_data(symbol: str, period: str = "3mo", interval: str = "1d"):
                 "obv":      obv_list,
                 "supertrend": st_line,
                 "supertrend_trend": trend,
+                "alphatrend": alphatrend,
+                "alphatrend_signal": alphatrend_sig,
+                "alphatrend_trend": at_trend,
             },
-            "fundamentals": fundamentals,
+            "tech_signals": tech_signals,
+            "fundamentals": fundamentals_out,
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))

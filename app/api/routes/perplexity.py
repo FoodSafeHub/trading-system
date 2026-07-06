@@ -88,9 +88,17 @@ def get_signals(symbol: str):
         regime = get_current_regime(df.index[-1])
         signals = run_perplexity_signal(symbol.upper(), df, regime=regime)
         regime_caps = get_regime_risk_caps(regime)
+        # Tape-health (knife-entry) verdict — same gate the scheduler applies
+        # to live BUYs, evaluated per strategy (panic strategies are exempt
+        # from the velocity rule).
+        from app.services.strategy.tape_health import check_tape_health
         results = []
         for s in signals:
+            th = check_tape_health(symbol.upper(), s.strategy_name, ohlcv=df)
             item = {
+                "tape_gate": "pass" if th.ok else "block",
+                "tape_gate_reason": "" if th.ok else th.summary,
+                "tape_metrics": th.metrics,
                 "strategy": s.strategy_name,
                 "direction": s.direction,
                 "entry_price": s.entry_price,
@@ -355,14 +363,34 @@ def backtest(
     breakdown: bool = False,
     approach_c: bool = False,
     tight_trail_pct: float = 2.0,
+    ceei_gate: str = "none",
+    ceei_gate_threshold: float = 48.0,
+    ceei_gate_lookback: int = 10,
 ):
     """Run a single Perplexity strategy backtest.
     position_pct: 0 = risk-based sizing (1% risk/trade); >0 = fixed % of capital per trade (e.g. 0.20 = 20%).
     approach_c: when True, a SELL signal arms a tight_trail_pct% trailing stop instead of exiting immediately.
+    ceei_gate: optional CEEI entry gate (none|setup|trigger|score) — same veto the
+    live per-assignment gate applies, so a gated backtest previews live behaviour.
     """
     strategy = _STRATEGY_MAP.get(strategy_name)
     if not strategy:
         raise HTTPException(404, f"Strategy '{strategy_name}' not found")
+
+    ceei_gate = (ceei_gate or "none").strip().lower()
+    if ceei_gate not in ("none", "setup", "trigger", "score"):
+        raise HTTPException(400, "ceei_gate must be one of ['none', 'setup', 'trigger', 'score']")
+    if ceei_gate != "none":
+        if not (0.0 <= ceei_gate_threshold <= 100.0):
+            raise HTTPException(400, "ceei_gate_threshold must be 0-100")
+        if not (1 <= ceei_gate_lookback <= 60):
+            raise HTTPException(400, "ceei_gate_lookback must be 1-60")
+        from app.services.strategy.perplexity.base import CeeiGatedStrategy
+        strategy = CeeiGatedStrategy(strategy, {
+            "ceei_gate": ceei_gate,
+            "ceei_gate_threshold": ceei_gate_threshold,
+            "ceei_gate_lookback": ceei_gate_lookback,
+        })
 
     def _annotate_tape_gate_pplx(sym: str, trades, per: str, strat: str) -> dict:
         """Knife-veto audit for swing backtests (India symbols route through the
@@ -382,6 +410,7 @@ def backtest(
         return {
             "strategy_name": result.strategy_name,
             "symbol": result.symbol,
+            "ceei_gate": ceei_gate if ceei_gate != "none" else None,
             "period": result.period,
             "start_date": result.start_date,
             "end_date": result.end_date,

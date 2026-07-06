@@ -45,6 +45,15 @@ _DAILY_OVERLAY_STYLES: dict[str, dict[str, Any]] = {
     "bb_middle":{"label": "BB Mid",  "color": "rgba(176,190,197,0.35)", "width": 1, "lineStyle": 3},
     "bb_lower": {"label": "BB Lower","color": "rgba(176,190,197,0.55)", "width": 1, "lineStyle": 2},
     "supertrend": {"label": "Supertrend", "color": "#FFCA28", "width": 2, "lineStyle": 0},
+    "alphatrend": {"label": "AlphaTrend", "color": "#7C5CFF", "width": 2, "lineStyle": 0},
+    "alphatrend_signal": {"label": "AlphaTrend lag-2", "color": "rgba(124,92,255,0.45)", "width": 1, "lineStyle": 2},
+}
+
+# Overlays whose line is coloured bar-by-bar from a sibling `<key>_trend`
+# indicator array (1 = bullish green, -1 = bearish red).
+_TREND_COLORED = {
+    "supertrend": ("#34d399", "#fb7185"),
+    "alphatrend": ("#34d399", "#fb7185"),
 }
 
 
@@ -57,6 +66,7 @@ def render_daily_chart(
     data_source: str = "—",
     currency: str = "$",
     height: int = 720,
+    osc_share: float = 0.24,
 ) -> None:
     """Render a daily candlestick chart with the SAME lightweight-charts engine
     the live tab uses, fed by the `/strategy/chart/{symbol}` payload.
@@ -96,8 +106,16 @@ def render_daily_chart(
         style = _DAILY_OVERLAY_STYLES.get(key)
         if not vals or not style:
             continue
-        data = [{"time": dates[i], "value": vals[i]}
-                for i in range(min(n, len(vals))) if vals[i] is not None]
+        trend_vals = indicators.get(f"{key}_trend") if key in _TREND_COLORED else None
+        up_c, dn_c = _TREND_COLORED.get(key, (None, None))
+        data = []
+        for i in range(min(n, len(vals))):
+            if vals[i] is None:
+                continue
+            pt: dict[str, Any] = {"time": dates[i], "value": vals[i]}
+            if trend_vals and i < len(trend_vals) and trend_vals[i] is not None:
+                pt["color"] = up_c if trend_vals[i] == 1 else dn_c
+            data.append(pt)
         if data:
             overlay_series.append({"key": key, "data": data, **style})
 
@@ -174,6 +192,7 @@ def render_daily_chart(
         "fallback_anchored": 0,
         "price_precision": 2,
         "currency": currency,
+        "osc_share": osc_share,
     }
     cfg_json = json.dumps(config)
     components.html(_TEMPLATE.replace("__CFG__", cfg_json).replace("__HEIGHT__", str(height)),
@@ -316,7 +335,9 @@ async function main() {
   await loadScript(CFG.library_url);
   const host = document.getElementById("chart-host");
   const chart = LightweightCharts.createChart(host, {
-    layout: { background: { type: "solid", color: "#141622" }, textColor: "#d6d9e6" },
+    layout: { background: { type: "solid", color: "#141622" }, textColor: "#d6d9e6",
+              panes: { separatorColor: "#2a2e44", separatorHoverColor: "#7c5cff",
+                       enableResize: true } },
     grid:   { vertLines: { color: "rgba(255,255,255,0.05)" }, horzLines: { color: "rgba(255,255,255,0.05)" } },
     rightPriceScale: { borderColor: "#2a2e44" },
     timeScale: { borderColor: "#2a2e44", timeVisible: true, secondsVisible: false },
@@ -370,19 +391,22 @@ async function main() {
       });
     });
     // Give the price pane the majority of vertical space; share the rest among
-    // the oscillator panes. v5's chart.panes() returns the live Pane objects.
+    // the oscillator panes. Prefer v5 stretch factors (proportional, survives
+    // resizes) and fall back to pixel setHeight. CFG.osc_share is user-tunable
+    // from the page, and separators are drag-resizable (layout.panes above).
     try {
       const panes = chart.panes();
+      const oscShare = Math.min(0.6, Math.max(0.08,
+        CFG.osc_share || 0.24));
+      const perOsc = oscShare / oscPanes.length;
       const totalH = host.clientHeight || 600;
-      const oscShare = Math.min(0.40, 0.20 + oscPanes.length * 0.08);
-      const oscH = Math.floor((totalH * oscShare) / oscPanes.length);
-      const mainH = totalH - oscH * oscPanes.length;
-      panes[0] && panes[0].setHeight && panes[0].setHeight(mainH);
-      oscPanes.forEach((_, i) => {
-        const p = panes[i + 1];
-        if (p && p.setHeight) p.setHeight(oscH);
+      panes.forEach((p, i) => {
+        const frac = i === 0 ? (1 - oscShare) : perOsc;
+        if (i > oscPanes.length) return;
+        if (p.setStretchFactor) p.setStretchFactor(Math.max(1, Math.round(frac * 100)));
+        else if (p.setHeight) p.setHeight(Math.floor(totalH * frac));
       });
-    } catch (e) { /* setHeight is best-effort; ignore if v5 surface differs */ }
+    } catch (e) { /* pane sizing is best-effort */ }
   }
 
   // Overlay line series — all backend-computed; we just draw what's sent.
@@ -406,14 +430,10 @@ async function main() {
   meta.textContent = `${CFG.candles ? CFG.candles.length : 0} bars · ${(CFG.markers||[]).length} markers`;
   legendEl.appendChild(meta);
 
-  // Count markers per bar so we can badge ones that share a bar with others.
-  const perBarCount = {};
-  (CFG.markers || []).forEach(m => {
-    if (!m.time) return;
-    perBarCount[m.time] = (perBarCount[m.time] || 0) + 1;
-  });
-
   // Markers — entries/rejections as TradingView-style shape markers.
+  // `markers` keeps EVERY signal (the explain panel cycles through them);
+  // what we DRAW is grouped per bar+side so 14 stacked fills render as one
+  // arrow with "×14" instead of 14 overlapping full-length strategy names.
   const markers = (CFG.markers || []).map((m, i) => {
     const isBuy  = m.side === "BUY";
     const isSell = m.side === "SELL" || m.side === "SELL_SHORT";
@@ -440,19 +460,35 @@ async function main() {
       shape = "square";
       prefix = "•";
     }
-    const sameBarN = perBarCount[m.time] || 1;
-    const badge = sameBarN > 1 ? ` ×${sameBarN}` : "";
     return {
       time: m.time,
       position, color, shape,
-      text: `${prefix} ${m.strategy || ""}${badge}`,
       id: String(i),
+      __prefix: prefix,
       __payload: m,
     };
   }).filter(m => m.time);
+
+  const groups = {};
+  markers.forEach(m => {
+    const k = m.time + "|" + m.position;
+    (groups[k] = groups[k] || []).push(m);
+  });
+  const shortLabel = s => {
+    s = s || "";
+    return s.length > 14 ? s.slice(0, 13) + "…" : s;
+  };
+  const displayMarkers = Object.values(groups).map(g => {
+    const m = g[0];
+    const text = g.length > 1
+      ? `${m.__prefix} ×${g.length}`
+      : `${m.__prefix} ${shortLabel(m.__payload.strategy)}`.trim();
+    return { time: m.time, position: m.position, color: m.color,
+             shape: m.shape, text: text, id: m.id };
+  });
   // v5: series.setMarkers was removed in favour of the createSeriesMarkers
   // primitive. The marker objects' shape is unchanged.
-  LightweightCharts.createSeriesMarkers(candleSeries, markers);
+  LightweightCharts.createSeriesMarkers(candleSeries, displayMarkers);
 
   // Click-to-explain panel — cycles through multiple markers on the same bar.
   const panel = document.getElementById("explain");

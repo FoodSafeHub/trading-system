@@ -82,6 +82,7 @@ def init_db() -> None:
     _migrate_add_orders_trail_columns()
     _migrate_add_assignments_tight_trail_pct()
     _migrate_add_assignments_approach_c_enabled()
+    _migrate_add_assignments_ceei_columns()
 
 
 def _migrate_assignments_composite_pk() -> None:
@@ -280,6 +281,38 @@ def _migrate_add_assignments_approach_c_enabled() -> None:
                 conn.commit()
             except Exception:
                 pass
+
+
+def _migrate_add_assignments_ceei_columns() -> None:
+    """Idempotent ALTER TABLE to add the per-assignment CEEI gate columns.
+
+    ceei_gate TEXT (none|setup|trigger|score), ceei_gate_enabled INTEGER,
+    ceei_gate_threshold REAL, ceei_gate_lookback INTEGER. All NULL on existing
+    rows = gate fully inert, so live behaviour is unchanged until a user
+    explicitly enables it per assignment.
+    """
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql(
+                "PRAGMA table_info(symbol_strategy_assignments)"
+            ).fetchall()
+        except Exception:
+            return
+        cols = {r[1] for r in rows}
+        for col, typedef in [
+            ("ceei_gate", "TEXT"),
+            ("ceei_gate_enabled", "INTEGER"),
+            ("ceei_gate_threshold", "REAL"),
+            ("ceei_gate_lookback", "INTEGER"),
+        ]:
+            if col not in cols:
+                try:
+                    conn.exec_driver_sql(
+                        f"ALTER TABLE symbol_strategy_assignments ADD COLUMN {col} {typedef}"
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
 
 
 def _migrate_add_assignments_broker_column() -> None:

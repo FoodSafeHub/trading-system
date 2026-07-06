@@ -564,6 +564,27 @@ with tab_signals:
             brain    = result.get("brain", {})
             raw_count = result.get("raw_signal_count", 0)
 
+            # ── Daily tape-health (knife-entry) verdict ──────────────────────
+            # Same gate the swing scheduler applies to BUYs, on the DAILY tape.
+            # An intraday long into a daily freefall is the classic knife entry.
+            _tape = result.get("tape_health") or {}
+            if _tape:
+                if _tape.get("ok"):
+                    _m = _tape.get("metrics") or {}
+                    st.markdown(
+                        "<span style='background:rgba(52,211,153,0.12);color:#34d399;"
+                        "border:1px solid #34d399;padding:2px 10px;border-radius:10px;"
+                        "font-size:0.75rem'>🟢 Daily tape clear"
+                        f" · 5d {_m.get('ret_5d_pct', 0):+.1f}%</span>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.error(
+                        f"🔪 **Knife tape (daily)** — {'; '.join(_tape.get('reasons') or []) or '—'}. "
+                        "Long entries fight a falling daily trend.",
+                        icon="🔪",
+                    )
+
             # ── Brain status strip ────────────────────────────────────────────
             if brain:
                 ms_state  = brain.get("market_state", "UNKNOWN")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, String
+from sqlalchemy import Boolean, DateTime, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -43,6 +43,15 @@ class SymbolStrategyAssignment(Base):
     # (the historical default — kept so existing assignments are unchanged).
     # False = Approach C OFF: a SELL signal exits at MARKET, no trailing stop.
     approach_c_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # ── Optional per-assignment CEEI entry gate ──
+    # Merged ON TOP of the strategy config's params before evaluate_strategy,
+    # so the gate is scoped to this one assignment. NULL everywhere = exact
+    # no-op (existing behaviour). See output/ceei_meta/CEEI_CONFIRMATION.md
+    # for which strategy families this helps vs harms.
+    ceei_gate: Mapped[str | None] = mapped_column(String(16), nullable=True)      # none|setup|trigger|score
+    ceei_gate_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True) # NULL = follow ceei_gate presence
+    ceei_gate_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)  # score mode, default 48
+    ceei_gate_lookback: Mapped[int | None] = mapped_column(Integer, nullable=True)   # setup mode, default 10
     assigned_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
     )
