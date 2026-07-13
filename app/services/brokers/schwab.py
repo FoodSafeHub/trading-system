@@ -263,7 +263,15 @@ class SchwabBroker(BrokerBase):
                     broker="schwab",
                     account_id=sec.get("accountNumber", ""),
                     account_type=sec.get("type"),
-                    buying_power=balances.get("buyingPower"),
+                    # CASH accounts have no `buyingPower` key — fall back to
+                    # Schwab's own tradable-cash figure so the dashboard shows
+                    # a real number instead of "—".
+                    buying_power=next(
+                        (balances.get(k) for k in
+                         ("buyingPower", "cashAvailableForTrading", "cashBalance")
+                         if balances.get(k) is not None),
+                        None,
+                    ),
                     cash=self._spendable_cash(sec),
                     equity=balances.get("liquidationValue"),
                     is_paper=False,
@@ -282,29 +290,27 @@ class SchwabBroker(BrokerBase):
         violation) — so Schwab rejects a BUY sized against cashBalance even
         though the number "looks" available.
 
-        For CASH accounts, the truly-spendable figure is the SETTLED cash:
-        cashAvailableForTrading minus unsettledCash (equivalently, Schwab's own
-        cashAvailableForWithdrawal). For MARGIN accounts, buyingPower is the
-        right ceiling. Falls back through the available fields, finally to
-        cashBalance, so a schema change never blanks the budget entirely.
+        For CASH accounts, Schwab's own tradable figure is
+        `cashAvailableForTrading` — it INCLUDES unsettled T+1 sell proceeds,
+        which Schwab does allow you to buy with (a good-faith violation only
+        occurs if the NEW position is then sold before those funds settle;
+        the swing system holds for days, so that risk is acceptable). We used
+        to subtract unsettledCash here, but with the system trading daily the
+        settled remainder stayed pinned near zero and starved every BUY.
+        For MARGIN accounts, buyingPower is the right ceiling. Falls back
+        through the available fields, finally to cashBalance, so a schema
+        change never blanks the budget entirely.
         """
         balances = sec.get("currentBalances", {}) or {}
         acct_type = (sec.get("type") or "").upper()
 
         if acct_type == "MARGIN":
-            for key in ("buyingPower", "cashAvailableForTrading", "cashBalance"):
-                v = balances.get(key)
-                if v is not None:
-                    return float(v)
-            return None
-
-        # CASH account (default): settled cash only.
-        avail = balances.get("cashAvailableForTrading")
-        unsettled = balances.get("unsettledCash")
-        if avail is not None:
-            settled = float(avail) - float(unsettled or 0.0)
-            return max(0.0, settled)
-        for key in ("cashAvailableForWithdrawal", "cashBalance"):
+            keys = ("buyingPower", "cashAvailableForTrading", "cashBalance")
+        else:
+            # CASH account (default): what Schwab will accept for a BUY now.
+            keys = ("cashAvailableForTrading", "cashAvailableForWithdrawal",
+                    "cashBalance")
+        for key in keys:
             v = balances.get(key)
             if v is not None:
                 return float(v)

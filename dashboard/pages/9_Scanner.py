@@ -22,11 +22,16 @@ _ELIG_SORT = {"active": 0, "ready": 1, "watch": 2, "idle": 3, "blocked": 4}
 
 
 def _fmt_et(ts) -> str:
+    """Render a scan timestamp in ET — time-only for today, date-qualified
+    otherwise so stale rows can't masquerade as fresh ones."""
     if ts is None or ts == "":
         return "—"
     try:
-        dt = pd.to_datetime(ts, utc=True)
-        return dt.tz_convert(ET).strftime("%H:%M ET")
+        dt = pd.to_datetime(ts, utc=True).tz_convert(ET)
+        today_et = pd.Timestamp.now(tz=ET).date()
+        if dt.date() == today_et:
+            return dt.strftime("%H:%M ET")
+        return dt.strftime("%b %d · %H:%M ET")
     except Exception:
         return str(ts)[:19].replace("T", " ")
 
@@ -115,7 +120,6 @@ def _show_candidates(candidates: list, *, key_prefix: str = "cands") -> None:
 
         rows.append({
             "_elig_sort": _ELIG_SORT.get(elig_state, 9),
-            "_elig_html": eligibility_chip(elig_state, elig_reason),
             "Symbol":     f"{match_flag}{sym}",
             "State":      elig_state.upper(),       # plain text for column_config sorting
             "Dir":        dir_text,
@@ -126,6 +130,7 @@ def _show_candidates(candidates: list, *, key_prefix: str = "cands") -> None:
             "Best strategy": best_str,
             "Tape":       tape_col,
             "Signal":     reason_short,
+            "Universe":   c.get("universe") or "—",
             "Scanned":    _fmt_et(c.get("scanned_at")),
         })
 
@@ -165,6 +170,7 @@ def _show_candidates(candidates: list, *, key_prefix: str = "cands") -> None:
             "Avg Vol M":     st.column_config.NumberColumn("Vol (M)",    format="%.1f",  width="small"),
             "Best strategy": st.column_config.TextColumn("Best (hist.)", width="medium"),
             "Signal":        st.column_config.TextColumn("Signal",       width="large"),
+            "Universe":      st.column_config.TextColumn("Universe",     width="small"),
             "Scanned":       st.column_config.TextColumn("Scanned",      width="small"),
         },
     )
@@ -216,17 +222,29 @@ def _show_candidates(candidates: list, *, key_prefix: str = "cands") -> None:
             return
         cand = next((c for c in candidates if c["symbol"] == pick), {})
         scan_trade = []
-        if cand.get("price"):
+        _cand_dir = str(cand.get("direction", "")).upper()
+        # Only mark a real BUY/SELL — an unknown direction used to render as a
+        # spurious SELL arrow.
+        if cand.get("price") and _cand_dir in ("BUY", "SELL"):
             scan_trade.append({
-                "date":  payload["dates"][-1],
-                "side":  "BUY" if str(cand.get("direction", "")).upper() == "BUY" else "SELL",
-                "price": cand["price"],
+                "date":     payload["dates"][-1],
+                "side":     _cand_dir,
+                "price":    cand["price"],
+                "strategy": "scan",
+                "reason":   cand.get("reason") or "scanner candidate",
             })
-        charts.render_price_chart(
-            payload, trades=scan_trade,
-            overlays=("ema21", "ema50", "vwap", "bb_upper", "bb_lower"),
-            include_volume=True, include_rsi=True, include_macd=True,
-            title=f"{pick} — last 6mo",
+        # Same lightweight-charts engine as the Charts page (trend-coloured
+        # AlphaTrend, stacked RSI/MACD panes) instead of the legacy renderer.
+        import _lightweight_chart as lwc
+        _india_pick = str(pick).endswith((".NS", ".BO")) or _is_india
+        lwc.render_daily_chart(
+            payload,
+            overlays_enabled=["ema21", "ema50", "vwap", "alphatrend"],
+            oscillators_enabled=["rsi", "macd"],
+            trades=scan_trade,
+            data_source="scanner",
+            currency="₹" if _india_pick else "$",
+            height=560,
         )
 
 
@@ -249,7 +267,10 @@ try:
     sc_status  = api._get("/scanner/status")
     _running   = sc_status.get("running", False)
     _last_scan = _fmt_et(sc_status.get("last_scan")) if sc_status.get("last_scan") else "Never"
+    _last_uni  = sc_status.get("last_universe")
     _matches   = str(sc_status.get("last_matches") or 0)
+    if _last_uni and _last_scan != "Never":
+        _last_scan = f"{_last_scan} · {_last_uni}"
     stat_band([
         ("Status",       "Scanning…" if _running else "Ready",                   "amber" if _running else "green"),
         ("Last scan",    _last_scan,                                               "grey"),
@@ -416,44 +437,123 @@ if run_btn:
     with st.spinner(f"Scanning {universe}…" + (" (large — background)" if is_large else "")):
         try:
             result = api._post("/scanner/run", json=config_payload)
-            if result.get("scan_run_id") == "pending":
-                _eta = "8–15 minutes" if universe == "sp1500" else "2–5 minutes"
-                st.info(
-                    "Large universe scan running in the background. "
-                    f"Refresh in {_eta} to see results."
-                )
-            else:
-                dur  = result.get("duration_seconds", "?")
-                tot  = result.get("total_scanned", 0)
-                passed = result.get("total_passed_filters", 0)
-                matches = result.get("total_matches", 0)
-                st.success(
-                    f"Scan complete in {dur}s — "
-                    f"{tot:,} scanned · {passed:,} passed filters · {matches} matches."
-                )
-                if result.get("top_candidates"):
-                    section(f"Top {len(result['top_candidates'])} Candidates", level=3)
-                    _show_candidates(result["top_candidates"], key_prefix="run_cands")
-                else:
-                    empty_state(
-                        "No matches found",
-                        "No symbols met the signal criteria. Try a wider universe or lower filters.",
-                        icon="🔍",
-                    )
+            # Persist in session state so the results (and every widget inside
+            # them — direction filter, symbol picker, recompute button) survive
+            # Streamlit reruns. Rendering only under `if run_btn:` made the
+            # whole section vanish on the first interaction.
+            st.session_state["scanner_run_result"] = result
         except Exception as e:
+            st.session_state.pop("scanner_run_result", None)
             st.error(f"Scan failed: {e}")
+
+# ── Background-scan tracking ──────────────────────────────────────────────
+# The scan itself runs SERVER-SIDE (FastAPI background task) — it survives
+# page switches and browser closes. This block makes the UI reflect that:
+# while the server reports running, poll every 10s; once it finishes, pull
+# the completed summary from /scanner/latest and render it like a sync run.
+_run_result = st.session_state.get("scanner_run_result")
+try:
+    _sc = api._get("/scanner/status")
+except Exception:
+    _sc = {}
+# A running server-side scan is tracked even in a brand-new browser session —
+# adopt it so completion still promotes the results below.
+if _sc.get("running") and not _run_result:
+    _run_result = {"scan_run_id": "pending"}
+    st.session_state["scanner_run_result"] = _run_result
+if _run_result and _run_result.get("scan_run_id") == "pending":
+    if _sc.get("running"):
+        st.info(
+            "🔭 Background scan running server-side — it keeps going even if "
+            "you switch pages or close this tab. This page refreshes every 10s."
+        )
+        try:
+            from streamlit_autorefresh import st_autorefresh  # type: ignore
+            st_autorefresh(interval=10_000, key="scanner_bg_poll")
+        except Exception:
+            import streamlit.components.v1 as _components
+            _components.html("<meta http-equiv='refresh' content='10'>", height=0)
+    else:
+        # Finished (or failed) — promote the completed summary to the normal
+        # results path. /scanner/latest holds the last manual scan's summary.
+        try:
+            _latest = api._get("/scanner/latest")
+        except Exception:
+            _latest = None
+        if _latest and _latest.get("scan_run_id") not in (None, "pending"):
+            st.session_state["scanner_run_result"] = _latest
+            st.rerun()
+        else:
+            st.warning(
+                "Background scan is no longer running but no summary was "
+                "returned — it may have failed. Check the server logs for "
+                "'[scanner] Background scan failed', or use the Universe "
+                "filter below to look for its rows."
+            )
+            st.session_state.pop("scanner_run_result", None)
+    _run_result = None  # pending handled above; don't fall through
+
+if _run_result:
+    dur  = _run_result.get("duration_seconds", "?")
+    tot  = _run_result.get("total_scanned", 0)
+    passed = _run_result.get("total_passed_filters", 0)
+    matches = _run_result.get("total_matches", 0)
+    st.success(
+        f"Scan complete in {dur}s — "
+        f"{tot:,} scanned · {passed:,} passed filters · {matches} matches."
+    )
+    if _run_result.get("top_candidates"):
+        section(f"Top {len(_run_result['top_candidates'])} Candidates", level=3)
+        _show_candidates(_run_result["top_candidates"], key_prefix="run_cands")
+    else:
+        empty_state(
+            "No matches found",
+            "No symbols met the signal criteria. Try a wider universe or lower filters.",
+            icon="🔍",
+        )
 
 divider()
 
 # ── Recent scan results ────────────────────────────────────────────────────────
 section(
     "Recent Scan Results",
-    "Last 50 candidates from the database — auto-populated by the background scheduler.",
+    "Latest candidates from the database — auto-populated by the background "
+    "scheduler (watchlist / sp500 / nasdaq100) and your manual scans.",
+)
+
+# Universe filter — without it a manual sp400/nifty scan is buried within
+# minutes by the auto-scheduler's frequent watchlist/sp500 rows.
+uf_col, _sp = st.columns([2, 8])
+_uni_filter = uf_col.selectbox(
+    "Universe",
+    ["all", "watchlist", "sp500", "nasdaq100", "sp400", "sp600", "sp1500",
+     "nifty50", "nifty100", "nifty200", "nifty500", "nse_all", "custom"],
+    index=0, key="recent_universe_filter",
+    help="Pick the universe you scanned to see just those rows (e.g. sp400 after a manual MidCap scan).",
 )
 
 try:
-    results = api._get("/scanner/results?limit=50")
+    _uni_q = "" if _uni_filter == "all" else f"&universe={_uni_filter}"
+    results = api._get(f"/scanner/results?limit=50{_uni_q}")
     if results:
+        # Freshness line: newest row time + why it can legitimately be stale.
+        # A zero-match scan writes NO rows, so also surface the last completed
+        # scan from the status endpoint — "ran but found nothing" must be
+        # distinguishable from "didn't run".
+        _newest = _fmt_et(max((r.get("scanned_at") or "" for r in results), default=""))
+        _fresh_bits = [f"Newest row: **{_newest}**"]
+        try:
+            _st = api._get("/scanner/status") or {}
+            if _st.get("last_scan"):
+                _fresh_bits.append(
+                    f"last completed scan: **{_fmt_et(_st['last_scan'])}** "
+                    f"({_st.get('last_matches', 0)} matches"
+                    + (" — zero-match scans write no rows)" if not _st.get("last_matches") else ")")
+                )
+        except Exception:
+            pass
+        _fresh_bits.append("auto-scans run market hours only")
+        st.caption(" · ".join(_fresh_bits))
         _show_candidates(results, key_prefix="recent_cands")
     else:
         empty_state(

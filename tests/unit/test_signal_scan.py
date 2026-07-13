@@ -51,6 +51,20 @@ def patched_scan(monkeypatch):
     (strategy_name, direction) via a fake bollinger config + engine.
     """
     df = _fake_df()
+    # ISOLATE THE DB: run_scan persists ScanResult + Signal rows via the
+    # module-level SessionLocal. Without this patch the tests write fake
+    # AAA/BBB candidates into the REAL production database (they showed up on
+    # the Scanner page's Recent Scan Results). Bind to a throwaway in-memory
+    # SQLite instead.
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.db import Base
+    _mem_engine = create_engine("sqlite://")
+    Base.metadata.create_all(_mem_engine)
+    monkeypatch.setattr(
+        svc, "SessionLocal",
+        sessionmaker(bind=_mem_engine, autocommit=False, autoflush=False),
+    )
     monkeypatch.setattr(svc, "get_ohlcv", lambda *a, **k: df)
     monkeypatch.setattr(svc, "get_universe",
                         lambda universe, custom: ["AAA", "BBB"])

@@ -2,9 +2,12 @@
 Contract tests for SchwabBroker._spendable_cash — the figure the scheduler's
 cash gate uses to avoid submitting BUYs Schwab rejects for "not enough cash".
 
-The key bug: cashBalance OVER-reports for a CASH account because it includes
-UNSETTLED sell proceeds a cash account can't spend on a new BUY. The gate must
-see SETTLED cash only.
+Contract (revised 2026-07): for CASH accounts the gate uses Schwab's own
+`cashAvailableForTrading`, which INCLUDES unsettled T+1 sell proceeds — Schwab
+accepts BUYs against them (a good-faith violation only occurs if the new
+position is sold before those funds settle). The old settled-only policy
+(available − unsettledCash) pinned the budget near zero on any day the system
+traded, starving every BUY. MARGIN accounts still use buyingPower.
 """
 from __future__ import annotations
 
@@ -15,8 +18,9 @@ def _sec(acct_type, **balances):
     return {"type": acct_type, "currentBalances": balances}
 
 
-def test_cash_account_excludes_unsettled():
-    # cashAvailableForTrading looks like 1357 but 413 is unsettled → 944 settled.
+def test_cash_account_includes_unsettled():
+    # Unsettled T+1 proceeds are spendable: use Schwab's cashAvailableForTrading
+    # as-is, NOT available − unsettled (which starved the gate to 944 here).
     sec = _sec(
         "CASH",
         cashBalance=1357.87,
@@ -24,7 +28,7 @@ def test_cash_account_excludes_unsettled():
         unsettledCash=413.83,
         cashAvailableForWithdrawal=944.04,
     )
-    assert abs(SchwabBroker._spendable_cash(sec) - 944.04) < 0.01
+    assert abs(SchwabBroker._spendable_cash(sec) - 1357.87) < 0.01
 
 
 def test_cash_account_all_settled():
@@ -37,10 +41,11 @@ def test_cash_account_all_settled():
     assert SchwabBroker._spendable_cash(sec) == 500.0
 
 
-def test_cash_account_never_negative():
-    # Defensive: unsettled somehow exceeds available → clamp to 0, not negative.
+def test_cash_account_uses_available_for_trading_verbatim():
+    # Even when unsettledCash exceeds the available figure, we trust Schwab's
+    # own tradable number rather than deriving (and clamping) our own.
     sec = _sec("CASH", cashAvailableForTrading=100.0, unsettledCash=250.0)
-    assert SchwabBroker._spendable_cash(sec) == 0.0
+    assert SchwabBroker._spendable_cash(sec) == 100.0
 
 
 def test_margin_account_uses_buying_power():

@@ -659,12 +659,19 @@ def _make_unified_configs(symbol: str):
     ]
 
 
-def get_latest_results(limit: int = 50) -> list[ScanResultOut]:
-    """Return the most recent scan results from DB."""
+def get_latest_results(limit: int = 50, universe: str | None = None) -> list[ScanResultOut]:
+    """Return the most recent scan results from DB.
+
+    `universe` filters to one universe (e.g. "sp400") — without it a manual
+    large-universe scan is buried within minutes by the auto-scheduler's
+    watchlist/sp500/nasdaq100 rows and never seen in the last-N window.
+    """
     with SessionLocal() as db:
+        q = db.query(ScanResult)
+        if universe:
+            q = q.filter(ScanResult.universe == universe)
         rows = (
-            db.query(ScanResult)
-            .order_by(ScanResult.scanned_at.desc(), ScanResult.score.desc())
+            q.order_by(ScanResult.scanned_at.desc(), ScanResult.score.desc())
             .limit(limit)
             .all()
         )
@@ -686,3 +693,35 @@ def get_latest_results(limit: int = 50) -> list[ScanResultOut]:
             )
             for r in rows
         ]
+
+
+def get_last_persisted_scan() -> dict | None:
+    """Newest scan run recorded in the DB, across ALL universes.
+
+    The scanner route's in-memory `_last_summary` only reflects MANUAL scans
+    and is lost on server restart — the auto-scheduler's periodic scans never
+    touch it. This reads the source of truth (the scan_results table) so the
+    status band and freshness line stay accurate for background scans too.
+
+    Returns {scanned_at, universe, matches} for the most recent scan_run_id,
+    or None when the table is empty. Note: a zero-match scan writes no rows, so
+    this reflects the last scan that FOUND something, not merely the last run.
+    """
+    with SessionLocal() as db:
+        latest = (
+            db.query(ScanResult)
+            .order_by(ScanResult.scanned_at.desc())
+            .first()
+        )
+        if latest is None:
+            return None
+        matches = (
+            db.query(ScanResult)
+            .filter(ScanResult.scan_run_id == latest.scan_run_id)
+            .count()
+        )
+        return {
+            "scanned_at": latest.scanned_at,
+            "universe": latest.universe,
+            "matches": matches,
+        }

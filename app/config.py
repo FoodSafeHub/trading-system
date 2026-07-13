@@ -112,11 +112,10 @@ class Settings(BaseSettings):
     # the same entry several sessions in a row (NVDA bought 3x in 2 days).
     buy_reentry_cooldown_days: float = 5.0
 
-    # Time-stop: a mean-reversion swing that hasn't worked after this many days
-    # statistically won't — arm a tight ATR trail on stale LOSING positions so
-    # they exit on any bounce instead of sitting for weeks (ZM 23d, GEN 44d).
-    # 0 disables.
-    time_stop_days: float = 15.0
+    # NOTE: the portfolio-level time-stop (time_stop_days) was removed
+    # 2026-07-06 at the user's request — losing swings get time to recover.
+    # Strategy-level exit_policy time_stop_bars (per-strategy calibration)
+    # is unaffected.
 
     @property
     def pnl_excluded(self) -> set[str]:

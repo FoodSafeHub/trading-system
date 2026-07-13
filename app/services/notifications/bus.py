@@ -138,6 +138,53 @@ def notify_signal(
     return new_id
 
 
+def notify_consensus_proposal(
+    *,
+    symbol: str,
+    direction: str,
+    strategies: list[str],
+    price: Optional[float] = None,
+    extra: Optional[str] = None,
+) -> Optional[int]:
+    """Emit a REVIEW-ONLY consensus notification (kind="consensus").
+
+    The consensus pool no longer places BUY orders (user decision 2026-07-06):
+    qualifying consensus BUY signals land here for manual review instead, on
+    their own Notifications tab. Not assignment-gated (consensus covers
+    unassigned symbols by definition), no toast. Best-effort: never raises.
+    """
+    symbol = (symbol or "").upper().strip()
+    direction = (direction or "").upper().strip()
+    agree = ", ".join(strategies or [])
+    title = f"Consensus {direction} proposal: {symbol}"
+    body_parts = [f"{len(strategies or [])} strategies agree: {agree}"]
+    if price:
+        body_parts.append(f"Price: ${price:,.2f}")
+    if extra:
+        body_parts.append(extra)
+    body_parts.append("Review-only — no order was placed.")
+    body = " · ".join(body_parts)
+    try:
+        with SessionLocal() as db:
+            row = Notification(
+                kind="consensus",
+                symbol=symbol or None,
+                direction=direction or None,
+                strategy=("consensus:" + "+".join(strategies)) if strategies else "consensus",
+                source="scheduler",
+                price=price,
+                title=title[:256],
+                body=body,
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+            return row.id
+    except Exception as exc:
+        logger.warning("notify_consensus_proposal db write failed: %s", exc)
+        return None
+
+
 def notify_suppression(
     *,
     symbol: str,

@@ -8,7 +8,11 @@ from typing import List, Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from app.schemas.scanner import ScanConfig, ScanResultOut, ScanSummary
-from app.services.scanner.scanner_service import get_latest_results, run_scan
+from app.services.scanner.scanner_service import (
+    get_last_persisted_scan,
+    get_latest_results,
+    run_scan,
+)
 from app.utils.time_utils import to_et
 
 logger = logging.getLogger(__name__)
@@ -82,9 +86,17 @@ def _run_scan_bg(config: ScanConfig) -> None:
 
 
 @router.get("/results", response_model=List[ScanResultOut])
-async def get_scan_results(limit: int = Query(default=50, le=200)):
-    """Return the most recent scan results from the database."""
-    return get_latest_results(limit=limit)
+async def get_scan_results(
+    limit: int = Query(default=50, le=200),
+    universe: Optional[str] = Query(default=None),
+):
+    """Return the most recent scan results from the database.
+
+    `universe` narrows to one universe so manual large-universe scans stay
+    findable after the auto-scheduler's frequent scans push them out of the
+    unfiltered last-N window.
+    """
+    return get_latest_results(limit=limit, universe=universe)
 
 
 @router.get("/latest", response_model=Optional[ScanSummary])
@@ -95,12 +107,33 @@ async def get_latest_scan():
 
 @router.get("/status")
 async def get_scan_status():
-    """Return whether a scan is currently running."""
+    """Return whether a scan is currently running + the last scan's metadata.
+
+    `last_scan`/`last_matches` come from the DB (source of truth) so they
+    reflect BACKGROUND auto-scans and survive server restarts — the in-memory
+    `_last_summary` only ever captured manual scans and was lost on restart.
+    Falls back to the in-memory summary only if the DB read fails.
+    """
+    last_scan_iso = None
+    last_matches = 0
+    last_universe = None
+    try:
+        persisted = get_last_persisted_scan()
+        if persisted:
+            last_scan_iso = to_et(persisted["scanned_at"]).isoformat()
+            last_matches = persisted["matches"]
+            last_universe = persisted["universe"]
+    except Exception:
+        if _last_summary:
+            last_scan_iso = to_et(_last_summary.scanned_at).isoformat()
+            last_matches = _last_summary.total_matches
+
     return {
         "running": _scan_running,
-        "last_scan": to_et(_last_summary.scanned_at).isoformat() if _last_summary else None,
+        "last_scan": last_scan_iso,
+        "last_universe": last_universe,
         "last_run_id": _last_summary.scan_run_id if _last_summary else None,
-        "last_matches": _last_summary.total_matches if _last_summary else 0,
+        "last_matches": last_matches,
     }
 
 

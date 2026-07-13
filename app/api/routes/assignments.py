@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import List
 
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models.assignments import SymbolStrategyAssignment
 from app.schemas._serializers import serialize_et
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/assignments", tags=["assignments"])
 
@@ -127,6 +130,36 @@ def upsert_assignment(body: AssignmentIn, db: Session = Depends(get_db)):
     if body.broker not in VALID_BROKERS:
         raise HTTPException(400, f"broker must be one of {sorted(VALID_BROKERS)}")
     _validate_ceei_fields(body)
+
+    # System/strategy-name sanity: an assignment whose name doesn't resolve in
+    # its system never trades (the scheduler skips it with a visible skip row,
+    # and the Strategy page's coverage panel flags it). Here we auto-correct
+    # the common misroute — a scanner-family name saved with system='bollinger'
+    # — and log a warning for names that resolve nowhere. Never rejects: custom
+    # names must stay assignable, and the skip-row path keeps them visible.
+    _sym_u = body.symbol.upper().strip()
+    try:
+        if body.system == "bollinger":
+            from app.services.strategy.engine import load_strategies_from_config
+            if body.strategy_name not in {c.name for c in load_strategies_from_config()}:
+                from app.services.scanner.scanner_service import _make_generic_configs_full
+                if body.strategy_name in {c.name for c in _make_generic_configs_full(_sym_u)}:
+                    logger.warning(
+                        "[assignments] %s/%s: scanner-family name saved with "
+                        "system='bollinger' — auto-corrected to 'scanner'.",
+                        _sym_u, body.strategy_name,
+                    )
+                    body.system = "scanner"
+                else:
+                    logger.warning(
+                        "[assignments] %s/%s: name not found in bollinger config or "
+                        "scanner set — assignment will be skipped by the scheduler.",
+                        _sym_u, body.strategy_name,
+                    )
+    except Exception:
+        # Validation is best-effort — a registry import failure must not block
+        # assignment writes.
+        pass
     # "none" normalizes to NULL so an off gate leaves the row exactly as before.
     ceei_gate = body.ceei_gate if body.ceei_gate and body.ceei_gate != "none" else None
     symbol = body.symbol.upper().strip()

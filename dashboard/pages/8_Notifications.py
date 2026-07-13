@@ -103,23 +103,40 @@ def _render(rows):
                         st.error(f"Failed: {exc}")
 
 
-# Split by source/direction. Buy & Sell are scheduler/scanner auto-trade signals;
-# M1 is the (un-gated) advisory feed, source="m1".
+# Split by kind/source/direction. Buy & Sell are scheduler/scanner auto-trade
+# signals; Consensus is the review-only proposal feed (kind="consensus" — the
+# consensus pool no longer places BUY orders); M1 is the advisory feed.
 def _is_m1(n):
     return (n.get("source") or "").lower() == "m1"
 
-m1_rows  = [n for n in items if _is_m1(n)]
-buy_rows  = [n for n in items if not _is_m1(n) and (n.get("direction") or "").upper() == "BUY"]
-sell_rows = [n for n in items if not _is_m1(n) and (n.get("direction") or "").upper() == "SELL"]
+def _is_consensus(n):
+    return (n.get("kind") or "").lower() == "consensus"
 
-tab_buy, tab_sell, tab_m1 = st.tabs([
+consensus_rows = [n for n in items if _is_consensus(n)]
+m1_rows   = [n for n in items if _is_m1(n) and not _is_consensus(n)]
+buy_rows  = [n for n in items if not _is_m1(n) and not _is_consensus(n)
+             and (n.get("direction") or "").upper() == "BUY"]
+sell_rows = [n for n in items if not _is_m1(n) and not _is_consensus(n)
+             and (n.get("direction") or "").upper() == "SELL"]
+
+tab_buy, tab_sell, tab_consensus, tab_m1 = st.tabs([
     f"🟢 Buy ({len(buy_rows)})",
     f"🔴 Sell ({len(sell_rows)})",
+    f"🗳️ Consensus ({len(consensus_rows)})",
     f"📊 M1 ({len(m1_rows)})",
 ])
 with tab_buy:
     _render(buy_rows)
 with tab_sell:
     _render(sell_rows)
+with tab_consensus:
+    st.info(
+        "Review-only proposals: symbols where multiple strategies agree on an "
+        "entry. **No order is placed automatically** — buying happens only via "
+        "the auto-scheduler (assigned strategies) and the day-trading autotrader. "
+        "To act on one, assign the symbol on the Strategy page or trade it manually.",
+        icon="🗳️",
+    )
+    _render(consensus_rows)
 with tab_m1:
     _render(m1_rows)

@@ -899,6 +899,9 @@ def _signal_reason(direction: str, ind: dict) -> str:
     """Human one-liner from indicators_json — the *why*, not a raw blob."""
     if not ind:
         return "—"
+    # Scheduler skip/error rows store a plain-text reason — show it verbatim.
+    if ind.get("reason"):
+        return str(ind["reason"])
     bits = []
     if "rsi2" in ind:
         bits.append(f"RSI2 {ind['rsi2']:.0f}")
@@ -964,6 +967,46 @@ try:
             bare_name = raw_name.split(":", 1)[-1] if ":" in raw_name else raw_name
             return "🎯 yes" if (sym, bare_name) in _live_pairs or (sym, raw_name) in _live_pairs else "no"
         df["would_fire"] = df.apply(_would_fire, axis=1)
+
+        # ── Assignment coverage check ────────────────────────────────────
+        # Every enabled assignment must leave a signal row each cycle (the
+        # scheduler now writes skip rows with a reason). Flag assignments
+        # whose latest row is a skip/error, or that have NO row in the
+        # current window — those are silently not trading.
+        try:
+            _bare = df["strategy_name"].astype(str).str.split(":", n=1).str[-1]
+            _pair_series = list(zip(df["symbol"].astype(str).str.upper(), _bare))
+            _seen_pairs = set(_pair_series)
+            _missing = sorted(p for p in _live_pairs if p not in _seen_pairs)
+            _skip_rows = df[df["why"].astype(str).str.startswith(("skipped:", "error:"))] \
+                if "why" in df.columns else df.iloc[0:0]
+            # Latest row per (symbol, strategy): only flag if the MOST RECENT
+            # row for that pair is a skip (a healthy newer row clears it).
+            _latest_skips = []
+            if not _skip_rows.empty:
+                _first_idx = {}
+                for i, p in enumerate(_pair_series):
+                    _first_idx.setdefault(p, i)   # df is newest-first
+                for ridx, row in _skip_rows.iterrows():
+                    p = (str(row["symbol"]).upper(),
+                         str(row["strategy_name"]).split(":", 1)[-1])
+                    if p in _live_pairs and _first_idx.get(p) == df.index.get_loc(ridx):
+                        _latest_skips.append((p[0], p[1], str(row["why"])))
+            if _missing or _latest_skips:
+                with st.expander(
+                    f"⚠️ Assignment coverage — {len(_missing) + len(_latest_skips)} "
+                    "assignment(s) not producing signals", expanded=True,
+                ):
+                    for sym_, strat_, why_ in _latest_skips:
+                        st.warning(f"**{sym_} · {strat_}** — {why_}")
+                    for sym_, strat_ in _missing:
+                        st.warning(
+                            f"**{sym_} · {strat_}** — no signal row in the last "
+                            f"{_signals_limit} signals. Run a cycle (or check the "
+                            "assignment's system/strategy name)."
+                        )
+        except Exception:
+            pass
 
         # Acted-on / order link, made legible.
         if "acted_on" in df.columns:
