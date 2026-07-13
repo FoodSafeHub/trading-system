@@ -77,6 +77,14 @@ def check_tape_health(
 
         px = float(closes.iloc[-1])
         ret_5d = (px / float(closes.iloc[-6]) - 1.0) * 100.0
+        # Drop from the highest close INSIDE the 5-session window, not just the
+        # window's left edge. Close-to-close velocity is blind to a rally-and-
+        # crash round trip: AMAT 2026-07-06 measured 5d −4.8% (596 vs 626 five
+        # sessions back) while sitting −17.6% below the 723 close printed
+        # mid-window — and lost 9% overnight. The intra-window high is the real
+        # knife reference.
+        hi_5d = float(closes.iloc[-6:].max())
+        ret_off_5d_high = (px / hi_5d - 1.0) * 100.0 if hi_5d > 0 else 0.0
         highs = ohlcv["High"].dropna() if "High" in ohlcv else closes
         hi20 = float(highs.iloc[-21:].max())
         off_hi20 = (px / hi20 - 1.0) * 100.0 if hi20 > 0 else 0.0
@@ -92,6 +100,7 @@ def check_tape_health(
 
         metrics = {
             "ret_5d_pct": round(ret_5d, 2),
+            "off_5d_high_pct": round(ret_off_5d_high, 2),
             "off_20d_high_pct": round(off_hi20, 2),
             "vs_ema20_pct": round(vs_ema20, 2),
             "red_streak": streak,
@@ -105,6 +114,16 @@ def check_tape_health(
         # (RSI2/VIX-spike) exempt: buying the fast dip is their edge.
         if not panic and ret_5d < -max_5d_drop_pct:
             reasons.append(f"5d return {ret_5d:+.1f}% (limit -{max_5d_drop_pct:.0f}%)")
+        # Rule 1b — VELOCITY vs the intra-window high (the AMAT blind spot).
+        # 1.5× the close-to-close limit: a peak-to-now crash is inherently
+        # noisier than an edge-to-edge drop, so it gets more room before it
+        # blocks — but a −9%+ collapse off a high printed this week is a knife
+        # regardless of where the window's left edge happened to sit.
+        if not panic and ret_off_5d_high < -(1.5 * max_5d_drop_pct):
+            reasons.append(
+                f"off 5d high {ret_off_5d_high:+.1f}% "
+                f"(limit -{1.5 * max_5d_drop_pct:.0f}%)"
+            )
         # Rule 2 — STRUCTURAL BREAK: far below EMA20 AND deep off the 20d high
         # TOGETHER. Each alone blocked too many winners (standalone off-20d-high
         # blocks averaged +2.2%, and deep-drawdown entries actually bounced);

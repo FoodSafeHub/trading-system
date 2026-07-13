@@ -416,7 +416,15 @@ class ExecutionService:
         signal is from today we pull intraday bars (so an intraday spike-and-
         fade is captured); otherwise daily highs since the signal date. Returns
         0.0 on any failure (caller falls back to current price / resting stop).
+
+        With no anchor time there is nothing to slice from, so the answer is
+        "unknown" (0.0) — NEVER the whole fetched window's high. Returning the
+        period high fabricates a high-water mark the position never saw: AMZN
+        (2026-07-03) got peak $278.56 from the 3-month chart against a $254.51
+        entry, computed "trail already hit" and force-sold the bottom.
         """
+        if signal_at is None:
+            return 0.0
         try:
             from datetime import datetime as _dt, timezone as _tz
             from app.services.market_data.provider import get_ohlcv
@@ -475,7 +483,8 @@ class ExecutionService:
                                     return float(sliced[col].max())
                             except Exception:
                                 pass
-                        return float(intraday[col].max())
+                        # Could not anchor the slice — fall through to the daily
+                        # path rather than take the whole intraday window's high.
                 except Exception:
                     pass  # interval unsupported / provider error → daily below
 
@@ -490,7 +499,8 @@ class ExecutionService:
                         return float(sliced[col].max())
                 except Exception:
                     pass
-            return float(df[col].max())
+            # Slice failed → unknown, not the period high (see docstring).
+            return 0.0
         except Exception:
             return 0.0
 
@@ -1057,8 +1067,14 @@ class ExecutionService:
         # Static STOP already at/above target (and we still want a static STOP) →
         # no ratchet needed. Only ever move UP, ignore sub-0.1% noise, so a
         # persisting SELL condition doesn't churn cancel/replace every cycle.
+        # Deliberately does NOT require the native list to be empty: a stale
+        # TRAILING_STOP row stuck at status 'submitted' in our DB (never synced
+        # after a broker-side cancel) used to disable this guard entirely, and
+        # STAG then re-placed an identical $39.02 stop every 60 seconds all
+        # night (2026-07-03). resting_level > 0 already proves a static STOP
+        # is resting, which is all this branch needs.
         if (
-            resting_sell_stops and not resting_native
+            resting_level > 0
             and not use_native and not force_replace
             and resting_level >= target_stop * 0.999
         ):
@@ -1361,6 +1377,7 @@ class ExecutionService:
             order = db.query(Order).filter_by(id=order_id).first()
             if not order:
                 return
+            prev_status = order.status
             order.status = status
             if broker_order_id:
                 order.broker_order_id = broker_order_id
@@ -1378,7 +1395,12 @@ class ExecutionService:
             # share ledger so per-strategy SELL sizing stays accurate. Reuses the
             # same attribution helper as the reconcile path (single source of truth);
             # no-op for non-fill statuses, orphan, or non-assigned orders.
-            if status == "filled" and order.fill_price:
+            # ONLY on the transition INTO filled: this method gets called more
+            # than once per order (immediate confirm + fill poll + reconcile),
+            # and re-attributing doubled the ledger — GNTX booked 30 shares on
+            # a 15-share fill within the same second (2026-07-06).
+            if (status == "filled" and order.fill_price
+                    and prev_status not in ("filled", "partial")):
                 try:
                     from app.services.reconciliation.order_sync import (
                         _attribute_fill_to_ledger,

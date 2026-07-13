@@ -39,15 +39,66 @@ from app.services.brokers.factory import _build_one, get_broker
 logger = logging.getLogger(__name__)
 
 
+def _decrement_ledger_unattributed(db, symbol: str, qty: float) -> None:
+    """Reduce the per-strategy ledger for a SELL fill that has no signal link.
+
+    Protective trail / native-stop / manual exits close real strategy lots but
+    carry no signal_id, so the signal→assignment attribution can't run. Without
+    this, the ledger row keeps its shares forever and the scheduler keeps
+    treating a closed position as held. Drains the symbol's rows oldest-update
+    first (any broker key — the keys have historically drifted between
+    'default' and the concrete broker), clamped at 0.
+    """
+    try:
+        from app.models.strategy_positions import StrategyPosition
+
+        remaining = abs(float(qty or 0.0))
+        if remaining <= 0:
+            return
+        rows = (
+            db.query(StrategyPosition)
+            .filter(
+                StrategyPosition.symbol == symbol.upper(),
+                StrategyPosition.held_qty > 0,
+            )
+            .order_by(StrategyPosition.updated_at.asc())
+            .all()
+        )
+        for row in rows:
+            if remaining <= 0:
+                break
+            take = min(float(row.held_qty or 0.0), remaining)
+            row.held_qty = float(row.held_qty or 0.0) - take
+            if row.held_qty <= 0:
+                row.held_qty = 0.0
+                row.avg_price = None
+            remaining -= take
+            logger.info(
+                "[order_sync] unattributed SELL %s x%.4f drained ledger row "
+                "%s/%s (now %.4f)", symbol, take, row.system, row.strategy_name,
+                row.held_qty,
+            )
+    except Exception as exc:
+        logger.debug("[order_sync] unattributed ledger decrement skipped for %s: %s",
+                     symbol, exc)
+
+
 def _attribute_fill_to_ledger(db, order: Order) -> None:
     """Update the per-strategy share ledger for a freshly-filled order.
 
     Attribution chain: Order.signal_id -> Signal.strategy_name, then match the
-    enabled assignment to recover its broker route. Orders with no signal link
-    (orphan native-trail/manual closes) or no matching assignment are skipped —
-    the ledger only tracks lots our strategies opened, and the scheduler's
+    enabled assignment to recover its broker route.
+
+    BUY orders with no signal link or no matching assignment are skipped — the
+    ledger only tracks lots our strategies opened, and the scheduler's
     min(ledger, broker_held) SELL clamp keeps us from overselling when an
     untracked lot exists.
+
+    SELL orders with no signal link are NOT skipped: protective trail /
+    native-stop exits carry no signal_id, so skipping them left every closed
+    lot on the books forever (GNTX/ACMR/AMAT all showed held_qty > 0 after
+    their exits filled). Those fills decrement the symbol's existing ledger
+    rows directly (oldest row first, clamped at 0).
 
     IMPORTANT: the Signal row stores the scheduler's *label*, which for scanner
     and perplexity systems is prefixed ("scanner:NAME", "perplexity:NAME"). The
@@ -62,12 +113,18 @@ def _attribute_fill_to_ledger(db, order: Order) -> None:
         from app.services.strategy import strategy_ledger
         from app.services.markets import is_india_symbol
 
+        symbol = (order.symbol or "").upper()
+        side = (order.side or "").upper()
+
         if not order.signal_id:
+            if side == "SELL":
+                _decrement_ledger_unattributed(db, symbol, float(order.quantity or 0.0))
             return
         sig = db.query(Signal).filter_by(id=order.signal_id).first()
         if sig is None or not sig.strategy_name:
+            if side == "SELL":
+                _decrement_ledger_unattributed(db, symbol, float(order.quantity or 0.0))
             return
-        symbol = (order.symbol or "").upper()
 
         # Split a possible "system:NAME" label into bare (system, name). Bollinger
         # labels carry no prefix, so default the system to "bollinger".

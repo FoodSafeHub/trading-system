@@ -46,6 +46,29 @@ def test_red_streak_alone_no_longer_blocks():
     assert th.metrics["red_streak"] >= 4  # still reported, just not gating
 
 
+def test_rally_crash_roundtrip_blocked():
+    # The AMAT 2026-07-06 blind spot: a parabolic run-up, then a spike-and-crash
+    # INSIDE the 5-session window. Close-to-close 5d is mild (−4.8%: the window's
+    # left edge was already low) but price sits −17.5% under the 723 close printed
+    # mid-window. The live gate PASSED this entry; it gapped −9% overnight.
+    runup = list(np.linspace(400, 630, 50))
+    closes = runup + [626.84, 694.64, 723.00, 650.91, 603.04, 596.62]
+    th = check_tape_health("AMAT", "Legacy_AMAT_Fib_Pullback", ohlcv=_ohlcv(closes))
+    assert th.metrics["ret_5d_pct"] > -6          # old rule alone would pass it
+    assert th.metrics["off_5d_high_pct"] < -15
+    assert not th.ok
+    assert any("off 5d high" in r for r in th.reasons)
+
+
+def test_rally_crash_panic_strategy_exempt():
+    # RSI2 / VIX-spike panic buyers keep their velocity exemption for the new
+    # off-5d-high rule too — buying the fast dip is their edge.
+    runup = list(np.linspace(400, 630, 50))
+    closes = runup + [626.84, 694.64, 723.00, 650.91, 603.04, 596.62]
+    th = check_tape_health("AMAT", "AMAT_RSI2_Mean_Reversion", ohlcv=_ohlcv(closes))
+    assert th.ok
+
+
 def test_structural_rules_must_trip_together():
     # Deep off the 20d high but still near EMA20 (long slow slide that has
     # already based out) — one structural rule alone must NOT block.
@@ -136,11 +159,17 @@ def test_scheduler_wiring_present():
     names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
     assert "_tape_gate_blocks" in names
     assert "_in_reentry_cooldown" in names
-    assert "_time_stop_pass" in names
-    # Both BUY paths call the gate (assigned + consensus = at least 2 call sites).
-    assert src.count("_tape_gate_blocks(") >= 3   # def + 2 call sites
-    assert src.count("_in_reentry_cooldown(") >= 3
+    # _time_stop_pass was removed 2026-07-06 (user decision: losing swings get
+    # time to recover) — assert it stays gone so it isn't reintroduced silently.
+    assert "_time_stop_pass" not in names
+    # The assigned path is the ONLY scheduler BUY path since 2026-07-06
+    # (consensus BUYs are review-only notifications, no orders) — the gate and
+    # cooldown must still guard it. The tape gate keeps a 2nd call site in the
+    # consensus branch for reviewer context (verdict text on the proposal).
+    assert src.count("_tape_gate_blocks(") >= 3   # def + assigned + consensus-info
+    assert src.count("_in_reentry_cooldown(") >= 2  # def + assigned BUY path
+    assert "notify_consensus_proposal" in src     # consensus BUYs → review feed
     # Vetoes surface as notifications, not silent skips.
     assert 'reason="tape_health"' in src
     assert 'reason="reentry_cooldown"' in src
-    assert 'reason="time_stop"' in src
+    assert 'reason="time_stop"' not in src

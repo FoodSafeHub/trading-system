@@ -42,6 +42,20 @@ _override_run_bollinger: bool | None = None
 _override_run_perplexity: bool | None = None
 
 
+def _veto_reason(indicators) -> str | None:
+    """Human reason when a gate turned an entry into HOLD — persisted with the
+    signal row so the Strategy page shows WHY an assignment didn't fire."""
+    try:
+        ind = indicators or {}
+        if ind.get("ceei_gate_veto"):
+            score = ind.get("ceei_gate_score")
+            return (f"vetoed: CEEI {ind.get('ceei_gate')} gate blocked the BUY"
+                    + (f" (score {score})" if score is not None else ""))
+    except Exception:
+        pass
+    return None
+
+
 def _persist_signal(
     symbol: str,
     direction: str,
@@ -49,14 +63,19 @@ def _persist_signal(
     entry: float | None,
     *,
     acted_on: bool = True,
+    reason: str | None = None,
 ) -> int | None:
     """Write a Signal row so the resulting Order can join back to a strategy name.
 
     acted_on=False writes an observation-only row (HOLD or a signal that was
     evaluated but blocked before order placement). acted_on=True marks signals
-    that reached the broker execution path.
+    that reached the broker execution path. `reason` (skip/veto explanation)
+    lands in indicators_json so the Strategy page's "why" column shows it —
+    EVERY enabled assignment must leave a row each cycle, even when skipped,
+    or misconfigured assignments are invisible.
     """
     try:
+        import json as _json
         with SessionLocal() as db:
             sig = Signal(
                 strategy_name=strategy_label[:128],
@@ -65,6 +84,7 @@ def _persist_signal(
                 strength=1.0,
                 price_at_signal=entry,
                 acted_on=acted_on,
+                indicators_json=_json.dumps({"reason": reason}) if reason else None,
             )
             db.add(sig)
             db.commit()
@@ -241,6 +261,12 @@ def _reconcile_trail_stops(
         anchor_sig = first_assigned_sell_signals(db, assigned_strat, earliest_buy)
 
         for symbol, qty in held.items():
+            # Ratchet/exit only while this symbol's own exchange trades. The
+            # fast-trail job fires whenever ANY session is open, so during the
+            # NSE session US trails were re-evaluated overnight on stale quotes
+            # (the 03:53 UTC AMZN/ZM market-sell attempts).
+            if not _symbol_market_open(symbol):
+                continue
             sig = anchor_sig.get(symbol)
             if sig is None:
                 continue  # assigned strategy hasn't flagged an exit — leave it
@@ -455,82 +481,6 @@ def _notify_suppress(*, symbol: str, direction: str, reason: str,
         )
     except Exception:
         pass
-
-
-def _time_stop_pass(loop, current_positions: dict, live_prices: dict,
-                    assignments: list, svc_for) -> None:
-    """Arm a tight exit trail on STALE LOSING bot positions.
-
-    A mean-reversion swing that hasn't worked after time_stop_days has no edge
-    left — but instead of dumping at market, arm the existing floored-trail
-    machinery ~1% under the current price (ATR-adaptive width above), so the
-    position exits on the next stall/bounce and can't keep bleeding for weeks
-    (ZM sat 23 days, GEN 44). Winners and young positions are untouched.
-    Best-effort: any error only logs.
-    """
-    from datetime import datetime, timedelta
-    from app.config import get_settings
-    days = float(get_settings().time_stop_days or 0)
-    if days <= 0:
-        return
-    try:
-        from app.db import SessionLocal
-        from app.services.pnl.fifo import compute_fifo
-        with SessionLocal() as db:
-            fifo = compute_fifo(db)
-        cutoff = datetime.utcnow() - timedelta(days=days)
-        # Oldest lot age + weighted avg cost per symbol (real-money lots only).
-        by_sym: dict[str, dict] = {}
-        for lot in fifo.open_lots:
-            if lot.is_paper:
-                continue
-            rec = by_sym.setdefault(lot.symbol.upper(), {"cost": 0.0, "qty": 0.0, "oldest": lot.buy_at})
-            rec["cost"] += lot.buy_price * lot.quantity
-            rec["qty"] += lot.quantity
-            if lot.buy_at < rec["oldest"]:
-                rec["oldest"] = lot.buy_at
-
-        for sym, rec in by_sym.items():
-            held = current_positions.get(sym, 0.0)
-            if held < 1.0 or rec["qty"] <= 0:
-                continue
-            oldest = rec["oldest"]
-            oldest = oldest.replace(tzinfo=None) if getattr(oldest, "tzinfo", None) else oldest
-            if oldest > cutoff:
-                continue  # not stale yet
-            last = live_prices.get(sym) or 0.0
-            avg_cost = rec["cost"] / rec["qty"]
-            if last <= 0 or last >= avg_cost:
-                continue  # only losing positions get the time-stop
-            asgn = next((a for a in assignments if a["symbol"].upper() == sym), None)
-            exec_svc, exec_acct = svc_for((asgn or {}).get("broker", "default") or "default")
-            age_d = (datetime.utcnow() - oldest).days
-            logger.info(
-                "[scheduler] TIME-STOP %s: held %dd, %.1f%% under cost — arming tight exit trail.",
-                sym, age_d, (last / avg_cost - 1) * 100,
-            )
-            try:
-                ok = loop.run_until_complete(exec_svc.tighten_trail_on_sell(
-                    symbol=sym,
-                    quantity=min(held, rec["qty"]),
-                    account_id=exec_acct,
-                    # Floor just under the market so the trail arms immediately
-                    # and the worst case is ~1% below here — not weeks more drift.
-                    signal_price=round(last * 0.99, 4),
-                    trail_pct=None,   # ATR-adaptive width
-                    source="scheduler",
-                    idempotency_suffix=f"timestop-{sym}",
-                ))
-                if ok:
-                    _notify_suppress(
-                        symbol=sym, direction="SELL", reason="time_stop",
-                        detail=(f"Held {age_d}d and {abs(last / avg_cost - 1) * 100:.1f}% under cost "
-                                f"— time-stop armed a tight exit trail near ${last:,.2f}."),
-                    )
-            except Exception as exc:
-                logger.warning("[scheduler] time-stop trail failed for %s: %s", sym, exc)
-    except Exception as exc:
-        logger.warning("[scheduler] time-stop pass failed: %s", exc)
 
 
 def _tape_gate_blocks(symbol: str, strategy_name: str | None,
@@ -1069,9 +1019,22 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                             (s for s in PERPLEXITY_STRATEGIES if s.name == strategy_name), None
                         )
                         if strat is None or not strat.enabled:
+                            _why = ("strategy not found in perplexity registry — remove or "
+                                    "reassign" if strat is None else
+                                    "strategy is disabled (research_only) — enable it or this "
+                                    "assignment never trades")
+                            logger.warning("[scheduler] Assigned %s → %s SKIPPED: %s",
+                                           strategy_name, symbol, _why)
+                            _persist_signal(symbol, "HOLD", f"perplexity:{strategy_name}",
+                                            None, acted_on=False, reason=f"skipped: {_why}")
                             continue
                         df = get_ohlcv(symbol, period="2y")
                         if df.empty or len(df) < 60:
+                            _why = f"insufficient history ({len(df)} bars, need 60)"
+                            logger.warning("[scheduler] Assigned %s → %s SKIPPED: %s",
+                                           strategy_name, symbol, _why)
+                            _persist_signal(symbol, "HOLD", f"perplexity:{strategy_name}",
+                                            None, acted_on=False, reason=f"skipped: {_why}")
                             continue
                         live = live_prices.get(symbol)
                         if live:
@@ -1087,7 +1050,8 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                             sig = apply_ceei_gate(sig, df["Close"].dropna(), df, _ceei_ov)
                         entry = live or sig.entry_price or float(df["Close"].iloc[-1])
                         label = f"perplexity:{strategy_name}"
-                        _persist_signal(symbol, sig.direction, label, entry, acted_on=False)
+                        _persist_signal(symbol, sig.direction, label, entry, acted_on=False,
+                                        reason=_veto_reason(getattr(sig, "indicators", None)))
                         if sig.direction != "HOLD":
                             signals_to_act.append((symbol, sig.direction, label, entry, sig.stop_price, system, strategy_name))
                             _c = getattr(sig, "confidence", None)
@@ -1101,6 +1065,14 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                     elif system == "bollinger":
                         bollinger_configs = load_strategies_from_config()
                         matching = [c for c in bollinger_configs if c.name == strategy_name and c.enabled]
+                        if not matching:
+                            _why = (f"strategy {strategy_name!r} not found (or disabled) in the "
+                                    "bollinger config — wrong system? Legacy_*/scanner-family "
+                                    "names belong to system='scanner'")
+                            logger.warning("[scheduler] Assigned %s → %s SKIPPED: %s",
+                                           strategy_name, symbol, _why)
+                            _persist_signal(symbol, "HOLD", strategy_name, None,
+                                            acted_on=False, reason=f"skipped: {_why}")
                         for config in matching:
                             prices = get_price_series(symbol, period="1y")
                             # Merge the assignment's CEEI gate on top of the
@@ -1123,19 +1095,22 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
 
                         df = get_ohlcv(symbol, period="1y")
                         if df.empty or len(df) < 60:
-                            logger.info(
-                                "[scheduler] scanner-assigned %s skipped — insufficient data (len=%d)",
-                                symbol, len(df),
+                            _why = f"insufficient history ({len(df)} bars, need 60)"
+                            logger.warning(
+                                "[scheduler] scanner-assigned %s SKIPPED: %s", symbol, _why,
                             )
+                            _persist_signal(symbol, "HOLD", f"scanner:{strategy_name}",
+                                            None, acted_on=False, reason=f"skipped: {_why}")
                         else:
                             generic = _make_generic_configs_full(symbol)
                             match = next((c for c in generic if c.name == strategy_name and c.enabled), None)
                             if match is None:
-                                logger.warning(
-                                    "[scheduler] scanner-assigned %s: strategy %r not in generic set — "
-                                    "remove or rename the assignment",
-                                    symbol, strategy_name,
-                                )
+                                _why = (f"strategy {strategy_name!r} not in the scanner generic "
+                                        "set for this symbol — remove or rename the assignment")
+                                logger.warning("[scheduler] scanner-assigned %s SKIPPED: %s",
+                                               symbol, _why)
+                                _persist_signal(symbol, "HOLD", f"scanner:{strategy_name}",
+                                                None, acted_on=False, reason=f"skipped: {_why}")
                             else:
                                 live = live_prices.get(symbol)
                                 if live:
@@ -1154,7 +1129,8 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                                 )
                                 entry = live or sig.price_at_signal or float(prices.iloc[-1])
                                 label = f"scanner:{strategy_name}"
-                                _persist_signal(symbol, sig.direction, label, entry, acted_on=False)
+                                _persist_signal(symbol, sig.direction, label, entry, acted_on=False,
+                                                reason=_veto_reason(getattr(sig, "indicators", None)))
                                 if sig.direction != "HOLD":
                                     signals_to_act.append((symbol, sig.direction, label, entry, None, system, strategy_name))
                                     _c = getattr(sig, "confidence", None)
@@ -1165,8 +1141,20 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                                         strategy_name, symbol, sig.direction, entry,
                                     )
 
+                    else:
+                        _why = (f"unknown system {system!r} — expected "
+                                "perplexity/bollinger/scanner")
+                        logger.warning("[scheduler] Assigned %s → %s SKIPPED: %s",
+                                       strategy_name, symbol, _why)
+                        _persist_signal(symbol, "HOLD", f"{system}:{strategy_name}",
+                                        None, acted_on=False, reason=f"skipped: {_why}")
+
                 except Exception as exc:
                     logger.error("[scheduler] Assigned strategy %s on %s failed: %s", strategy_name, symbol, exc)
+                    # Leave a row even on hard failure so the assignment isn't
+                    # invisible on the Strategy page.
+                    _persist_signal(symbol, "HOLD", f"{system}:{strategy_name}", None,
+                                    acted_on=False, reason=f"error: {exc}")
 
             # ── 2. Run general pool (consensus) for non-assigned symbols ─
             votes: dict = defaultdict(lambda: defaultdict(list))
@@ -1289,6 +1277,17 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
             for symbol, direction, label, entry, stop, sig_system, sig_strategy in (
                 [] if dry_run else signals_to_act
             ):
+                # A signal may only turn into an order while ITS OWN exchange is
+                # open. The cycle itself runs whenever ANY session is open (US or
+                # NSE), so during the India session a US symbol reaches here on
+                # stale data at ~midnight ET — orders then reject or queue blind.
+                if not _symbol_market_open(symbol):
+                    logger.info(
+                        "[scheduler] %s %s (%s:%s): market closed for this symbol "
+                        "— deferring to its own session.",
+                        direction, symbol, sig_system, sig_strategy,
+                    )
+                    continue
                 # Resolve the exact assignment that fired this signal (a symbol may
                 # carry several). Falls back to the first symbol match only if the
                 # triple lookup misses (shouldn't happen).
@@ -1523,11 +1522,18 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                         f"{trail_pct:.1f}%" if trail_pct is not None else "ATR-adaptive",
                         asgn.get("tight_trail_pct"),
                     )
+                    # signal_at anchors the peak lookup to THIS cycle's signal.
+                    # Without it _peak_since_signal has no slice point and the
+                    # high-water mark degrades to "unknown" — never leave it
+                    # unset (the 2026-07-03 AMZN/ZM force-sells came from an
+                    # unanchored peak resolving to the 3-month high).
+                    from datetime import datetime as _dt, timezone as _tz
                     trail_ok = loop.run_until_complete(exec_svc.tighten_trail_on_sell(
                         symbol=symbol,
                         quantity=qty,
                         account_id=exec_acct,
                         signal_price=entry,
+                        signal_at=_dt.now(tz=_tz.utc),
                         trail_pct=trail_pct,
                         source="scheduler",
                         idempotency_suffix=str(int(entry * 100)),
@@ -1699,11 +1705,13 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                         c_broker,
                         (c_asgn or {}).get("tight_trail_pct"),
                     )
+                    from datetime import datetime as _dt, timezone as _tz
                     c_trail_ok = loop.run_until_complete(exec_svc.tighten_trail_on_sell(
                         symbol=symbol,
                         quantity=qty,
                         account_id=exec_acct,
                         signal_price=entry_p,
+                        signal_at=_dt.now(tz=_tz.utc),  # anchor peak to this cycle's signal
                         trail_pct=c_trail_pct,
                         source="scheduler",
                         idempotency_suffix=f"consensus-{symbol}",
@@ -1739,126 +1747,40 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                             pass
                     continue  # SELL done via trail — skip the generic block below
                 else:
+                    # ── Consensus BUY → REVIEW-ONLY (user decision 2026-07-06) ──
+                    # The consensus pool no longer places BUY orders. Qualifying
+                    # BUY proposals are persisted as signal rows and emitted to
+                    # the Notifications page's Consensus tab for manual review.
+                    # Order placement is owned exclusively by the auto-scheduler
+                    # (assigned strategies) and the day-trading autotrader.
+                    # Consensus SELLs (exits) above are unaffected.
                     entry_p = live_prices.get(symbol) or 0.0
-                    # Consensus is "all strategies agreed" but the per-symbol
-                    # cap is per-assignment. Reuse the matching assignment's
-                    # cap (if any) so a consensus BUY honours the same
-                    # max_capital_usd / max_shares the user set.
-                    c_asgn = next((a for a in assignments if a["symbol"] == symbol), None)
-                    c_cap = c_asgn.get("max_capital_usd") if c_asgn else None
-                    c_shares = c_asgn.get("max_shares") if c_asgn else None
-                    c_held = current_positions.get(symbol, 0.0)
-                    qty = (
-                        _compute_quantity(
-                            symbol, entry_p, None, c_cap, c_shares,
-                            held_qty=c_held,
-                        )
-                        if entry_p > 0
-                        else _quantize_for_broker(1.0)
-                    )
-                    if qty <= 0:
-                        logger.info(
-                            "[scheduler] Consensus BUY %s skipped — at/over cap "
-                            "(held=%.4f, cap=%s, shares=%s).",
-                            symbol, c_held, c_cap, c_shares,
-                        )
-                        continue
-                    # Same regime open-position cap as the assigned path. Only
-                    # blocks a BUY that opens a new symbol; existing holdings exempt.
-                    held = current_positions.get(symbol, 0.0)
-                    if max_open_positions is not None and held <= 0:
-                        open_count = sum(1 for q in current_positions.values() if q > 0)
-                        if open_count >= max_open_positions:
-                            logger.info(
-                                "[scheduler] Consensus BUY %s skipped — at regime position cap "
-                                "(%d/%d open).",
-                                symbol, open_count, max_open_positions,
-                            )
-                            continue
-                    # Tape-health gate + re-entry cooldown (mirrors the assigned
-                    # BUY path; runs before the cash gate so a veto frees budget).
                     _c_label = "consensus:" + "+".join(agreeing) if agreeing else "consensus"
+                    # Tape verdict included for reviewer context only — no veto,
+                    # no cash spend, no order.
                     _c_tape_verdict: dict = {}
-                    _tape_reason = _tape_gate_blocks(symbol, _c_label, _c_tape_verdict)
-                    if _tape_reason:
-                        logger.info(
-                            "[scheduler] Consensus BUY %s vetoed by tape gate — %s",
-                            symbol, _tape_reason,
+                    try:
+                        _tape_gate_blocks(symbol, _c_label, _c_tape_verdict)
+                    except Exception:
+                        pass
+                    _persist_signal(symbol, direction, _c_label, entry_p or None,
+                                    acted_on=False,
+                                    reason="consensus BUY — review-only, no order placed")
+                    logger.info(
+                        "[scheduler] Consensus BUY %s (%d agree) — review-only "
+                        "proposal notified; no order placed.",
+                        symbol, len(agreeing),
+                    )
+                    try:
+                        from app.services.notifications.bus import notify_consensus_proposal
+                        notify_consensus_proposal(
+                            symbol=symbol, direction=direction,
+                            strategies=list(agreeing),
+                            price=entry_p or None,
+                            extra=_c_tape_verdict.get("verdict"),
                         )
-                        _notify_suppress(
-                            symbol=symbol, direction="BUY", reason="tape_health",
-                            detail=f"{_c_label} — knife veto: {_tape_reason}",
-                        )
-                        continue
-                    _cd_reason = _in_reentry_cooldown(symbol, _c_label)
-                    if _cd_reason:
-                        logger.info(
-                            "[scheduler] Consensus BUY %s skipped — %s", symbol, _cd_reason,
-                        )
-                        _notify_suppress(
-                            symbol=symbol, direction="BUY", reason="reentry_cooldown",
-                            detail=f"{_c_label} — {_cd_reason}",
-                        )
-                        continue
-                    # Cash gate (mirrors the assigned BUY path): clamp to what the
-                    # broker balance can afford and skip if it can't fund 1 share.
-                    c_broker = (c_asgn.get("broker") if c_asgn else "default") or "default"
-                    if c_broker == "default":
-                        try:
-                            from app.services.markets import is_india_symbol
-                            if is_india_symbol(symbol):
-                                c_broker = "zerodha"
-                        except Exception:
-                            pass
-                    budget = _cash_budget(c_broker)
-                    if budget != float("inf") and entry_p > 0:
-                        affordable = _quantize_for_broker(budget / entry_p)
-                        if affordable < qty:
-                            logger.info(
-                                "[scheduler] Consensus BUY %s: cash-limited %.4f -> "
-                                "%.4f sh (cash $%.2f @ $%.2f).",
-                                symbol, qty, affordable, budget, entry_p,
-                            )
-                            qty = affordable
-                        if qty <= 0:
-                            logger.info(
-                                "[scheduler] Consensus BUY %s skipped — insufficient "
-                                "cash ($%.2f, need >= $%.2f).",
-                                symbol, budget, entry_p,
-                            )
-                            _notify_suppress(
-                                symbol=symbol, direction="BUY", reason="insufficient_cash",
-                                detail=(f"Consensus BUY — ${budget:,.2f} cash, "
-                                        f"need ${entry_p:,.2f}/share ({c_broker})."),
-                            )
-                            continue
-                        _spend_cash(c_broker, qty * entry_p)
-                order_req = OrderRequest(
-                    symbol=symbol,
-                    side=direction,  # type: ignore[arg-type]
-                    order_type="MARKET",
-                    quantity=qty,
-                    source="scheduler",
-                )
-                # Strategy name is the consensus group — prefix + agreeing list
-                # so Recent Fills tells you which strategies voted to enter.
-                consensus_label = "consensus:" + "+".join(agreeing) if agreeing else "consensus"
-                sig_id = _persist_signal(symbol, direction, consensus_label, entry_p or None)
-                try:
-                    from app.services.notifications.bus import notify_signal
-                    notify_signal(symbol=symbol, direction=direction, strategy=consensus_label,
-                                  source="scheduler", price=entry_p or None,
-                                  extra=(_c_tape_verdict.get("verdict")
-                                         if direction == "BUY" else None),
-                                  gated=False)  # consensus may trade unassigned symbols
-                except Exception:
-                    pass
-                loop.run_until_complete(svc.execute(
-                    order_req,
-                    account_id=account_id,
-                    signal_id=sig_id,
-                    estimated_price=entry_p or None,
-                ))
+                    except Exception:
+                        pass
 
             # ── Safety net: arm trails for held positions that got a SELL
             # signal but have no resting protective stop (failed prior cycle,
@@ -1872,9 +1794,10 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                     )
                 except Exception as exc:
                     logger.warning("[scheduler] Trail reconcile pass failed: %s", exc)
-                # Time-stop: stale losing positions get a tight exit trail so
-                # dead money recycles instead of drifting for weeks.
-                _time_stop_pass(loop, current_positions, live_prices, assignments, _svc_for)
+                # NOTE: the portfolio-level time-stop (_time_stop_pass, exit
+                # stale losing positions after N days) was REMOVED 2026-07-06
+                # at the user's request — losing swings are given time to
+                # recover; exits are owned by strategy signals and trails only.
         finally:
             loop.close()
 
@@ -2075,6 +1998,35 @@ def _has_india_assignments() -> bool:
     except Exception as exc:
         logger.debug("[scheduler] _has_india_assignments check failed: %s", exc)
     return False
+
+
+def _symbol_market_open(symbol: str) -> bool:
+    """True when THIS symbol's own exchange session is open.
+
+    _any_market_open() gates the jobs, but it answers "is ANY session we trade
+    open" — with India assignments enabled the whole scheduler runs during the
+    NSE session, i.e. ~11:45 PM ET, and every US symbol gets evaluated on stale
+    quotes. That is how AMZN/ZM got MARKET sell orders at 03:53 UTC (rejected
+    by Schwab, positions left naked). Per-symbol actions must gate on the
+    symbol's own market, not the union.
+
+    Fail-open to the US session on any classification error so a lookup blip
+    can't freeze US trading.
+    """
+    settings = get_settings()
+    try:
+        from app.services.markets import is_india_symbol
+        if is_india_symbol(symbol):
+            return is_market_hours(
+                settings.india_market_open, settings.india_market_close,
+                settings.india_tz,
+            )
+    except Exception as exc:
+        logger.debug("[scheduler] _symbol_market_open(%s) classify failed: %s",
+                     symbol, exc)
+    return is_market_hours(
+        settings.trading_start_time, settings.trading_end_time, settings.tz
+    )
 
 
 def _any_market_open() -> bool:
