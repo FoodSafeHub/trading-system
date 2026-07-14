@@ -765,6 +765,11 @@ def rule_pullback_ema50(
     exit_rsi     = params.get("exit_rsi", 72)
     ext_pct      = params.get("exit_extension_pct", 3.0)
     bear_skip    = params.get("bear_skip_threshold_pct", 10.0)
+    # 4.0 chosen by a 12-symbol/2y sensitivity sweep: 3% whipsawed ordinary
+    # pullbacks-through-EMA (expectancy +1.64 → +0.96%/trade), 5% never fired
+    # before the 8% disaster stop; 4% keeps +1.39%/trade and still gives a
+    # failed entry its exit signal well before the wide protective trail.
+    trend_fail   = params.get("trend_fail_below_ema_pct", 4.0)
 
     if len(prices) < ema_period + slope_bars + 10:
         return StrategySignal(symbol=symbol, direction="HOLD",
@@ -803,7 +808,15 @@ def rule_pullback_ema50(
     ema_rising = e_now > e_old
 
     direction = "HOLD"
+    # Both upside exits (profit-take) AND a trend-fail downside exit. The rule
+    # previously had NO way to say SELL on a collapsing price: RSI sits low and
+    # the extension is negative, so a failed pullback rode the wide protective
+    # trail all the way down (GNTX −6.1%, HLT −3.2% in July 2026). A close more
+    # than trend_fail% BELOW the EMA50 means the "pullback to support" thesis is
+    # dead — exit and let the tight-trail machinery anchor on this signal.
     if rsi_v > exit_rsi or ext_now > ext_pct:
+        direction = "SELL"
+    elif trend_fail > 0 and ext_now < -trend_fail:
         direction = "SELL"
     elif (spy_pct_below <= bear_skip and ema_rising
           and dist_pct <= prox_pct and rsi_min <= rsi_v <= rsi_max and wick_ok):
@@ -815,6 +828,7 @@ def rule_pullback_ema50(
         indicators={
             "ema50": round(e_now, 2), "ema_rising": ema_rising,
             "dist_pct": round(dist_pct, 2), "rsi": round(rsi_v, 1),
+            "ext_pct": round(ext_now, 2),
             "spy_pct_below_sma200": round(spy_pct_below, 2),
         },
         strategy_name="pullback_ema50",

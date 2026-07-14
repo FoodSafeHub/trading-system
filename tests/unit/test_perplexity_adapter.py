@@ -7,8 +7,11 @@ from app.services.strategy.models import StrategySignal
 
 def test_default_off_returns_bespoke_list():
     # No flag flip -> the exact bespoke module list (byte-identical behaviour).
+    # The list grew from 12 with the India swing/advanced additions — assert
+    # identity and a floor rather than pinning the exact count, so adding a
+    # bespoke strategy doesn't break an unrelated adapter test.
     assert runner.get_perplexity_strategies() is runner.PERPLEXITY_STRATEGIES
-    assert len(runner.PERPLEXITY_STRATEGIES) == 12
+    assert len(runner.PERPLEXITY_STRATEGIES) >= 12
 
 
 def test_flag_on_returns_rule_backed_adapters(monkeypatch):

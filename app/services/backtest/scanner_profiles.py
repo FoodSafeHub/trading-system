@@ -255,6 +255,9 @@ _PARAM_GRIDS: Dict[str, Dict[str, list]] = {
         "rsi_max":                 [50, 55, 60],
         "wick_ratio_min":          [0.3, 0.4, 0.5, 0.6],
         "exit_extension_pct":      [2.0, 3.0, 4.0, 5.0],
+        # Downside trend-fail exit (0 = off). Per-symbol: high-beta names may
+        # want 5%, sleepy dividend names 3%.
+        "trend_fail_below_ema_pct": [0.0, 3.0, 4.0, 5.0],
     },
     # VIX-spike reversal. ATR spike + RSI ceiling + wick were tuned; added how
     # DEEP into the lower band the panic must reach (bb_pos_max) and how much

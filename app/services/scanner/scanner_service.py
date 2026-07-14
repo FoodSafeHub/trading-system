@@ -516,21 +516,25 @@ def _make_generic_configs(symbol: str):
             symbol=symbol,
             type="rsi2_mean_reversion",
             enabled=True,
+            # max_hold_bars is enforced by the backtest engine's time-stop (and
+            # mirrors the live scheduler's hold-time stop). hard_stop_pct /
+            # take_profit_pct were removed: nothing read them — the engine's
+            # stop_loss_pct (default 8%) is the actual disaster stop.
             params=_p("rsi2_mean_reversion",
                     {"rsi_period": 2, "rsi_entry_threshold": 10, "rsi_exit_threshold": 70,
-                    "sma_trend": 200, "exit_sma": 5, "hard_stop_pct": 5.0,
-                    "take_profit_pct": 8.0, "max_hold_bars": 10, "atr_skip_threshold": 5.0}),
+                    "sma_trend": 200, "exit_sma": 5,
+                    "max_hold_bars": 10, "atr_skip_threshold": 5.0}),
         ),
         StrategyConfig(
             name=f"{symbol}_EMA_MACD_Crossover",
             symbol=symbol,
             type="ema_macd_crossover",
             enabled=True,
+            # atr_stop/tp multipliers removed — the rule never read them.
             params=_p("ema_macd_crossover",
                     {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26,
                     "macd_signal": 9, "rsi_period": 14, "rsi_min": 45, "rsi_max": 65,
-                    "vol_ratio_min": 1.1, "atr_stop_multiplier": 1.5,
-                    "atr_tp_multiplier": 2.0, "max_hold_bars": 20}),
+                    "vol_ratio_min": 1.1, "max_hold_bars": 20}),
         ),
         StrategyConfig(
             name=f"{symbol}_BB_Squeeze_Breakout",
@@ -547,10 +551,22 @@ def _make_generic_configs(symbol: str):
             symbol=symbol,
             type="pullback_ema50",
             enabled=True,
+            # trend_fail_below_ema_pct: NEW downside exit — a close >4% below the
+            # EMA50 kills the pullback thesis (rule previously could never SELL
+            # into weakness; failed entries rode the wide trail down). 4.0 per
+            # the 12-symbol sensitivity sweep in rules.py.
+            #
+            # proximity 2.0 / rsi_max 50 / wick 0.5 (was 1.0/55/0.4): the
+            # 2026-07-13 walk-forward validation picked this exact combo on
+            # BOTH 18-month in-sample folds and it beat the old defaults in
+            # BOTH out-of-sample halves (+2.12 vs +1.80 and +2.42 vs +1.48
+            # %/trade) — fewer, higher-quality entries, which also suits the
+            # cash-clamped account. Per-symbol calibrations still override.
             params=_p("pullback_ema50",
-                    {"ema_trend": 50, "ema_slope_bars": 5, "price_ema_proximity_pct": 1.0,
-                    "rsi_period": 14, "rsi_min": 35, "rsi_max": 55, "wick_ratio_min": 0.4,
-                    "exit_rsi": 65, "exit_extension_pct": 3.0, "hard_stop_pct": 2.0,
+                    {"ema_trend": 50, "ema_slope_bars": 5, "price_ema_proximity_pct": 2.0,
+                    "rsi_period": 14, "rsi_min": 35, "rsi_max": 50, "wick_ratio_min": 0.5,
+                    "exit_rsi": 65, "exit_extension_pct": 3.0,
+                    "trend_fail_below_ema_pct": 4.0,
                     "max_hold_bars": 20, "bear_skip_threshold_pct": 10.0}),
         ),
         StrategyConfig(

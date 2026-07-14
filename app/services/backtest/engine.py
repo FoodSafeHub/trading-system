@@ -177,6 +177,37 @@ def run_backtest(
                 prev_equity = equity
                 continue
 
+        # ── Time-stop: a thesis that hasn't worked in max_hold_bars is failed ──
+        # Mirrors the live scheduler's hold-time stop and makes the calibration
+        # grids' max_hold_bars axis REAL (it was previously read by nothing —
+        # the grid search was optimizing a no-op parameter). 0/absent = off.
+        _max_hold = int(params.get("max_hold_bars", 0) or 0)
+        if position > 0 and _max_hold > 0 and bars_held >= _max_hold:
+            sell_px = fill_price if cost_model is None else cost_model.apply_sell(fill_price)
+            proceeds = sell_px * position
+            commission = 0.0 if cost_model is None else cost_model.exit_commission(position, proceeds)
+            capital += proceeds - commission
+            trades.append(BacktestTrade(
+                date=today, symbol=symbol, side="SELL",
+                price=sell_px, quantity=position, value=proceeds,
+                signal_from=f"{strategy_name}:time_stop_{_max_hold}bars",
+            ))
+            position = 0.0
+            position_cost = 0.0
+            entry_price = 0.0
+            highest_close = 0.0
+            bars_held = 0
+            _in_tight_trail = False; _trail_high = 0.0; _trail_stop = 0.0; _signal_price = 0.0
+            equity = capital
+            equity_curve.append({"date": today, "equity": round(equity, 2)})
+            peak_equity = max(peak_equity, equity)
+            dd = (peak_equity - equity) / peak_equity * 100
+            max_drawdown = max(max_drawdown, dd)
+            ret = (equity - prev_equity) / prev_equity if prev_equity > 0 else 0
+            daily_returns.append(ret)
+            prev_equity = equity
+            continue
+
         # ── Approach C: tight trail active — check stop before strategy eval ──
         if _approach_c and _in_tight_trail and position > 0:
             bar_high = float(df["High"].iloc[i]) if "High" in df.columns else current_close
