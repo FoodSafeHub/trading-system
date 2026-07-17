@@ -208,6 +208,47 @@ def _pick_us_broker_by_cash(cash_budget) -> str:
     return best_name
 
 
+def _red_hold_blocks(
+    symbol: str, current_price: float,
+    signal_id=None, signal_price=None,
+) -> bool:
+    """SELL gate for the market-exit branches (Approach C off): True when the
+    position is RED and bot-managed red-hold applies — the caller must skip
+    the exit and leave the signal un-acted so it stays eligible for retry.
+    Fail-open (False) on any error: a gate blip must not block an exit.
+    """
+    try:
+        from app.services.execution.managed_exit_engine import red_hold_check
+        with SessionLocal() as db:
+            return red_hold_check(
+                db, symbol, current_price,
+                signal_id=signal_id, signal_price=signal_price,
+            )
+    except Exception as exc:
+        logger.warning("[scheduler] red-hold check failed for %s: %s", symbol, exc)
+        return False
+
+
+def _in_red_hold(symbol: str) -> bool:
+    """True when managed_exit_state currently red-holds this symbol.
+
+    tighten_trail_on_sell returns True for a red-hold (handled, no order
+    needed) — callers use this to tell that apart from a real trail arm, so
+    they don't mark the signal acted_on or send an "armed" notification.
+    """
+    try:
+        from app.models.managed_exit_state import MODE_RED_HOLD, ManagedExitState
+        with SessionLocal() as db:
+            st = (
+                db.query(ManagedExitState)
+                .filter(ManagedExitState.symbol == symbol.upper())
+                .one_or_none()
+            )
+            return bool(st and st.mode == MODE_RED_HOLD)
+    except Exception:
+        return False
+
+
 def _reconcile_trail_stops(
     loop, broker, account_id: str,
     current_positions: dict[str, float],
@@ -299,7 +340,14 @@ def _reconcile_trail_stops(
                     idempotency_suffix=f"reconcile-{symbol}-{int(sig_price * 100)}",
                     signal_id=sig.id,
                 ))
-                if ok and not sig.acted_on:
+                if ok and not sig.acted_on and _in_red_hold(symbol):
+                    # Red-held: no trail armed. Leave acted_on False — this
+                    # retry loop is exactly how the SELL resumes once green.
+                    logger.info(
+                        "[scheduler] Trail reconcile: %s red-hold active — "
+                        "signal left eligible for green-flip retry.", symbol,
+                    )
+                elif ok and not sig.acted_on:
                     sig.acted_on = True
                     db.commit()
                     # First time this assigned-symbol SELL armed a trail — emit a
@@ -415,7 +463,12 @@ def reconcile_trails_now() -> dict:
             current_positions, assignments, live_prices, _svc_for,
         )
         n_held = sum(1 for q in current_positions.values() if q and q >= 1.0)
-        return {"status": "ok", "held_positions": n_held}
+        # positions/prices are passed through so the fast-trail job can feed
+        # the managed-exit engine without a second broker round-trip.
+        return {
+            "status": "ok", "held_positions": n_held,
+            "positions": current_positions, "prices": live_prices,
+        }
     except Exception as exc:
         logger.error("[scheduler] reconcile_trails_now failed: %s", exc, exc_info=True)
         return {"status": "error", "error": str(exc)}
@@ -1473,6 +1526,16 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                     # a SELL signal sells at market immediately — no trailing
                     # stop is armed.
                     if asgn.get("approach_c_enabled") is False:
+                        # Red-hold gate: a SELL on a red position is held for
+                        # manual review, not sold. Signal stays un-acted so the
+                        # reconcile loop re-evaluates it after the green flip.
+                        if _red_hold_blocks(symbol, entry,
+                                            signal_price=entry):
+                            logger.info(
+                                "[scheduler] SELL %s: position RED — red-hold, "
+                                "market exit skipped (manual review).", symbol,
+                            )
+                            continue
                         exec_svc, exec_acct = _svc_for(asgn_broker)
                         sig_id = _mark_signal_acted_on(symbol, direction, label)
                         logger.info(
@@ -1539,7 +1602,17 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                         idempotency_suffix=str(int(entry * 100)),
                         signal_id=sig_id,
                     ))
-                    if trail_ok:
+                    if trail_ok and _in_red_hold(symbol):
+                        # tighten_trail_on_sell red-held the SELL (position is
+                        # below cost): no order, its own one-time notification.
+                        # Leave the signal un-acted so the retry loop IS the
+                        # green-flip path.
+                        logger.info(
+                            "[scheduler] SELL %s: red-hold active — trail not "
+                            "armed, signal left eligible for green-flip retry.",
+                            symbol,
+                        )
+                    elif trail_ok:
                         _mark_signal_acted_on(symbol, direction, label)
                         try:
                             from app.services.notifications.bus import notify_signal
@@ -1667,6 +1740,15 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                     # Approach C OFF (only when a matching assignment explicitly
                     # opted out) → market exit instead of a tight trail.
                     if c_asgn is not None and c_asgn.get("approach_c_enabled") is False:
+                        # Red-hold gate mirrors the assigned market-exit branch.
+                        if _red_hold_blocks(symbol, entry_p,
+                                            signal_price=entry_p or None):
+                            logger.info(
+                                "[scheduler] Consensus SELL %s: position RED — "
+                                "red-hold, market exit skipped (manual review).",
+                                symbol,
+                            )
+                            continue
                         sig_id = _persist_signal(symbol, direction, consensus_label, entry_p or None)
                         exec_svc, exec_acct = _svc_for(c_broker)
                         logger.info(
@@ -1728,6 +1810,13 @@ def _run_cycle(*, force: bool = False, dry_run: bool = False,
                             detail=(f"Consensus SELL trail FAILED to arm ({qty:.2f} sh) — "
                                     f"position UNPROTECTED; reconcile will retry."),
                             toast=True,
+                        )
+                    elif _in_red_hold(symbol):
+                        # Red-held inside tighten_trail_on_sell — no trail, its
+                        # own one-time notification; don't claim "armed".
+                        logger.info(
+                            "[scheduler] Consensus SELL %s: red-hold active — "
+                            "no trail armed (manual review).", symbol,
                         )
                     else:
                         try:
@@ -1828,10 +1917,38 @@ def _run_fast_trail_job() -> None:
     """
     if not _any_market_open():
         return
+    summary: dict = {}
     try:
-        reconcile_trails_now()
+        summary = reconcile_trails_now()
     except Exception as exc:
         logger.error("[scheduler] Fast trail job failed: %s", exc)
+    # Managed-exit engine pass (red-hold green flips, drawdown alerts,
+    # heartbeat) — reuses the positions/quotes reconcile just fetched.
+    try:
+        from app.services.execution.managed_exit_engine import (
+            managed_mode_active, run_once,
+        )
+        if managed_mode_active():
+            run_once(summary.get("positions"), summary.get("prices"))
+    except Exception as exc:
+        logger.error("[scheduler] Managed-exit engine pass failed: %s", exc)
+
+
+def _run_analyst_ratings_job() -> None:
+    """Refresh the analyst-ratings cache (holdings ∪ assigned symbols).
+
+    Fully wrapped — a yfinance outage must never take the scheduler down.
+    """
+    settings = get_settings()
+    if not settings.analyst_ratings_refresh_enabled:
+        return
+    try:
+        from app.services.research.analyst_ratings import refresh_all
+        with SessionLocal() as db:
+            out = refresh_all(db)
+        logger.info("[scheduler] Analyst ratings refresh: %s", out)
+    except Exception as exc:
+        logger.error("[scheduler] Analyst ratings refresh failed: %s", exc)
 
 
 _INVARIANT_INTERVAL_SECONDS = 30 * 60   # 30 min — independent watchdog
@@ -2332,6 +2449,19 @@ def start_scheduler() -> None:
         ),
         id="invariant_check",
         name="Position/Ledger Invariant Watchdog",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    # ── Analyst ratings cache refresh (yfinance; slow-moving data) ──
+    _scheduler.add_job(
+        _run_analyst_ratings_job,
+        trigger=IntervalTrigger(
+            seconds=max(1, settings.analyst_ratings_refresh_hours) * 3600,
+            start_date=now + timedelta(minutes=10),  # after the sync/watchdog jobs
+        ),
+        id="analyst_ratings_refresh",
+        name="Analyst Ratings Refresh",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

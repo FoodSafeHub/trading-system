@@ -116,6 +116,25 @@ async def list_broker_orders(account_id: str = ""):
     ]
 
 
+@router.post("/managed-exits/migrate")
+def migrate_managed_exits(dry_run: bool = True):
+    """One-time rollout: cancel bot-placed resting protective orders at the
+    default (Schwab) broker and switch those positions to bot-managed
+    monitoring. dry_run=true (default) only lists the candidates.
+
+    Sync handler on purpose — the migration builds its own event loop
+    (FastAPI runs sync routes in a threadpool, so that's safe).
+    """
+    from app.services.execution.managed_exit_engine import (
+        migrate_from_resting_stops,
+    )
+    try:
+        return migrate_from_resting_stops(dry_run=dry_run)
+    except RuntimeError as exc:
+        # Flag off — refuse rather than silently no-op.
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
 @router.get("/{order_id}", response_model=OrderOut)
 def get_order(order_id: int, db: Session = Depends(get_db)):
     order = db.query(Order).filter_by(id=order_id).first()

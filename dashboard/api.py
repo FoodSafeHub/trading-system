@@ -695,6 +695,25 @@ def pnl_open_trails():
     return _get("/pnl/open-trails", timeout=30)
 
 
+# ── Analyst ratings (Wall-Street consensus for holdings + assignments) ──────
+
+def ratings_list():
+    return _get("/ratings", timeout=30)
+
+
+def ratings_recompute(symbols: list[str] | None = None):
+    """Refresh the ratings cache from yfinance (full universe when None).
+    Slow — one yfinance round-trip per symbol."""
+    return _post("/ratings/recompute", json={"symbols": symbols or []}, timeout=600)
+
+
+def migrate_managed_exits(dry_run: bool = True):
+    """Cancel bot-placed resting protective stops and switch to bot-managed
+    monitoring (managed-exits rollout). dry_run lists candidates only."""
+    return _post("/orders/managed-exits/migrate",
+                 params={"dry_run": str(dry_run).lower()}, timeout=120)
+
+
 # ── Recommendations (best historically-ranked strategy per symbol) ─────────
 
 def recommendations_list():

@@ -141,7 +141,22 @@ def check_invariants(notify: bool = True) -> dict:
 
         naked: list[str] = []
         drift: list[dict] = []
+        stale_monitoring: list[str] = []
+        unexpected_stops: list[str] = []
+        engine_stale = False
         checked = 0
+
+        # Bot-managed exits invert invariant 1 for US symbols: protection is
+        # the 60s engine's fresh eval (a resting stop would be sweep risk).
+        try:
+            from app.services.execution.managed_exit_engine import (
+                is_managed_symbol as _managed_sym,
+                managed_mode_active as _managed_active,
+            )
+            managed_active = _managed_active()
+        except Exception:
+            managed_active = False
+            _managed_sym = lambda _s: False  # noqa: E731
 
         with SessionLocal() as db:
             for sym in sorted(assigned_syms):
@@ -151,7 +166,18 @@ def check_invariants(notify: bool = True) -> dict:
                 checked += 1
 
                 # 1. Protection
-                if sym not in protected:
+                if managed_active and _managed_sym(sym):
+                    # COVERAGE: the engine must have evaluated this position
+                    # recently while its market is open — else it's effectively
+                    # unmonitored (the managed-mode equivalent of naked).
+                    if _market_open(sym) and not _monitoring_fresh(db, sym):
+                        stale_monitoring.append(sym)
+                    # INVERSION: any resting protective order IS the sweep risk
+                    # managed mode exists to remove (pre-migration leftover or
+                    # a manual stop) — surface it for cancellation.
+                    if sym in protected:
+                        unexpected_stops.append(sym)
+                elif sym not in protected:
                     naked.append(sym)
 
                 # 2. Ledger drift — sum StrategyPosition rows for this symbol.
@@ -162,19 +188,43 @@ def check_invariants(notify: bool = True) -> dict:
                 if abs(ledger_sum - held) > _DRIFT_TOL:
                     drift.append({"symbol": sym, "ledger": ledger_sum, "broker": held})
 
+        # HEARTBEAT: the engine itself must be alive during market hours —
+        # with no resting stops, a dead 60s loop means nothing protects any
+        # position (the gap risk the user accepted, surfaced loudly).
+        if managed_active and _market_open("SPY"):
+            try:
+                from app.config import get_settings
+                from app.services.execution.managed_exit_engine import (
+                    heartbeat_age_seconds,
+                )
+                with SessionLocal() as db:
+                    age = heartbeat_age_seconds(db)
+                stale_after = get_settings().managed_exit_stale_after_seconds
+                engine_stale = age is None or age > stale_after
+            except Exception as exc:
+                logger.warning("[invariants] heartbeat check failed: %s", exc)
+
         if notify:
-            _emit(naked, drift)
+            _emit(naked, drift, stale_monitoring, unexpected_stops, engine_stale)
 
         summary = {
             "status": "ok",
             "checked": checked,
             "naked": naked,
             "drift": drift,
-            "violations": len(naked) + len(drift),
+            "stale_monitoring": stale_monitoring,
+            "unexpected_stops": unexpected_stops,
+            "engine_stale": engine_stale,
+            "violations": (
+                len(naked) + len(drift) + len(stale_monitoring)
+                + len(unexpected_stops) + (1 if engine_stale else 0)
+            ),
         }
         logger.info(
-            "[invariants] checked=%d naked=%s drift=%d",
-            checked, naked, len(drift),
+            "[invariants] checked=%d naked=%s drift=%d stale_mon=%s "
+            "unexpected_stops=%s engine_stale=%s",
+            checked, naked, len(drift), stale_monitoring,
+            unexpected_stops, engine_stale,
         )
         return summary
     except Exception as exc:
@@ -184,12 +234,82 @@ def check_invariants(notify: bool = True) -> dict:
         loop.close()
 
 
-def _emit(naked: list[str], drift: list[dict]) -> None:
+def _market_open(symbol: str) -> bool:
+    """This symbol's own session open? Fail-open (True) so a lookup blip can't
+    suppress a real staleness alert during trading hours."""
+    try:
+        from app.services.strategy.scheduler import _symbol_market_open
+        return _symbol_market_open(symbol)
+    except Exception:
+        return True
+
+
+def _monitoring_fresh(db, symbol: str) -> bool:
+    """True when the managed-exit engine evaluated this symbol recently."""
+    from datetime import datetime, timezone
+
+    from app.config import get_settings
+    from app.models.managed_exit_state import ManagedExitState
+
+    st = (
+        db.query(ManagedExitState)
+        .filter(ManagedExitState.symbol == symbol.upper())
+        .one_or_none()
+    )
+    if st is None or st.last_eval_at is None:
+        return False
+    last = st.last_eval_at
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - last).total_seconds()
+    return age <= get_settings().managed_exit_stale_after_seconds
+
+
+def _emit(
+    naked: list[str],
+    drift: list[dict],
+    stale_monitoring: list[str] | None = None,
+    unexpected_stops: list[str] | None = None,
+    engine_stale: bool = False,
+) -> None:
     """Best-effort notifications for the violations found."""
     try:
         from app.services.notifications.bus import notify_suppression
     except Exception:
         return
+    for sym in stale_monitoring or []:
+        try:
+            notify_suppression(
+                symbol=sym, direction="SELL", reason="monitoring_stale",
+                detail=(f"{sym} is held under bot-managed exits but the 60s "
+                        f"engine hasn't evaluated it recently — position is "
+                        f"effectively unmonitored (no resting stop by design)."),
+                source="invariants", toast=True,
+            )
+        except Exception:
+            pass
+    for sym in unexpected_stops or []:
+        try:
+            notify_suppression(
+                symbol=sym, direction="SELL", reason="unexpected_resting_stop",
+                detail=(f"{sym} has a resting protective order but bot-managed "
+                        f"exits expect NONE (sweep risk). The next trail pass "
+                        f"cancels bot-placed ones; cancel manual stops yourself."),
+                source="invariants", toast=True,
+            )
+        except Exception:
+            pass
+    if engine_stale:
+        try:
+            notify_suppression(
+                symbol="", direction=None, reason="managed_exits_engine_stale",
+                detail=("Managed-exit engine heartbeat is STALE during market "
+                        "hours — NO position is being monitored and no stops "
+                        "rest at the broker. Check the scheduler/bot host."),
+                source="invariants", toast=True,
+            )
+        except Exception:
+            pass
     for sym in naked:
         try:
             notify_suppression(

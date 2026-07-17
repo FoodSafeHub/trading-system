@@ -154,6 +154,28 @@ class Settings(BaseSettings):
     trailing_stop_enabled: bool = True
     trail_stop_pct: float = 5.0        # % trail — broker native trailing stop
 
+    # ── Bot-managed exits (no resting broker stops) ──────────
+    # When True, US/Schwab swing positions keep NO protective order resting at
+    # the broker — resting stops are what fear-selloff sweeps trigger. The 60s
+    # fast-trail loop owns the exit instead: it tracks the software trail level
+    # in managed_exit_state and market-sells only when the bot's own exit logic
+    # triggers. India (Zerodha static STOP + Chandelier) and the day-trading
+    # autotrader are unaffected.
+    schwab_managed_exits_enabled: bool = False
+    # When a SELL signal fires while the position is RED (below FIFO cost),
+    # hold instead of selling: notify once for manual review, resume the normal
+    # exit path automatically when the position turns green.
+    red_hold_enabled: bool = True
+    # Alert-only safety net: escalating notifications at these drawdown levels
+    # (% vs FIFO cost, comma-separated, negative). No forced exits.
+    managed_exit_drawdown_alert_levels: str = "-8,-12,-20"
+    # A fired level re-arms only after price recovers this many pct points
+    # above it — hysteresis so oscillation around a threshold can't spam.
+    managed_exit_alert_rearm_pct: float = 2.0
+    # Watchdog: managed-exit monitoring considered stale after this many
+    # seconds without an eval during market hours.
+    managed_exit_stale_after_seconds: int = 300
+
     # ── Phase 0 strategy-refactor scaffolding (inert until later phases) ──────
     # Declared default-OFF now so the Phase 1/2 wiring has switches ready. NOTHING
     # reads these in Phase 0 — the backtest engine takes a cost_model OBJECT (not
@@ -176,6 +198,13 @@ class Settings(BaseSettings):
     # Both can be enabled at the same time.
     scheduler_run_bollinger: bool = True    # run Bollinger strategies from strategies.json
     scheduler_run_perplexity: bool = True   # run the 5 Perplexity swing strategies
+
+    # ── Analyst ratings refresh ──────────────────────────────
+    # Periodic yfinance refresh of the analyst_ratings cache (holdings ∪
+    # assigned symbols) for the dashboard's Analyst Ratings page. Analyst data
+    # changes slowly — twice a day is plenty; the page has a manual Refresh too.
+    analyst_ratings_refresh_enabled: bool = True
+    analyst_ratings_refresh_hours: int = 12
 
     # ── Position sizing ──────────────────────────────────────
     # Risk a fixed % of account per trade, sized by stop distance.

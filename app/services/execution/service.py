@@ -34,6 +34,36 @@ class ExecutionService:
     def __init__(self, broker: BrokerBase) -> None:
         self.broker = broker
 
+    def _managed_mode(self, symbol: str) -> bool:
+        """True when this symbol's exits are bot-managed: NO protective order
+        may rest at the broker (a resting stop is what fear-selloff sweeps
+        trigger); the 60s managed-exit engine + the trail-hit branch of
+        tighten_trail_on_sell own the exit instead. US swing path only —
+        Zerodha/India keeps its static-STOP + Chandelier path.
+        """
+        if "zerodha" in (getattr(self.broker, "name", "") or "").lower():
+            return False
+        try:
+            from app.services.execution.managed_exit_engine import is_managed_symbol
+            return is_managed_symbol(symbol)
+        except Exception as exc:
+            logger.debug("[exec] _managed_mode(%s) check failed: %s", symbol, exc)
+            return False
+
+    def _persist_managed_state(self, symbol: str, **fields) -> None:
+        """Best-effort managed_exit_state upsert — must never raise into the
+        order/trail path (losing an update only delays the next 60s pass)."""
+        if not self._managed_mode(symbol):
+            return
+        try:
+            from app.services.execution.managed_exit_engine import upsert_state
+            with SessionLocal() as db:
+                upsert_state(db, symbol, **fields)
+                db.commit()
+        except Exception as exc:
+            logger.warning("[exec] managed-exit state persist failed for %s: %s",
+                           symbol, exc)
+
     def _quantize_qty(self, shares: float) -> float:
         """Round a share count DOWN to a quantity this broker will accept.
 
@@ -286,6 +316,31 @@ class ExecutionService:
         No-op unless auto_protective_stop_enabled=True.
         Skipped for paper broker (STOP fills at market on submit).
         """
+        # ── Bot-managed exits: never rest a protective order at the broker ──
+        # A resting stop is exactly what a fear-selloff sweep triggers. The 60s
+        # managed-exit engine monitors this position instead (software trail +
+        # drawdown alerts); record that monitoring has started and stop here.
+        if self._managed_mode(buy_req.symbol):
+            self._persist_managed_state(
+                buy_req.symbol,
+                mode="monitoring",
+                avg_cost=(fill.fill_price or None),
+            )
+            _audit.log(
+                event_type="MANAGED_EXIT_MONITORING_STARTED",
+                entity_type="position",
+                description=(
+                    f"{buy_req.symbol} BUY filled — no protective stop placed "
+                    f"(bot-managed exits): 60s engine monitors; exit only on "
+                    f"the bot's own trigger."
+                ),
+            )
+            logger.info(
+                "[exec] Protective stop skipped for %s — bot-managed exits "
+                "(no resting orders; engine monitors).", buy_req.symbol,
+            )
+            return
+
         settings = get_settings()
         if not settings.auto_protective_stop_enabled:
             return
@@ -722,6 +777,36 @@ class ExecutionService:
             )
             return False
 
+        # ── RED-HOLD GATE (bot-managed exits) ────────────────────────────────
+        # A SELL on a position that is RED (below FIFO cost) is held, not
+        # executed: the user reviews it manually; the 60s engine resumes the
+        # normal exit path when it turns green. Returning True means "handled —
+        # no order needed"; the CALLER must check managed_exit_state for
+        # mode == red_hold and leave the signal un-acted (so reconcile keeps
+        # re-evaluating it every cycle — the retry loop IS the green-flip path).
+        if self._managed_mode(symbol):
+            try:
+                from app.services.execution.managed_exit_engine import red_hold_check
+                with SessionLocal() as _db:
+                    held_red = red_hold_check(
+                        _db, symbol, current_price,
+                        signal_id=signal_id, signal_price=signal_price,
+                        source=source,
+                    )
+                if held_red:
+                    logger.info(
+                        "[exec] tighten_trail %s: position RED at SELL signal — "
+                        "holding for manual review (red_hold); no exit placed.",
+                        symbol,
+                    )
+                    return True
+            except Exception as exc:
+                # Fail-open: a gate error must not block the exit path.
+                logger.warning(
+                    "[exec] tighten_trail %s: red-hold check failed (%s) — "
+                    "continuing with normal exit path.", symbol, exc,
+                )
+
         # ── TRAIL WIDTH: assignment overrides ATR ────────────────────────────
         # When the caller passed an explicit per-assignment tight_trail_pct we use
         # it verbatim (the user tuned it deliberately). Only when it's unset
@@ -767,6 +852,10 @@ class ExecutionService:
                 "[exec] tighten_trail %s: SELL pending arm — current $%.2f < arm gate "
                 "$%.2f (signal $%.2f + %.2f%%). Riding momentum; re-check next cycle.",
                 symbol, current_price, arm_gate, signal_price, floor_buffer_pct,
+            )
+            self._persist_managed_state(
+                symbol, mode="pending_arm", signal_id=signal_id,
+                signal_price=signal_price, floor=round(signal_price, 2) or None,
             )
             return True
         if already_armed and current_price < arm_gate:
@@ -988,6 +1077,7 @@ class ExecutionService:
                 )
                 if confirmed and confirmed.status in ("filled", "partial"):
                     self._handle_fill(ex_order.id, confirmed)
+                self._persist_managed_state(symbol, mode="exited")
                 logger.info(
                     "[exec] tighten_trail %s: market exit placed (trail hit) "
                     "broker_id=%s status=%s", symbol, resp.broker_order_id,
@@ -1000,6 +1090,52 @@ class ExecutionService:
                     "POSITION STILL OPEN. Investigate manually.", symbol, exc,
                 )
                 return False
+
+        # ── BOT-MANAGED MODE: track the trail in software, rest NOTHING ─────
+        # The whole point of managed exits: no order sits at the broker for a
+        # fear-sweep to trigger. Persist the freshly-computed target so the 60s
+        # fast-trail loop keeps re-evaluating it (the trail-hit branch above is
+        # the only executor), and cancel any stray resting protective SELLs —
+        # each one is sweep risk (pre-migration leftovers, manual stops).
+        if self._managed_mode(symbol):
+            self._persist_managed_state(
+                symbol,
+                mode="trail_armed",
+                signal_id=signal_id,
+                signal_price=signal_price,
+                trail_pct=trail_pct,
+                floor=floor,
+                target_stop=target_stop,
+            )
+            for o in resting_sell_stops:
+                try:
+                    await self.broker.cancel_order(o.broker_order_id, account_id)
+                    _audit.log(
+                        event_type="MANAGED_EXIT_STRAY_CANCELLED",
+                        entity_type="order",
+                        description=(
+                            f"Cancelled resting {getattr(o, 'order_type', 'stop')} "
+                            f"on {symbol} (broker_id={o.broker_order_id}) — "
+                            f"bot-managed exits rest no protective orders."
+                        ),
+                    )
+                    logger.info(
+                        "[exec] tighten_trail %s: cancelled stray resting %s "
+                        "(managed mode rests no orders).",
+                        symbol, getattr(o, "order_type", "stop"),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[exec] tighten_trail %s: could not cancel stray %s (%s) — "
+                        "will retry next cycle.",
+                        symbol, getattr(o, "order_type", "stop"), exc,
+                    )
+            logger.info(
+                "[exec] tighten_trail %s: software trail @ $%.2f = max(trail $%.2f, "
+                "floor $%.2f) — no resting order (bot-managed); 60s loop watches.",
+                symbol, target_stop, trail_level, floor,
+            )
+            return True
 
         # NATIVE HANDOFF DECISION. Hand off to a broker-native TRAILING_STOP only
         # when BOTH hold:

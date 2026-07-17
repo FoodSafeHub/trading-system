@@ -53,11 +53,13 @@ def get_db():
 def init_db() -> None:
     """Create all tables. Called once at startup."""
     from app.models import (  # noqa: F401 — import models so metadata is populated
+        analyst_ratings,
         assignments,
         audit,
         broker_tokens,
         error_logs,
         executions,
+        managed_exit_state,
         notifications,
         orders,
         positions,

@@ -161,6 +161,14 @@ class OpenTrailOut(BaseModel):
     peak_price: Optional[float] = None
     peak_at: Optional[datetime] = None
 
+    # Bot-managed exits (managed_exit_state): mode is monitoring/pending_arm/
+    # trail_armed/red_hold when the position is protected by the 60s software
+    # engine INSTEAD of a resting broker order. red_hold = SELL fired while
+    # the position was below cost; held for manual review until green.
+    managed_mode: Optional[str] = None
+    red_hold_since: Optional[datetime] = None
+    last_alert_level: Optional[float] = None
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -855,11 +863,33 @@ def pnl_open_trails(db: Session = Depends(get_db)):
     except Exception:
         trail_peak_by_symbol = {}
 
+    # Bot-managed exit state (no resting order by design when active).
+    managed_by_symbol: dict[str, object] = {}
+    try:
+        from app.models.managed_exit_state import ManagedExitState
+        if symbols:
+            for ms in (
+                db.query(ManagedExitState)
+                .filter(
+                    ManagedExitState.symbol.in_([s.upper() for s in symbols]),
+                    ManagedExitState.mode != "exited",
+                )
+                .all()
+            ):
+                managed_by_symbol[ms.symbol.upper()] = ms
+    except Exception:
+        managed_by_symbol = {}
+
     # Show held positions whose ASSIGNED strategy fired a SELL after acquisition
     # (whether or not a trail is currently resting), PLUS any symbol that already
-    # has a resting trail order in the DB or on the broker.
+    # has a resting trail order in the DB or on the broker, PLUS bot-managed
+    # positions with an active software trail / red-hold.
     sell_signal_symbols = set(fallback_sig.keys())
-    armed_symbols = set(db_by_symbol) | set(broker_stops) | sell_signal_symbols
+    armed_symbols = (
+        set(db_by_symbol) | set(broker_stops) | sell_signal_symbols
+        | {s for s, ms in managed_by_symbol.items()
+           if getattr(ms, "mode", None) in ("trail_armed", "red_hold", "pending_arm")}
+    )
 
     now = datetime.utcnow()
     out: list[OpenTrailOut] = []
@@ -893,6 +923,17 @@ def pnl_open_trails(db: Session = Depends(get_db)):
             # Signal fired but no resting trail order found in DB or on broker.
             order_type = "SIGNAL_ONLY"
             stop_price = trail_pct = armed_at = None
+
+        # Bot-managed overlay: with managed exits ON there is deliberately no
+        # resting order — the software trail in managed_exit_state IS the
+        # protection. Surface its target so the row reads armed, not naked.
+        ms = managed_by_symbol.get(sym)
+        if ms is not None and order_type == "SIGNAL_ONLY":
+            order_type = "BOT_MANAGED"
+            if getattr(ms, "target_stop", None):
+                stop_price = float(ms.target_stop)
+            if trail_pct is None and getattr(ms, "trail_pct", None):
+                trail_pct = float(ms.trail_pct)
 
         # Signal price/time/strategy ALWAYS come from the FIRST SELL signal
         # fired after the position opened (the anchor the user cares about),
@@ -973,6 +1014,9 @@ def pnl_open_trails(db: Session = Depends(get_db)):
             est_trail_trigger=est_trail_trigger,
             peak_price=peak_price,
             peak_at=peak_at,
+            managed_mode=getattr(ms, "mode", None) if ms is not None else None,
+            red_hold_since=getattr(ms, "red_hold_since", None) if ms is not None else None,
+            last_alert_level=getattr(ms, "last_alert_level", None) if ms is not None else None,
         ))
 
     out.sort(key=lambda r: (r.move_since_signal_pct or -999), reverse=True)

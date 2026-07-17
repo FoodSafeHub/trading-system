@@ -391,12 +391,22 @@ if not _armed:
         "This populates when an assigned strategy fires a SELL on a position you hold."
     )
 else:
-    # Protection split — surface unprotected positions loudly.
-    _n_armed = sum(1 for r in _armed if r.get("order_type") in ("STOP", "TRAILING_STOP"))
-    _n_unarmed = len(_armed) - _n_armed
+    # Protection split — surface unprotected positions loudly. A BOT_MANAGED
+    # row (managed exits on) is protected BY DESIGN with no resting order:
+    # the 60s engine watches the software trail and market-sells on trigger.
+    def _r_protected(r) -> bool:
+        return (
+            r.get("order_type") in ("STOP", "TRAILING_STOP")
+            or (r.get("order_type") == "BOT_MANAGED"
+                and r.get("managed_mode") != "red_hold")
+        )
+
+    _red_holds = [r for r in _armed if r.get("managed_mode") == "red_hold"]
+    _n_armed = sum(1 for r in _armed if _r_protected(r))
+    _n_unarmed = len(_armed) - _n_armed - len(_red_holds)
     if _n_unarmed:
         _syms = ", ".join(r["symbol"] for r in _armed
-                          if r.get("order_type") not in ("STOP", "TRAILING_STOP"))
+                          if not _r_protected(r) and r.get("managed_mode") != "red_hold")
         st.warning(
             f"⚠️ **{_n_unarmed} position(s) NOT protected:** {_syms}. "
             "A SELL signal fired but no trailing stop is resting on the broker yet, so "
@@ -404,6 +414,24 @@ else:
             "cycle (every 15 min, market hours) — restart the API server if it hasn't picked "
             "up the latest code. The 'Trail trigger' below is only an estimate until armed.",
             icon="⚠️",
+        )
+    if _red_holds:
+        _rh_lines = []
+        for r in _red_holds:
+            _cost = r.get("avg_cost")
+            _last = r.get("last_price")
+            _since = str(r.get("red_hold_since") or "")[:10]
+            _dd = ""
+            if _cost and _last:
+                _dd = f" ({(float(_last)/float(_cost)-1)*100:+.1f}% vs cost)"
+            _rh_lines.append(f"**{r['symbol']}**{_dd}{f' · held since {_since}' if _since else ''}")
+        st.error(
+            "🟠 **Red-hold — SELL signal fired while below cost:** "
+            + " · ".join(_rh_lines)
+            + ". The bot is holding these for YOUR review instead of realizing the loss; "
+            "it resumes the normal exit automatically when the position turns green. "
+            "Sell manually in the broker app if you'd rather exit now.",
+            icon="🟠",
         )
 
     _n_help = sum(1 for r in _armed if r.get("trail_helping") is True)
@@ -436,6 +464,15 @@ else:
 
     def _protection(row) -> str:
         ot = row.get("order_type")
+        mm = row.get("managed_mode")
+        if ot == "BOT_MANAGED" or mm in ("trail_armed", "pending_arm", "red_hold"):
+            # Managed exits: nothing rests at the broker BY DESIGN (nothing
+            # for a fear-sweep to trigger); the 60s engine owns the exit.
+            if mm == "red_hold":
+                return "🟠 RED-HOLD (below cost · manual review)"
+            if mm == "pending_arm":
+                return "🟡 ARMED (bot · pending arm gate)"
+            return "🟢 ARMED (bot · no resting order)"
         if ot == "TRAILING_STOP":
             return "🟢 ARMED (broker trails)"
         if ot == "STOP":
@@ -454,6 +491,12 @@ else:
             return f"{float(row['trail_pct']):.1f}% trail (live)"
         if ot == "STOP" and row.get("stop_price") is not None:
             return f"{_money_at(row, 'stop_price')} (live)"
+        # Bot-managed software trail — the 60s engine market-sells at this
+        # level; no broker order rests (by design).
+        if ot == "BOT_MANAGED":
+            if row.get("stop_price") is not None:
+                return f"{_money_at(row, 'stop_price')} (bot watches · 60s)"
+            return "— bot monitoring (no SELL trigger yet)"
         # No order resting → estimate only, clearly NOT protecting.
         if ot == "SIGNAL_ONLY":
             est = row.get("est_trail_trigger")
